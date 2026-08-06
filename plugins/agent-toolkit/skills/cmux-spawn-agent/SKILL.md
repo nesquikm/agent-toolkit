@@ -34,18 +34,25 @@ what the user is already reading, so a whole run adds at most one:
 
 Three verified behaviours decide how you place them:
 
-- **`new-pane` has no target flag — it splits whatever pane is focused.** It will
-  cheerfully cut an unrelated pane in half while you sit somewhere else. Split
-  with `new-split <dir> --surface "$CMUX_SURFACE_ID"`, which is anchored on the
-  caller, and note it prints `OK surface:N workspace:N` — **no pane ref**, so
-  resolve the pane from the surface afterwards.
+- **`new-pane` cannot be aimed at a pane.** It does take `--workspace`, `--window`,
+  `--placement` and `--direction`, so "no target flag" is too strong — what it
+  lacks is any *pane or surface* target, which means it splits whatever pane is
+  focused inside the workspace it lands in. It will cheerfully cut an unrelated
+  pane in half while you sit somewhere else. Split with
+  `new-split <dir> --surface "$CMUX_SURFACE_ID"`, which is anchored on the caller,
+  and note it prints `OK surface:N workspace:N` — **no pane ref**, so resolve the
+  pane from the surface afterwards.
 - In the **visible** workspace a new surface becomes its pane's selected tab.
-  `--focus false` keeps the keyboard where it is; it does not stop that tab
-  switch. So never spawn into the caller's own pane — the worker would cover the
-  session the user is talking to.
-- `--pane`, like `--workspace`, defaults to whatever is **focused**, and an empty
-  value does not error. A shell variable that came out blank silently retargets
-  the command at the user. Pass both explicitly and check them.
+  `--focus` already defaults to `false`; passing it explicitly documents intent but
+  changes nothing, and it does **not** stop that tab switch either way. So never
+  spawn into the caller's own pane — the worker would cover the session the user is
+  talking to.
+- **`--workspace` defaults to `$CMUX_WORKSPACE_ID`, not to what is focused**
+  (`cmux new-surface --help`); `--pane` documents no default at all. So the risk is
+  not that these track the user's focus — it is that a shell variable which came out
+  blank hands the command an empty value and lets it fall back to its own default,
+  which for `--pane` is unspecified. Pass both explicitly and check they are
+  non-empty before using them.
 
 Never reach for `focus-pane` or `focus-panel` to tidy up afterwards — they steal
 the user's keyboard mid-keystroke. Place the surface correctly instead.
@@ -53,10 +60,14 @@ the user's keyboard mid-keystroke. Place the surface correctly instead.
 ## Anchor on yourself
 
 ```bash
-# Refuse rather than guess.
-[ -n "$CMUX_WORKSPACE_ID" ] || { echo "not in a cmux terminal; not spawning" >&2; exit 1; }
+# Refuse rather than guess. BOTH ids, not just the workspace: every placement below
+# passes --surface "$CMUX_SURFACE_ID", and the ledger is keyed by it.
+[ -n "$CMUX_WORKSPACE_ID" ] && [ -n "$CMUX_SURFACE_ID" ] || {
+  echo "not in a cmux terminal (need CMUX_WORKSPACE_ID and CMUX_SURFACE_ID); not spawning" >&2
+  exit 1
+}
 WS="$CMUX_WORKSPACE_ID"
-LEDGER="${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID:-unknown}.tsv"
+LEDGER="${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
 mkdir -p "$(dirname "$LEDGER")"
 
 # One lookup, both directions: ref -> uuid, uuid -> ref, plus pane_ref/pane_id/tty/title.
@@ -75,16 +86,24 @@ s=walk(json.load(sys.stdin)["windows"]); print(s.get(field,"") if s else "")' "$
 ```
 
 The ledger is keyed by the caller's surface, so it is exactly "the agents this
-run spawned" — the only surfaces you are ever allowed to close.
+run spawned" — the only surfaces you are ever allowed to close. That key is why
+the guard above refuses on an empty `$CMUX_SURFACE_ID` rather than defaulting it:
+a shared `unknown.tsv` would merge two runs' ledgers, and the cleanup section
+would then offer you another run's surfaces to close.
 
 ## Spawn one agent
 
 ```bash
 # Reuse this run's agents pane. UUIDs are the durable key; refs are per-call.
-PANE_UUID=$(awk -F'\t' 'END{print $3}' "$LEDGER" 2>/dev/null)
-PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c \
-  'import json,sys; print(next((p["ref"] for p in json.load(sys.stdin)["panes"] if p["id"]==sys.argv[1]),""))' \
-  "${PANE_UUID:-none}")
+# Every distinct pane this run owns, newest first -- not just the last row's. If the
+# newest worker's tab was closed and it was that pane's last surface, the tail row
+# names a dead pane, and splitting again would break "one split per run". First live
+# candidate wins; empty means this run owns no live pane yet.
+PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
+import json,sys
+live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
+print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
+  $(awk -F'\t' 'NF>=3 && $3!=""{a[++n]=$3} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
 
 if [ -n "$PANE" ]; then          # tab into the pane this run already owns
   SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
@@ -150,10 +169,12 @@ as a one-agent run:
 
 ```bash
 for name in audit-api audit-web audit-jobs; do
-  PANE_UUID=$(awk -F'\t' 'END{print $3}' "$LEDGER" 2>/dev/null)          # same reuse test
-  PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c \
-    'import json,sys; print(next((p["ref"] for p in json.load(sys.stdin)["panes"] if p["id"]==sys.argv[1]),""))' \
-    "${PANE_UUID:-none}")
+  # Same live-pane scan as above: first candidate that still exists wins.
+  PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
+import json,sys
+live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
+print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
+    $(awk -F'\t' 'NF>=3 && $3!=""{a[++n]=$3} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
   if [ -n "$PANE" ]; then
     SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
              | grep -o 'surface:[0-9]*')

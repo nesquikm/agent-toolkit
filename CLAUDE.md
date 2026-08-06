@@ -78,16 +78,30 @@ files:
     kind: changelog
   - path: README.md
     kind: regex
-    pattern: 'Latest: \*\*v(?<version>\d+\.\d+\.\d+) — "(?<codename>[^"]+)"\*\* \((?<summary>.*)\)'
+    pattern: '(?m)^Latest: \*\*v(?P<version>\d+\.\d+\.\d+) — "(?P<codename>[^"]+)"\*\* \((?P<summary>.*)\)$'
     replace: 'Latest: **v{version} — "{codename}"** ({summary})'
 ```
 
-The README pattern deliberately spans the **whole** line, not just the digits. An
-earlier version captured only `(?<version>…)`, which meant a release bumped the
-number and left the codename and one-line summary describing the *previous*
-release — a README that quietly claimed the new version shipped the old version's
-contents. A `regex` entry must capture every field that goes stale, not only the
-one that is obviously a version.
+Three properties of that pattern are load-bearing, and each replaces a version that
+was wrong:
+
+- **Python `re` syntax — `(?P<name>…)`, not `(?<name>…)`.** `python3` is this repo's
+  only scripting dependency, and it is what a release will reach for. Python rejects
+  the .NET/JS spelling outright (`re.error: unknown extension ?<v`), so a pattern
+  written that way cannot be executed at all — and step 3's "if it does not match,
+  stop" turns that into a *refused* release rather than a visibly broken one.
+- **Anchored `^…$` under `(?m)`.** Without anchors, the greedy `(?P<summary>.*)` runs
+  to the last `)` anywhere on the line, so any text following the summary is captured
+  and then silently dropped by the rewrite. It matched, so nothing refused — a false
+  document produced quietly. The anchors make "something follows the summary" a
+  non-match, which step 3 does refuse.
+- **It captures every field that goes stale, not just the digits.** An earlier version
+  captured only the version, so a release bumped the number and left the codename and
+  summary describing the *previous* release.
+
+Values come from step 2 of `/release`: `version` from the bump, `codename` from the
+release, and `summary` newly written to describe *this* release — it is authored, not
+carried over from the captured group.
 
 The plugin version and the marketplace entry's version must always agree — `claude plugin validate .` fails when they drift.
 
