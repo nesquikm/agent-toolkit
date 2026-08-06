@@ -34,18 +34,25 @@ what the user is already reading, so a whole run adds at most one:
 
 Three verified behaviours decide how you place them:
 
-- **`new-pane` has no target flag — it splits whatever pane is focused.** It will
-  cheerfully cut an unrelated pane in half while you sit somewhere else. Split
-  with `new-split <dir> --surface "$CMUX_SURFACE_ID"`, which is anchored on the
-  caller, and note it prints `OK surface:N workspace:N` — **no pane ref**, so
-  resolve the pane from the surface afterwards.
+- **`new-pane` cannot be aimed at a pane.** It does take `--workspace`, `--window`,
+  `--placement` and `--direction`, so "no target flag" is too strong — what it
+  lacks is any *pane or surface* target, which means it splits whatever pane is
+  focused inside the workspace it lands in. It will cheerfully cut an unrelated
+  pane in half while you sit somewhere else. Split with
+  `new-split <dir> --surface "$CMUX_SURFACE_ID"`, which is anchored on the caller,
+  and note it prints `OK surface:N workspace:N` — **no pane ref**, so resolve the
+  pane from the surface afterwards.
 - In the **visible** workspace a new surface becomes its pane's selected tab.
-  `--focus false` keeps the keyboard where it is; it does not stop that tab
-  switch. So never spawn into the caller's own pane — the worker would cover the
-  session the user is talking to.
-- `--pane`, like `--workspace`, defaults to whatever is **focused**, and an empty
-  value does not error. A shell variable that came out blank silently retargets
-  the command at the user. Pass both explicitly and check them.
+  `--focus` already defaults to `false`; passing it explicitly documents intent but
+  changes nothing, and it does **not** stop that tab switch either way. So never
+  spawn into the caller's own pane — the worker would cover the session the user is
+  talking to.
+- **`--workspace` defaults to `$CMUX_WORKSPACE_ID`, not to what is focused**
+  (`cmux new-surface --help`); `--pane` documents no default at all. So the risk is
+  not that these track the user's focus — it is that a shell variable which came out
+  blank hands the command an empty value and lets it fall back to its own default,
+  which for `--pane` is unspecified. Pass both explicitly and check they are
+  non-empty before using them.
 
 Never reach for `focus-pane` or `focus-panel` to tidy up afterwards — they steal
 the user's keyboard mid-keystroke. Place the surface correctly instead.
@@ -53,10 +60,14 @@ the user's keyboard mid-keystroke. Place the surface correctly instead.
 ## Anchor on yourself
 
 ```bash
-# Refuse rather than guess.
-[ -n "$CMUX_WORKSPACE_ID" ] || { echo "not in a cmux terminal; not spawning" >&2; exit 1; }
+# Refuse rather than guess. BOTH ids, not just the workspace: every placement below
+# passes --surface "$CMUX_SURFACE_ID", and the ledger is keyed by it.
+[ -n "$CMUX_WORKSPACE_ID" ] && [ -n "$CMUX_SURFACE_ID" ] || {
+  echo "not in a cmux terminal (need CMUX_WORKSPACE_ID and CMUX_SURFACE_ID); not spawning" >&2
+  exit 1
+}
 WS="$CMUX_WORKSPACE_ID"
-LEDGER="${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID:-unknown}.tsv"
+LEDGER="${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
 mkdir -p "$(dirname "$LEDGER")"
 
 # One lookup, both directions: ref -> uuid, uuid -> ref, plus pane_ref/pane_id/tty/title.
@@ -75,16 +86,24 @@ s=walk(json.load(sys.stdin)["windows"]); print(s.get(field,"") if s else "")' "$
 ```
 
 The ledger is keyed by the caller's surface, so it is exactly "the agents this
-run spawned" — the only surfaces you are ever allowed to close.
+run spawned" — the only surfaces you are ever allowed to close. That key is why
+the guard above refuses on an empty `$CMUX_SURFACE_ID` rather than defaulting it:
+a shared `unknown.tsv` would merge two runs' ledgers, and the cleanup section
+would then offer you another run's surfaces to close.
 
 ## Spawn one agent
 
 ```bash
 # Reuse this run's agents pane. UUIDs are the durable key; refs are per-call.
-PANE_UUID=$(awk -F'\t' 'END{print $3}' "$LEDGER" 2>/dev/null)
-PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c \
-  'import json,sys; print(next((p["ref"] for p in json.load(sys.stdin)["panes"] if p["id"]==sys.argv[1]),""))' \
-  "${PANE_UUID:-none}")
+# Every distinct pane this run owns, newest first -- not just the last row's. If the
+# newest worker's tab was closed and it was that pane's last surface, the tail row
+# names a dead pane, and splitting again would break "one split per run". First live
+# candidate wins; empty means this run owns no live pane yet.
+PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
+import json,sys
+live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
+print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
+  $(awk -F'\t' 'NF>=3 && $3!=""{a[++n]=$3} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
 
 if [ -n "$PANE" ]; then          # tab into the pane this run already owns
   SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
@@ -101,7 +120,14 @@ SID=$(uuidgen | tr 'A-Z' 'a-z')
 cmux send --workspace "$WS" --surface "$SURF" "cd <repo> && claude --session-id $SID -n <name>\n"
 ```
 
-**`cd` is not optional.** A new terminal inherits the cwd of the pane it came
+**`cd` is not optional, and it is easy to drop** — it sits mid-string inside a
+longer `cmux send` line rather than standing on its own, so it goes missing without
+anything looking wrong. It is also self-concealing: a split off your own surface
+inherits *your* cwd, so if you happen to be in the right repo the omission passes
+silently and only misbehaves when you aren't. Read the launch line back before
+sending it, and check `claude agents --json`'s `cwd` afterwards.
+
+A new terminal inherits the cwd of the pane it came
 from, not the workspace's directory — split off the caller and you get the
 caller's cwd; split off something else and you get *its* cwd (a probe launched
 from one repo came up in an unrelated scratch directory that way). Never rely on
@@ -150,10 +176,12 @@ as a one-agent run:
 
 ```bash
 for name in audit-api audit-web audit-jobs; do
-  PANE_UUID=$(awk -F'\t' 'END{print $3}' "$LEDGER" 2>/dev/null)          # same reuse test
-  PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c \
-    'import json,sys; print(next((p["ref"] for p in json.load(sys.stdin)["panes"] if p["id"]==sys.argv[1]),""))' \
-    "${PANE_UUID:-none}")
+  # Same live-pane scan as above: first candidate that still exists wins.
+  PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
+import json,sys
+live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
+print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
+    $(awk -F'\t' 'NF>=3 && $3!=""{a[++n]=$3} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
   if [ -n "$PANE" ]; then
     SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
              | grep -o 'surface:[0-9]*')
@@ -205,14 +233,26 @@ hooks, so there is nothing to install. `agent.hook.Stop` carries
 `payload.session_id` as `claude-<the id you assigned at spawn>` — which is the
 whole reason for assigning that id.
 
-Arm **one** `Monitor` right after the first spawn. It covers every worker in the
-run, including ones spawned later, because the filter re-reads the ledger when it
-changes:
+Arm **one** `Monitor` right after the first spawn — always, including for a run of
+exactly one worker. It covers every worker in the run, including ones spawned
+later, because the filter re-reads the ledger when it changes:
 
 ```bash
 cmux events --category agent --no-heartbeat --reconnect \
-| python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" "$LEDGER"
+| python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" \
+    "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
 ```
+
+**That last line spells the ledger path out on purpose — do not shorten it to
+`"$LEDGER"`.** `Monitor` runs this in a shell of its own, which never saw the
+assignment you made in some earlier `Bash` call. `$LEDGER` there expands to the
+empty string, the watcher `stat`s nothing, its ledger reads as zero rows, and every
+worker is filtered out as unknown. You get a watcher that runs happily and reports
+nothing — indistinguishable from a run where nothing has finished yet, and the same
+silent-deafness failure the timestamp fallback exists to prevent.
+
+`TMPDIR` and `CMUX_SURFACE_ID` *are* in that shell's environment, which is why the
+expanded form is safe where the variable is not.
 
 That path is substituted when this skill loads, so by the time you read it it is
 already an absolute path to this plugin's own copy of the watcher — run it as
@@ -243,17 +283,23 @@ them away:
   lengths. The event is the trigger; `cmux list-notifications` is still how you
   read what it actually said.
 
-For a **single** worker, skip the Monitor — a backgrounded command that exits on
-completion gives you exactly one notification:
+**There is no lighter option for one worker.** A backgrounded
+`cmux events --name agent.hook.Stop … | grep -m1 "claude-$SID"` looks like it
+gives you the single notification you need, and it is wrong twice over:
 
-```bash
-# run backgrounded; exits on the first Stop from this worker
-cmux events --category agent --name agent.hook.Stop --reconnect | grep -m1 "claude-$SID"
-```
+- **It can only see turn *ends*.** `PermissionRequest` and `SessionEnd` are not
+  `Stop`, so a worker blocked on an approval prompt and a worker that died are
+  both indistinguishable from one still working. You wait, it waits, nothing
+  reports. The three-way `DONE`/`ATTN`/`EXIT` split is the entire point of the
+  filter, and this throws it away to save one process.
+- **`grep -m1` does not reliably end the pipeline.** It stops reading at the
+  match, but `cmux events` only learns that on its *next* write, so the command
+  can sit there matched-but-not-exited — and a completion notification that
+  depends on the command exiting never fires. Observed: the match sat in the
+  output file while the run went silently unreported.
 
-Keep heartbeats **on** for that one: `grep -m1` only unblocks when the next line
-arrives, and the 15 s heartbeat guarantees one, so the pipeline cannot wedge on a
-quiet bus.
+One worker still gets one `Monitor` and the filter above. A one-row ledger is a
+valid ledger.
 
 ### Poll — only when you need the answer inside this turn
 
@@ -315,9 +361,16 @@ else:
   breaks on "any new id" will report a stage that is still running. Rebase your
   cursor on it and keep waiting, as above.
 
+**A worker's input box may show text nobody typed.** `read-screen` renders Claude
+Code's suggested-follow-up ghost text in the prompt exactly like real input, so a
+supervisor falling back to the screen can read it as a pending user message, or as
+unsent input it ought to clear. It is neither: it is a suggestion, and sending
+`enter` would submit it. Judge from the transcript or the event, and treat prompt
+contents as decoration.
+
 **`Waiting` on its own is still ambiguous** — a finished agent and one parked on
 a prompt both reach it, and `claude agents` says `idle` either way. When it
-matters, read the screen (`cmux read-screen --surface <ref>`) or the transcript
+matters, read the screen (`cmux read-screen --workspace "$WS" --surface <ref>`) or the transcript
 rather than guessing from the event.
 
 ## Chain stages
@@ -397,6 +450,11 @@ cmux close-surface --workspace "$WS" --surface "$ref"
 
 - The pane disappears on its own when its last surface closes. There is no
   `close-pane`, and nothing is left to tidy once the tabs are gone.
+- **The `OK surface:N` it prints back is not the surface you closed.** Refs are
+  re-enumerated on every call, so closing `surface:44` can answer `OK surface:45`.
+  Nothing went wrong and no other tab was touched — but read literally it looks like
+  you just closed a stranger's tab. Confirm by resolving the UUID
+  (`surf_field "$su" ref` returns empty once it is gone), never by reading that ref.
 - Closing a tab with siblings left re-selects the previously visible one and
   moves no focus. Closing the **last** one collapses the pane, and focus lands on
   the pane it was split off from — yours. Harmless, but say so when you offer, in
@@ -418,8 +476,16 @@ agent from an earlier session.
 - Anchor placement on `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID`, never on what
   is focused — the user may be looking elsewhere. Pass `--focus false`.
 - One split per run, at most. Every agent after the first is a tab.
-- **Arm the watcher at the first spawn, before sending any task.** A poll loop
-  dies with the turn; a run that outlives it is a run nobody is watching.
+- **Arm the watcher at the first spawn, before sending any task** — one `Monitor`
+  running `watch-workers.py` against the ledger, for one worker or for ten. A poll
+  loop dies with the turn; a run that outlives it is a run nobody is watching. Any
+  hand-rolled substitute that greps the bus directly is blind to `ATTN` and `EXIT`,
+  which is to say blind to every way a run fails.
+- **The ledger is on disk**, at
+  `${TMPDIR:-/tmp}/cmux-spawn-agent/<caller surface id>.tsv` — keyed by the
+  caller's surface, so it is exactly this run's spawns and nothing else. That is
+  what lets a turn which remembers nothing still answer what it owes and what it
+  may close.
 - Report each stage's outcome as it lands; don't go silent for a long pipeline.
   Mark the ledger row `reported` when you do, so an interrupted run can still
   answer what it owes.

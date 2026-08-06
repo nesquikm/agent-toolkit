@@ -17,6 +17,7 @@ armed are picked up without restarting it.
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 LEDGER = sys.argv[1]
@@ -55,10 +56,22 @@ def rows():
 
 
 def ts(s):
+    """Event time in epoch seconds, falling back to arrival time.
+
+    The fallback must stay on the same scale as the parsed value, because both
+    land in `last` and are subtracted from each other -- so time.time(), not
+    time.monotonic().
+
+    Returning a constant here (as this did) is not a degraded mode, it is total
+    deafness: `when - last.get(key, 0.0)` becomes 0.0 - 0.0 for the first event
+    of every key, which is < 5.0, so the collapse window swallows it and every
+    event after it. A watcher that reports nothing looks exactly like a run with
+    nothing to report.
+    """
     try:
         return datetime.fromisoformat((s or "").replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return 0.0
+    except (ValueError, TypeError):
+        return time.time()
 
 
 last = {}
