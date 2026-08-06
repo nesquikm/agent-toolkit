@@ -214,11 +214,11 @@ cmux events --category agent --no-heartbeat --reconnect \
 | python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" "$LEDGER"
 ```
 
-`${CLAUDE_PLUGIN_ROOT}` is exported for skills that ship inside a plugin and
-resolves to this plugin's installed root, so that path is correct wherever the
-plugin was installed from. If the variable is empty — the skill was copied into a
-plain skills directory rather than installed as a plugin — substitute the base
-directory printed when this skill loads.
+That path is substituted when this skill loads, so by the time you read it it is
+already an absolute path to this plugin's own copy of the watcher — run it as
+written rather than searching for the file. It is **not** an environment variable
+at that point: `echo "$CLAUDE_PLUGIN_ROOT"` from a shell prints nothing, so never
+build the path yourself from that variable.
 
 Each output line becomes a chat notification that re-invokes you:
 
