@@ -67,8 +67,16 @@ the user's keyboard mid-keystroke. Place the surface correctly instead.
   exit 1
 }
 WS="$CMUX_WORKSPACE_ID"
+
+# The repo every worker will be launched into. Guard it exactly like the ids above:
+# the cd is the single most-dropped part of the launch line, and an unset REPO must
+# fail loudly here rather than silently landing workers in the caller's cwd.
+REPO="<the repo you were asked to work in>"
+[ -d "$REPO/.git" ] || { echo "REPO is not a git checkout: '$REPO'; not spawning" >&2; exit 1; }
+
 LEDGER="${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
 mkdir -p "$(dirname "$LEDGER")"
+touch "$LEDGER"   # so the first run's awk/wc don't print "no such file" to stderr
 
 # One lookup, both directions: ref -> uuid, uuid -> ref, plus pane_ref/pane_id/tty/title.
 # Empty output means that surface no longer exists.
@@ -117,7 +125,7 @@ PANE=$(surf_field "$SURF" pane_ref)
 SURF_UUID=$(surf_field "$SURF" id)   # notifications are keyed by the UUID, never by surface:N
 
 SID=$(uuidgen | tr 'A-Z' 'a-z')
-cmux send --workspace "$WS" --surface "$SURF" "cd <repo> && claude --session-id $SID -n <name>\n"
+cmux send --workspace "$WS" --surface "$SURF" "cd $REPO && claude --session-id $SID -n <name>\n"
 ```
 
 **`cd` is not optional, and it is easy to drop** — it sits mid-string inside a
@@ -191,7 +199,7 @@ print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
   fi
   [ -n "$SURF" ] || { echo "no surface for $name" >&2; continue; }
   SID=$(uuidgen | tr 'A-Z' 'a-z')
-  cmux send --workspace "$WS" --surface "$SURF" "cd <repo> && claude --session-id $SID -n $name\n"
+  cmux send --workspace "$WS" --surface "$SURF" "cd $REPO && claude --session-id $SID -n $name\n"
   printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$(surf_field "$SURF" id)" "$(surf_field "$SURF" pane_id)" "$name" spawned >> "$LEDGER"
 done
 ```
@@ -471,30 +479,48 @@ Only ever propose surfaces from this run's ledger. A tab you did not spawn is th
 user's, however idle it looks — leave it alone even when it is obviously a dead
 agent from an earlier session.
 
-### Stop your watcher — it does not stop itself
+### Finish the run — four steps, in this order
 
-Closing the surfaces is not the end of the run. A `Monitor` armed with
-`persistent: true` runs until `TaskStop` or the end of the session that armed it —
-and **if you are yourself a spawned agent, your session ending does not reap it**.
-Observed: an agent finished, its surface was closed, and its watcher was still
-streaming the global event bus minutes later, its ledger long since deleted.
+Closing the surfaces is not the end. The watcher is a *process*, and a `Monitor`
+armed with `persistent: true` runs until `TaskStop` or the end of the session that
+armed it — and **if you are yourself a spawned agent, your session ending does not
+reap it.** Observed: an agent finished, its surface was closed, and its watcher was
+still streaming the global event bus.
 
-So the last step of any run that armed one is:
+Do these in order. The order matters: stopping the watcher before deleting the ledger
+leaves a window where a late event names a worker you have already reported.
+
+1. **Close each surface** you spawned, as above — resolving by UUID, never by the
+   `OK surface:N` echo.
+2. **Delete the ledger file**, not just its rows:
+   `rm -f "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"`. This is the
+   belt-and-braces step — a watcher that somehow survives with no ledger matches no
+   session id and reports nothing, so it is inert rather than wrong.
+3. **`TaskStop` the monitor** by the task id you were given when you armed it.
+4. **Confirm nothing of yours is left**, scoped to your own surface:
 
 ```bash
-# TaskStop the monitor by the task id you were given when you armed it.
-# Then confirm nothing of yours is left behind:
-pgrep -fl watch-workers.py
+pgrep -fl "watch-workers.py.*${CMUX_SURFACE_ID}"
 ```
 
-Every surviving line is an orphan: a process tailing a global bus on behalf of a run
-that no longer exists. Kill only your own — another live run's watcher looks exactly
-the same in `pgrep`, and the ledger path in its command line is what tells them
-apart.
+**Scope that `pgrep` — do not run it bare.** `pgrep -fl watch-workers.py` lists every
+watcher on the machine, including live ones belonging to other sessions and other
+projects, wrapped in 400-character zsh preambles you then have to read. That is not a
+check, it is an invitation to kill someone else's run: an agent doing exactly this
+reported two healthy watchers as orphans — one of them its own supervisor's. Scoped to
+`$CMUX_SURFACE_ID` the answer is yes-or-no and cannot implicate anyone else.
 
-Prune the ledger file itself too, not just its rows — a deleted ledger is what makes
-a stray watcher harmless if one does survive, because a watcher whose ledger is gone
-matches no session id and reports nothing.
+If a line does come back after `TaskStop`, it is yours and it is stuck:
+
+```bash
+pkill -f "watch-workers.py.*${CMUX_SURFACE_ID}"
+```
+
+**Never reap a watcher you cannot prove is dead.** A watcher is a true orphan only if
+the `claude` process that armed it is gone — check with
+`ps -o ppid= -p <pid>` and see whether that parent still exists. A live session's
+watcher looks identical in `pgrep` and killing it silences a run that is still going,
+which is the one failure this whole section exists to prevent.
 
 ## Rules
 
