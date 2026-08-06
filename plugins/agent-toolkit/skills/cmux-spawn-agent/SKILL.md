@@ -205,9 +205,9 @@ hooks, so there is nothing to install. `agent.hook.Stop` carries
 `payload.session_id` as `claude-<the id you assigned at spawn>` — which is the
 whole reason for assigning that id.
 
-Arm **one** `Monitor` right after the first spawn. It covers every worker in the
-run, including ones spawned later, because the filter re-reads the ledger when it
-changes:
+Arm **one** `Monitor` right after the first spawn — always, including for a run of
+exactly one worker. It covers every worker in the run, including ones spawned
+later, because the filter re-reads the ledger when it changes:
 
 ```bash
 cmux events --category agent --no-heartbeat --reconnect \
@@ -243,17 +243,23 @@ them away:
   lengths. The event is the trigger; `cmux list-notifications` is still how you
   read what it actually said.
 
-For a **single** worker, skip the Monitor — a backgrounded command that exits on
-completion gives you exactly one notification:
+**There is no lighter option for one worker.** A backgrounded
+`cmux events --name agent.hook.Stop … | grep -m1 "claude-$SID"` looks like it
+gives you the single notification you need, and it is wrong twice over:
 
-```bash
-# run backgrounded; exits on the first Stop from this worker
-cmux events --category agent --name agent.hook.Stop --reconnect | grep -m1 "claude-$SID"
-```
+- **It can only see turn *ends*.** `PermissionRequest` and `SessionEnd` are not
+  `Stop`, so a worker blocked on an approval prompt and a worker that died are
+  both indistinguishable from one still working. You wait, it waits, nothing
+  reports. The three-way `DONE`/`ATTN`/`EXIT` split is the entire point of the
+  filter, and this throws it away to save one process.
+- **`grep -m1` does not reliably end the pipeline.** It stops reading at the
+  match, but `cmux events` only learns that on its *next* write, so the command
+  can sit there matched-but-not-exited — and a completion notification that
+  depends on the command exiting never fires. Observed: the match sat in the
+  output file while the run went silently unreported.
 
-Keep heartbeats **on** for that one: `grep -m1` only unblocks when the next line
-arrives, and the 15 s heartbeat guarantees one, so the pipeline cannot wedge on a
-quiet bus.
+One worker still gets one `Monitor` and the filter above. A one-row ledger is a
+valid ledger.
 
 ### Poll — only when you need the answer inside this turn
 
@@ -418,8 +424,11 @@ agent from an earlier session.
 - Anchor placement on `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID`, never on what
   is focused — the user may be looking elsewhere. Pass `--focus false`.
 - One split per run, at most. Every agent after the first is a tab.
-- **Arm the watcher at the first spawn, before sending any task.** A poll loop
-  dies with the turn; a run that outlives it is a run nobody is watching.
+- **Arm the watcher at the first spawn, before sending any task** — one `Monitor`
+  running `watch-workers.py` against the ledger, for one worker or for ten. A poll
+  loop dies with the turn; a run that outlives it is a run nobody is watching. Any
+  hand-rolled substitute that greps the bus directly is blind to `ATTN` and `EXIT`,
+  which is to say blind to every way a run fails.
 - **The ledger is on disk**, at
   `${TMPDIR:-/tmp}/cmux-spawn-agent/<caller surface id>.tsv` — keyed by the
   caller's surface, so it is exactly this run's spawns and nothing else. That is
