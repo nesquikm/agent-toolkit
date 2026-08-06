@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.1.4] — 2026-08-06 — "Sentry"
+
+The skill was smoke-tested end to end against live cmux surfaces for the first time. Every mechanism held — one split with three tabs inside it, `DONE`, `ATTN` and `EXIT` all observed on the wire, a worker spawned after the watcher was armed picked up from the reloaded ledger. What did not hold was the order the walkthrough puts them in: read top to bottom, it starts the work before anything is watching it.
+
+### Fixed
+
+- **The walkthrough never armed the watcher.** "Spawn one agent" ran from the ledger row straight to "only now send the task", and the `Monitor` appeared two sections later, under "Wait for a stage to finish" — a heading you reach only once the task is already running. The instruction to arm first existed solely in the Rules at the very bottom, so the body and the rules disagreed about the one step whose entire value is its timing. Arming is now a numbered part of the walkthrough, between the ledger write and the send, where the reader is already standing.
+- **Nothing said the watcher block is the `Monitor` tool.** It was presented as an ordinary shell pipeline, which makes `Bash(run_in_background: true)` look like the same thing done more cheaply. It is not: only a `Monitor`'s stdout lines become notifications, a backgrounded `Bash` notifies once *on exit*, and `--reconnect` guarantees this pipeline never exits. Every `DONE` then lands in an output file nobody reads while `pgrep` shows a perfectly healthy watcher — the same silent deafness the ledger-path and timestamp warnings already existed to prevent, arriving through the one door they left open.
+- **The registration wait was unbounded.** `until claude agents --json | grep -q "$SID"; do sleep 1; done` has no exit for a launch line that never started `claude` — a typo, or a `cd` into a directory whose profile lacks it. It does not fail, it spins until the harness SIGKILLs the whole call with the ledger row already written and the task never sent, which afterwards is indistinguishable from a worker that simply did nothing. It now gives up after 60s and says so.
+
 ## [0.1.3] — 2026-08-06 — "Scoped"
 
 Two guarantees from the last release turned out to be advice rather than mechanism. A warning you have just read does not stop you making the mistake, and a check that lists every process on the machine is not a check.
