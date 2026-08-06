@@ -157,12 +157,30 @@ only once you have actually told the user that worker's outcome. Then
 `awk -F'\t' '$5!="reported"' "$LEDGER"` is the answer to "what am I still owed?",
 and it is answerable at the start of any turn without remembering anything.
 
+**Arm the watcher now** — with that row on disk, and *before* the task is sent.
+It is the `Monitor` in "Push" below, one per run; that section has the exact
+command. Arming it here rather than once you start wondering how the worker is
+doing is the difference between a watcher and a post-mortem: a task sent to an
+unwatched worker is only ever observed if this turn happens to still be alive
+when it finishes, and the reason the push path exists is that it usually isn't.
+
 Then **wait for it to register** — that is the readiness signal, so don't guess a
 startup delay:
 
 ```bash
-until claude agents --json | grep -q "$SID"; do sleep 1; done
+n=0
+until claude agents --json | grep -q "$SID"; do
+  sleep 1
+  n=$((n+1))
+  [ "$n" -gt 60 ] && { echo "worker never registered: $SID" >&2; break; }
+done
 ```
+
+**Bound that loop.** Unbounded, a launch line that never started `claude` — a
+typo, or a `cd` into a directory whose profile lacks it — does not fail, it spins
+until the harness SIGKILLs the whole call (`exit 143`), with the ledger row
+already written and the task never sent. Afterwards that is indistinguishable
+from a worker that sat there and did nothing.
 
 Only now send the task. Send the text and the Enter separately:
 
@@ -250,6 +268,16 @@ cmux events --category agent --no-heartbeat --reconnect \
 | python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" \
     "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
 ```
+
+**That block is the `Monitor` tool's `command` — never a `Bash` call.** It is
+written in shell, so backgrounding it with `Bash(run_in_background: true)` looks
+like the same thing done more cheaply. It is silently useless: only a `Monitor`'s
+stdout lines become chat notifications. A backgrounded `Bash` notifies you exactly
+once, when the command *exits* — and this one never exits, because `--reconnect`
+is precisely what keeps it alive. So every `DONE`, `ATTN` and `EXIT` lands in an
+output file nobody reads, while the watcher looks perfectly healthy in `pgrep`.
+The run reports nothing and nothing appears to be wrong, which is the same
+silent-deafness this whole section is built to prevent.
 
 **That last line spells the ledger path out on purpose — do not shorten it to
 `"$LEDGER"`.** `Monitor` runs this in a shell of its own, which never saw the
@@ -528,7 +556,9 @@ which is the one failure this whole section exists to prevent.
   is focused — the user may be looking elsewhere. Pass `--focus false`.
 - One split per run, at most. Every agent after the first is a tab.
 - **Arm the watcher at the first spawn, before sending any task** — one `Monitor`
-  running `watch-workers.py` against the ledger, for one worker or for ten. A poll
+  running `watch-workers.py` against the ledger, for one worker or for ten. The
+  `Monitor` **tool**: the same pipeline backgrounded with `Bash` streams into a
+  file nobody reads and notifies you only if it exits, which it never does. A poll
   loop dies with the turn; a run that outlives it is a run nobody is watching. Any
   hand-rolled substitute that greps the bus directly is blind to `ATTN` and `EXIT`,
   which is to say blind to every way a run fails.
