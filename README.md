@@ -46,7 +46,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.1.0 — "Surface"** (initial release: `spawn-agent` moves out of dotfiles into a versioned plugin as `cmux-spawn-agent`, with its bundled watcher anchored on `${CLAUDE_PLUGIN_ROOT}`)
+Latest: **v0.1.1 — "Backstop"** (both skills stop claiming guarantees they did not keep — the mandatory worker watcher no longer goes deaf on an unparseable timestamp, pane reuse skips dead tabs, and `/release`'s staging gate now catches a Release Files entry it never rewrote)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that

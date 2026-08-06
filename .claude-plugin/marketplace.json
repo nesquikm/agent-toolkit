@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "agent-toolkit",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "source": "./plugins/agent-toolkit",
       "description": "Skills for running work in separate, visible Claude Code sessions — spawn agents into cmux surfaces, watch them by push event, and chain multi-stage pipelines across them.",
       "author": {
