@@ -1,6 +1,6 @@
 {
   "name": "agent-toolkit",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Skills for running work in separate, visible Claude Code sessions — spawn agents into cmux surfaces, watch them by push event, and chain multi-stage pipelines across them.",
   "author": {
     "name": "nesquikm",
