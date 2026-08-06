@@ -133,8 +133,12 @@ Per `kind`:
   | `feat` | Added |
   | `fix` | Fixed |
   | `refactor`, `perf`, `style`, `docs`, `build`, `ci`, `chore`, `test`, `revert` | Changed |
-  | anything that removes a capability (regardless of type) | Removed |
+  | a commit that removes a **capability users had** | Removed — this row wins over the type rows |
 
+  Precedence, so the last row is not a judgement call dressed as a rule: `Removed` is
+  for a capability the user can no longer reach. Deleting a *broken or superseded
+  implementation* of something that still works is `Fixed` or `Changed` by its type —
+  retiring one of two ways to wait on a worker is not a removal if waiting still works.
   A `!` / `BREAKING CHANGE:` commit keeps its type's section and is additionally
   called out in the entry's opening paragraph.
 - **`regex`** — fill **every** named group in `replace`, not just `version`, and fill
@@ -209,7 +213,7 @@ that only looks for leftovers is blind to an entry that was never touched, and
 Only once both are clean:
 
 ```bash
-git commit -m "chore(release): vX.Y.Z" -m "<one-line summary>" -m "Release: vX.Y.Z \"Codename\""
+git commit -m "chore(release): vX.Y.Z" -m "<the same summary written for the README Latest: line>" -m "Release: vX.Y.Z \"Codename\""
 ```
 
 An earlier version of this skill hard-coded four paths here while step 3 read the
@@ -225,13 +229,32 @@ rather than bypassing with `--no-verify`.
 
 ```bash
 git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
-gh pr create --title "chore(release): vX.Y.Z \"Codename\"" --body "<the CHANGELOG entry body>"
+gh pr create --base main \
+  --title "chore(release): vX.Y.Z \"Codename\"" \
+  --body "<the new CHANGELOG section: its opening paragraph AND every ### bullet, up to the next '## ['>"
 ```
 
-Report the PR URL. Then ask, separately — this is a **second** approval, never folded
-into the one from step 4:
+`--base main` is explicit on purpose: `gh pr create` otherwise inherits the repo's
+default branch, which is right here and silently wrong on any repo whose default is
+not the release target.
 
-> PR is open: `<url>`. Merge it? (y/n)
+**The PR is not the diff you just showed.** Step 4 showed only the release rewrite —
+the handful of Release Files. This PR carries the whole `$LAST..HEAD` window, every
+feature commit on the branch. Those are different by an order of magnitude, and the
+approval below is the one that actually ships them, so show the real scope first:
+
+```bash
+gh pr diff --stat
+```
+
+Then ask, separately — this is a **second** approval, never folded into step 4's:
+
+> PR is open: `<url>`.
+> It merges `<N>` commits / `<F>` files changed — not just the version bump you approved.
+> Merge it? (y/n)
+
+Treat **no answer** exactly as `n`: stop and report the state below. Never merge on
+silence, a timeout, or a background event — only on an explicit yes from the user.
 
 ### If the answer is no
 
