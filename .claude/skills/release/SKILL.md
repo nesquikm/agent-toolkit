@@ -244,8 +244,15 @@ feature commit on the branch. Those are different by an order of magnitude, and 
 approval below is the one that actually ships them, so show the real scope first:
 
 ```bash
-gh pr diff --stat
+git --no-pager diff --stat main...HEAD          # the real scope, as a stat
+gh pr view --json commits,files --jq '"commits=\(.commits|length) files=\(.files|length)"'
 ```
+
+**Not `gh pr diff --stat`** — `gh pr diff` has no `--stat`; it takes `--patch`,
+`--name-only`, `--color` and `--exclude`, and passing `--stat` prints its help text
+instead of failing, so the step looks like it ran and shows you nothing. The
+three-dot `main...HEAD` is deliberate: it diffs against the merge base, which is what
+the PR actually contains, where `main..HEAD` would mislead the moment `main` moves.
 
 Then ask, separately — this is a **second** approval, never folded into step 4's:
 

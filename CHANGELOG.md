@@ -12,6 +12,7 @@ The cleanup section treated closing the tabs as the end of a run. It isn't — t
 
 ### Fixed
 
+- **The PR-scope check printed help text instead of a diffstat.** The merge gate added in v0.1.1 called `gh pr diff --stat`, and `gh pr diff` has no `--stat` — it accepts `--patch`, `--name-only`, `--color` and `--exclude`. Passing an unknown flag prints usage and exits 0, so the step looked like it ran while showing nothing, and the approval it exists to inform was back to being uninformed. It now uses `git diff --stat main...HEAD` (three dots, against the merge base) plus a `gh pr view` count. Caught by running the step on this release rather than by reading it.
 - **A spawned agent's watcher outlived the agent.** A `Monitor` armed with `persistent: true` runs until `TaskStop` or the end of the session that armed it, and a *spawned* agent's session ending does not reap it. Observed live at the end of a six-agent run: one agent had finished, its surface was closed and its ledger deleted, and its watcher was still streaming the global event bus. The cleanup section closed surfaces and pruned ledger rows and never mentioned the process. It now ends by stopping the watcher and checking `pgrep -fl watch-workers.py` for orphans — matching only your own, since another live run's watcher is indistinguishable except by the ledger path in its command line. Deleting the ledger file (not just its rows) is what makes a survivor harmless: a watcher whose ledger is gone matches no session id and reports nothing.
 
 ## [0.1.1] — 2026-08-06 — "Backstop"
