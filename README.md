@@ -46,7 +46,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.1.1 — "Backstop"** (both skills stop claiming guarantees they did not keep — the mandatory worker watcher no longer goes deaf on an unparseable timestamp, pane reuse skips dead tabs, and `/release`'s staging gate now catches a Release Files entry it never rewrote)
+Latest: **v0.1.2 — "Reaper"** (a run now ends when its watcher stops, not when its last tab closes — a persistent Monitor outlives the spawned agent that armed it)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that

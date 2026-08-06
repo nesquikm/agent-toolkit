@@ -471,6 +471,31 @@ Only ever propose surfaces from this run's ledger. A tab you did not spawn is th
 user's, however idle it looks — leave it alone even when it is obviously a dead
 agent from an earlier session.
 
+### Stop your watcher — it does not stop itself
+
+Closing the surfaces is not the end of the run. A `Monitor` armed with
+`persistent: true` runs until `TaskStop` or the end of the session that armed it —
+and **if you are yourself a spawned agent, your session ending does not reap it**.
+Observed: an agent finished, its surface was closed, and its watcher was still
+streaming the global event bus minutes later, its ledger long since deleted.
+
+So the last step of any run that armed one is:
+
+```bash
+# TaskStop the monitor by the task id you were given when you armed it.
+# Then confirm nothing of yours is left behind:
+pgrep -fl watch-workers.py
+```
+
+Every surviving line is an orphan: a process tailing a global bus on behalf of a run
+that no longer exists. Kill only your own — another live run's watcher looks exactly
+the same in `pgrep`, and the ledger path in its command line is what tells them
+apart.
+
+Prune the ledger file itself too, not just its rows — a deleted ledger is what makes
+a stray watcher harmless if one does survive, because a watcher whose ledger is gone
+matches no session id and reports nothing.
+
 ## Rules
 
 - Anchor placement on `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID`, never on what
@@ -491,6 +516,9 @@ agent from an earlier session.
   answer what it owes.
 - Never close a surface you did not spawn, and never close one without asking —
   not even your own.
+- **A run ends when its watcher is stopped, not when its last tab closes.** A
+  persistent `Monitor` outlives the session that armed it, so a spawned agent that
+  arms one and exits leaves it streaming. `TaskStop` it and delete the ledger.
 - Before a destructive or long-running task, say which repo and which profile it
   will run in and get confirmation.
 - Workers inherit the user's global `~/.claude/CLAUDE.md`. If you plan to parse a
