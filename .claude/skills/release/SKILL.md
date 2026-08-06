@@ -30,30 +30,37 @@ Refuse rather than guess. Every check is in the block — nothing hides in the p
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 LAST=$(git tag --list 'v*' --sort=-v:refname | head -1)
-git status --porcelain                          # A. must be empty
-git rev-parse --abbrev-ref HEAD                 # B. must NOT be main
-git log ${LAST:+$LAST..}HEAD --oneline          # C. must be non-empty
-gh auth status                                  # D. must be logged in
+git status --porcelain                          # A/A′. empty, or only Release Files paths
+git rev-parse --abbrev-ref HEAD                 # B.  should not be main
+git log ${LAST:+$LAST..}HEAD --oneline          # C.  must be non-empty
+gh auth status                                  # D.  should be logged in
 claude plugin validate . && claude plugin validate ./plugins/agent-toolkit   # E.
 ```
 
-Report **every** failure at once, then refuse. Precedence when several fire:
+Run all five, then read the table below — **not every failure is a refusal**, and
+which ones are is the whole point of it:
 
-| # | Failure | Refuse with |
+| # | Failure | Then |
 | --- | --- | --- |
-| **C** | No commits since `$LAST` | *"nothing to release since `<tag>`"* — **this one wins outright.** It is terminal: there is no release to cut, so do not offer a branch, a version, or anything else. |
-| A | Dirty tree | *"commit or stash first"* — a release commit must contain only the release files. |
-| B | On `main` | Offer `git checkout -b release/vX.Y.Z` once the version is known (step 2). The PR needs a branch to come from. Any branch name works; `release/…` is a convention, not a gate. |
-| D | Not authenticated | *"`gh auth login` first"* — only blocks step 6, so you may proceed to the diff and stop there if the user asks. |
+| **C** | No commits since `$LAST` | **Terminal, and it beats everything below.** Refuse with *"nothing to release since `<tag>`"*. Do not offer a branch, a version, or a diff. |
+| A | Dirty tree — **outside** the Release Files paths | Refuse: *"commit or stash first"*. A release commit must contain only the release files. |
+| A′ | Dirty tree — **only** Release Files paths | **Not a refusal.** This is what an aborted earlier run leaves behind (step 4 says n → tree left rewritten). Say so, offer `git checkout -- <those paths>` to start clean, and continue on yes. Step 3 overwrites them anyway; the danger is only that stale edits get read as this release's content. |
+| B | On `main` | Not terminal. Once the version is known (step 2), offer `git checkout -b release/vX.Y.Z`. Any branch name works — `release/…` is convention, not a gate. |
+| D | Not authenticated | Not terminal. Report it now, continue through the diff, and **stop before step 6** — pushing is the first thing that needs `gh`. Do not discover this after the user has approved a diff. |
 | E | A manifest fails validation | Refuse. Shipping a broken manifest is worse than not shipping. |
 
-**B and C together are the common case, and they contradict each other** — B says
-branch and carry on, C says stop. C wins. Never offer a branch for a release that
-has no commits in it.
+Report every failure at once, then act on the strictest: **C refuses outright, and A
+and E refuse; A′, B and D are conditions you carry forward, not stops.** B and C look
+like they conflict — B says branch and carry on, C says stop — but C wins: never offer
+a branch for a release that has no commits in it.
 
 ## 2. Decide the version
 
-Read the current version from `plugins/agent-toolkit/.claude-plugin/plugin.json`.
+Read the current version from the **first `kind: json` entry in the Release Files
+block** — not from a path written here. Today that is
+`plugins/agent-toolkit/.claude-plugin/plugin.json`; if the block moves it, this step
+must follow, and a path hard-coded in this file would silently read the old one while
+step 3 rewrote the new one.
 
 If the user passed an explicit `X.Y.Z`, use it. If they passed `major|minor|patch`,
 apply that. Otherwise derive it from the Conventional Commit subjects since the last
@@ -75,6 +82,18 @@ git log ${LAST:+$LAST..}HEAD --format='%s%n%b'
 **minor**, not the major (0.1.0 → 0.2.0) — semver's pre-1.0 clause. This overrides
 row 1 of the table, so say which rule you applied when you propose the version
 instead of appearing to contradict it.
+
+**Then check the version is actually free**, before anything is rewritten:
+
+```bash
+git tag --list "v$NEW"          # must be empty
+```
+
+A tag that already exists does not fail until `git tag` in step 7 — which runs
+*after* `gh pr merge`. The release would land merged and untagged, and step 7 explains
+exactly why that poisons the next release's "since the last release" window. Refuse
+here instead, where nothing has been written. This bites hardest on an explicit
+`X.Y.Z` argument, which no other check validates.
 
 Then pick a **codename** — one word, evocative of what shipped. Use `--codename` if
 the user gave one; otherwise propose one. It reaches both the CHANGELOG heading and
@@ -118,8 +137,11 @@ Per `kind`:
 
   A `!` / `BREAKING CHANGE:` commit keeps its type's section and is additionally
   called out in the entry's opening paragraph.
-- **`regex`** — substitute **every** named group in `pattern` into `replace`, not
-  just `version`. A pattern that names `codename` or `summary` expects those to be
+- **`regex`** — fill **every** named group in `replace`, not just `version`, and fill
+  them from the *release*, not from the captured text: `version` from the bump,
+  `codename` from step 2, and `summary` a **newly written** one-line description of
+  this release. Copying the captured groups straight back is an identity transform
+  that changes nothing. A pattern that names `codename` or `summary` expects those to be
   rewritten too; leaving them is how a README ends up claiming the new version
   shipped the previous version's contents. If the pattern does not match, **stop and
   say so** — do not invent a replacement line. An entry marked `optional: true` may
@@ -156,15 +178,35 @@ that could sweep an unrelated file into a release commit.
 
 ```bash
 git add <every path from the Release Files block, one per entry you rewrote>
-git status --porcelain          # gate: no ' M' and no '??' lines may remain
 ```
 
-**Check before committing, not after.** Any ` M` (modified, unstaged) or `??`
-(untracked) line means step 3 touched something step 5 did not stage — refuse here,
-while the tree is still recoverable. Verifying after the commit detects the same
-fault one step too late: the half-applied release has already landed.
+Then gate on **two** questions, both before committing:
 
-Only once that is clean:
+```bash
+git diff --cached --name-only | sort          # what is actually staged
+git status --porcelain                        # what state everything is in
+```
+
+1. **Is every Release Files path staged?** Compare the first list against the paths
+   you parsed in step 3. A path in the block but missing here was never rewritten —
+   which is exactly what a `regex` entry that failed to match, or a `kind` step 3
+   does not implement, produces. Refuse.
+2. **Is anything modified but not staged?** In `git status --porcelain` the status is
+   two columns — index, then worktree. Refuse on **any line whose second column is
+   not a space**, and on `??`. Do not scan for the literal string `' M'`: a file
+   staged and then edited again reads `MM`, whose second column is `M` while the
+   line contains no `' M'` at all — it would slip through and commit content that
+   differs from what step 3 produced.
+
+Both checks run *before* `git commit`, while the tree is still recoverable. Checking
+afterwards detects the same faults one step too late — the half-applied release has
+already landed.
+
+The first check is the important one and the one an earlier version lacked: a gate
+that only looks for leftovers is blind to an entry that was never touched, and
+"never touched" is the failure mode a broken `regex` entry actually causes.
+
+Only once both are clean:
 
 ```bash
 git commit -m "chore(release): vX.Y.Z" -m "<one-line summary>" -m "Release: vX.Y.Z \"Codename\""
@@ -190,6 +232,27 @@ Report the PR URL. Then ask, separately — this is a **second** approval, never
 into the one from step 4:
 
 > PR is open: `<url>`. Merge it? (y/n)
+
+### If the answer is no
+
+Stop, and say plainly what state the repo is in — this is the one point with no clean
+abort, and the next run will misbehave if it is treated as a fresh start:
+
+- the version is **already bumped and committed** on this branch, and pushed;
+- pre-flight C still measures from the **old** tag, so a re-run re-derives the bump
+  from commits that are already in the open PR and proposes a *second* increment;
+- step 3 would insert a **second** CHANGELOG entry above the first.
+
+So do not re-run `/release` on this branch. Offer exactly three exits:
+
+| Want | Do |
+| --- | --- |
+| Merge later, unchanged | Nothing. Merge the PR by hand; then run step 7's tag + refresh. |
+| Change the release content | Amend on this branch (`git commit --amend` or a fixup), force-push **only** if the user asks — the Rules forbid it otherwise — and re-review the PR. Do not re-run this skill. |
+| Abandon the release | `gh pr close <url>`, `git checkout main`, `git branch -D <branch>`, and delete the remote branch. Only then is a fresh `/release` correct. |
+
+Whichever they pick, **return to `main` afterwards** — a directory-source marketplace
+serves whatever branch is checked out to every session in both profiles.
 
 ## 7. Merge, tag, and refresh the local installs
 
@@ -231,4 +294,6 @@ immediately; existing ones need a restart.
 - Read the file list from `CLAUDE.md`; never hard-code it in this skill.
 - Never `git add -A`, never `--no-verify`, never force-push.
 - If any step fails, stop and report where — a half-applied release is worse than a
-  refused one. The working tree is recoverable at every point before step 5.
+  refused one. The working tree is recoverable up to and including step 5's gate —
+  the first irreversible act is `git commit`, and everything before it can be undone
+  with `git checkout -- <paths>`.

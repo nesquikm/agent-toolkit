@@ -32,7 +32,7 @@ plugins/agent-toolkit/                   → The plugin
 
 Run `/release` from this repo. It bumps the version, writes the CHANGELOG entry, commits, opens a PR, and asks before merging. It never bumps and merges without showing you the diff first.
 
-The `## Release Files` block below is the single source of truth for what a release rewrites — `/release` reads it rather than hard-coding paths. Add a file here and the next release picks it up.
+The `## Release Files` block below is the single source of truth for what a release rewrites — `/release` reads it rather than hard-coding paths. Add an entry of a **supported `kind`** and the next release picks it up; the supported kinds are exactly `json`, `changelog`, and `regex`, because those are the three `/release` step 3 implements. An entry of any other kind is not a graceful no-op — `/release` has no instruction for it and no instruction to refuse it, so add the handling to step 3 in the same change.
 
 **Who sees an unbumped edit depends on how the marketplace was added**, and the two cases are opposite:
 
@@ -115,7 +115,7 @@ This repo follows [Conventional Commits v1.0.0](https://www.conventionalcommits.
 - **Scope** — the primary touched area (e.g., `skills/cmux-spawn-agent`, `marketplace`, `docs`).
 - **Breaking change** — append `!`, or use a `BREAKING CHANGE:` body footer.
 
-These types drive the bump `/release` proposes: `feat` → minor, `fix`/`perf`/`refactor` → patch, `!` or `BREAKING CHANGE:` → major.
+These types drive the bump `/release` proposes. The mapping lives in that skill's step 2 and is **not** duplicated here — two copies drifted apart once already (this file said `!` → major with no pre-1.0 clause while the skill said minor below 1.0.0, so the two documents proposed different versions for the same commits).
 
 **Release commits** carry a footer:
 
