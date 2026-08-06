@@ -420,6 +420,11 @@ agent from an earlier session.
 - One split per run, at most. Every agent after the first is a tab.
 - **Arm the watcher at the first spawn, before sending any task.** A poll loop
   dies with the turn; a run that outlives it is a run nobody is watching.
+- **The ledger is on disk**, at
+  `${TMPDIR:-/tmp}/cmux-spawn-agent/<caller surface id>.tsv` — keyed by the
+  caller's surface, so it is exactly this run's spawns and nothing else. That is
+  what lets a turn which remembers nothing still answer what it owes and what it
+  may close.
 - Report each stage's outcome as it lands; don't go silent for a long pipeline.
   Mark the ledger row `reported` when you do, so an interrupted run can still
   answer what it owes.
