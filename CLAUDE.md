@@ -55,7 +55,7 @@ files:
     kind: changelog
   - path: README.md
     kind: regex
-    pattern: 'Latest: \*\*v(?<version>\d+\.\d+\.\d+) — "(?<codename>[^"]+)"\*\* \((?<summary>[^)]*)\)'
+    pattern: 'Latest: \*\*v(?<version>\d+\.\d+\.\d+) — "(?<codename>[^"]+)"\*\* \((?<summary>.*)\)'
     replace: 'Latest: **v{version} — "{codename}"** ({summary})'
 ```
 

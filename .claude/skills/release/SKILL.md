@@ -8,7 +8,9 @@ argument-hint: '[major|minor|patch|X.Y.Z] [--codename "<name>"]'
 
 Cut a release of this marketplace: bump → commit → PR → (ask) merge → refresh local installs.
 
-Every step below shows the user what it is about to do and stops for approval **once**, at the diff. Nothing is pushed or merged without a separate explicit yes.
+This asks for approval **twice**, and the two are never merged into one: once at the
+diff, before anything is committed, and again at the open PR, before it is merged.
+A yes to the first is not a yes to the second.
 
 ## Why the bump is load-bearing
 
@@ -64,14 +66,15 @@ git log ${LAST:+$LAST..}HEAD --format='%s%n%b'
 
 | Found | Bump |
 | --- | --- |
-| any `!` suffix or `BREAKING CHANGE:` footer | major |
+| any `!` suffix or `BREAKING CHANGE:` footer | major — **but see the pre-1.0 rule below** |
 | any `feat:` / `feat(...):` | minor |
-| only `fix` / `perf` / `refactor` / `docs` / `chore` / `test` / `ci` / `style` | patch |
-| nothing at all | refuse — there is no release to cut |
+| only `fix` / `perf` / `refactor` / `docs` / `chore` / `test` / `ci` / `style` / `build` / `revert` | patch |
+| nothing at all | refuse — already caught by pre-flight C |
 
-Below 1.0.0, a `!` still bumps the **minor** (0.1.0 → 0.2.0), per semver's
-pre-1.0 clause. Say so when you propose it, rather than silently doing something
-different from the table.
+**Pre-1.0 override.** While the version is below `1.0.0`, a breaking change bumps the
+**minor**, not the major (0.1.0 → 0.2.0) — semver's pre-1.0 clause. This overrides
+row 1 of the table, so say which rule you applied when you propose the version
+instead of appearing to contradict it.
 
 Then pick a **codename** — one word, evocative of what shipped. Use `--codename` if
 the user gave one; otherwise propose one. It reaches both the CHANGELOG heading and
@@ -153,13 +156,18 @@ that could sweep an unrelated file into a release commit.
 
 ```bash
 git add <every path from the Release Files block, one per entry you rewrote>
-git commit -m "chore(release): vX.Y.Z" -m "<one-line summary>" -m "Release: vX.Y.Z \"Codename\""
+git status --porcelain          # gate: no ' M' and no '??' lines may remain
 ```
 
-Then prove the two sets agree, and refuse if they do not:
+**Check before committing, not after.** Any ` M` (modified, unstaged) or `??`
+(untracked) line means step 3 touched something step 5 did not stage — refuse here,
+while the tree is still recoverable. Verifying after the commit detects the same
+fault one step too late: the half-applied release has already landed.
+
+Only once that is clean:
 
 ```bash
-git status --porcelain          # must be empty — nothing rewritten was left unstaged
+git commit -m "chore(release): vX.Y.Z" -m "<one-line summary>" -m "Release: vX.Y.Z \"Codename\""
 ```
 
 An earlier version of this skill hard-coded four paths here while step 3 read the
@@ -211,8 +219,10 @@ done
 profiles per directory is a common setup, and it makes a bare `claude plugin ...`
 silently target whichever profile the current directory selects.
 
-Finish by telling the user that **running sessions keep the old cached payload** —
-the new version reaches them on restart, not before.
+Finish by telling the user that **already-running sessions keep the skill text they
+loaded at start** — not because of the cache (a directory source never reads it), but
+because a session's skill inventory is built once. New sessions get the new text
+immediately; existing ones need a restart.
 
 ## Rules
 
