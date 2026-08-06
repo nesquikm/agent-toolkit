@@ -120,7 +120,14 @@ SID=$(uuidgen | tr 'A-Z' 'a-z')
 cmux send --workspace "$WS" --surface "$SURF" "cd <repo> && claude --session-id $SID -n <name>\n"
 ```
 
-**`cd` is not optional.** A new terminal inherits the cwd of the pane it came
+**`cd` is not optional, and it is easy to drop** — it sits mid-string inside a
+longer `cmux send` line rather than standing on its own, so it goes missing without
+anything looking wrong. It is also self-concealing: a split off your own surface
+inherits *your* cwd, so if you happen to be in the right repo the omission passes
+silently and only misbehaves when you aren't. Read the launch line back before
+sending it, and check `claude agents --json`'s `cwd` afterwards.
+
+A new terminal inherits the cwd of the pane it came
 from, not the workspace's directory — split off the caller and you get the
 caller's cwd; split off something else and you get *its* cwd (a probe launched
 from one repo came up in an unrelated scratch directory that way). Never rely on
@@ -232,8 +239,20 @@ later, because the filter re-reads the ledger when it changes:
 
 ```bash
 cmux events --category agent --no-heartbeat --reconnect \
-| python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" "$LEDGER"
+| python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" \
+    "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
 ```
+
+**That last line spells the ledger path out on purpose — do not shorten it to
+`"$LEDGER"`.** `Monitor` runs this in a shell of its own, which never saw the
+assignment you made in some earlier `Bash` call. `$LEDGER` there expands to the
+empty string, the watcher `stat`s nothing, its ledger reads as zero rows, and every
+worker is filtered out as unknown. You get a watcher that runs happily and reports
+nothing — indistinguishable from a run where nothing has finished yet, and the same
+silent-deafness failure the timestamp fallback exists to prevent.
+
+`TMPDIR` and `CMUX_SURFACE_ID` *are* in that shell's environment, which is why the
+expanded form is safe where the variable is not.
 
 That path is substituted when this skill loads, so by the time you read it it is
 already an absolute path to this plugin's own copy of the watcher — run it as
@@ -342,9 +361,16 @@ else:
   breaks on "any new id" will report a stage that is still running. Rebase your
   cursor on it and keep waiting, as above.
 
+**A worker's input box may show text nobody typed.** `read-screen` renders Claude
+Code's suggested-follow-up ghost text in the prompt exactly like real input, so a
+supervisor falling back to the screen can read it as a pending user message, or as
+unsent input it ought to clear. It is neither: it is a suggestion, and sending
+`enter` would submit it. Judge from the transcript or the event, and treat prompt
+contents as decoration.
+
 **`Waiting` on its own is still ambiguous** — a finished agent and one parked on
 a prompt both reach it, and `claude agents` says `idle` either way. When it
-matters, read the screen (`cmux read-screen --surface <ref>`) or the transcript
+matters, read the screen (`cmux read-screen --workspace "$WS" --surface <ref>`) or the transcript
 rather than guessing from the event.
 
 ## Chain stages
@@ -424,6 +450,11 @@ cmux close-surface --workspace "$WS" --surface "$ref"
 
 - The pane disappears on its own when its last surface closes. There is no
   `close-pane`, and nothing is left to tidy once the tabs are gone.
+- **The `OK surface:N` it prints back is not the surface you closed.** Refs are
+  re-enumerated on every call, so closing `surface:44` can answer `OK surface:45`.
+  Nothing went wrong and no other tab was touched — but read literally it looks like
+  you just closed a stranger's tab. Confirm by resolving the UUID
+  (`surf_field "$su" ref` returns empty once it is gone), never by reading that ref.
 - Closing a tab with siblings left re-selects the previously visible one and
   moves no focus. Closing the **last** one collapses the pane, and focus lands on
   the pane it was split off from — yours. Harmless, but say so when you offer, in
