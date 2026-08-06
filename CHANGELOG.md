@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.1.3] — 2026-08-06 — "Scoped"
+
+Two guarantees from the last release turned out to be advice rather than mechanism. A warning you have just read does not stop you making the mistake, and a check that lists every process on the machine is not a check.
+
+### Fixed
+
+- **The `cd` is now guarded, not merely warned about.** Two agents in a row dropped `cd <repo>` from the launch line despite the bolded paragraph saying it is not optional — the second immediately after quoting that paragraph back. The mitigation was attentional ("read the launch line back before sending it") and there was nothing to compare it against. `REPO` is now a variable in the anchor block, guarded alongside `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID` and refusing anything without a `.git`, so an unset repo fails loudly at the guard instead of silently landing workers in the caller's cwd — where it only misbehaves when the caller happens to be somewhere else, which is what makes it so hard to notice.
+- **The orphan-watcher check implicated everyone else's runs.** It said "kill only your own — the ledger path tells them apart" and then printed `pgrep -fl watch-workers.py`, which lists every watcher on the machine wrapped in 400-character shell preambles. An agent following it reported two healthy watchers as orphans, one of them its own supervisor's live Monitor. The check is now scoped to `${CMUX_SURFACE_ID}`, turning it from a reading exercise into a yes/no, and a watcher is only reapable once `ps -o ppid=` shows the `claude` that armed it is actually gone.
+- **Cleanup had no stated order.** Closing surfaces, deleting the ledger and stopping the watcher lived in three separate places, and the sequence mattered: stopping the watcher before deleting the ledger leaves a window in which a late event names a worker already reported. It is now four numbered steps in one place. The anchor block also `touch`es the ledger, so a first run stops printing "no such file" to stderr and teaching readers to ignore it.
+
 ## [0.1.2] — 2026-08-06 — "Reaper"
 
 The cleanup section treated closing the tabs as the end of a run. It isn't — the watcher is a process, and nothing was stopping it.

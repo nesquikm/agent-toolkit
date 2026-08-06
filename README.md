@@ -46,7 +46,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.1.2 — "Reaper"** (a run now ends when its watcher stops, not when its last tab closes — a persistent Monitor outlives the spawned agent that armed it)
+Latest: **v0.1.3 — "Scoped"** (the cd is guarded rather than merely warned about, and the orphan-watcher check is scoped to your own surface instead of listing every watcher on the machine)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
