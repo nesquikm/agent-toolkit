@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.1.2] — 2026-08-06 — "Reaper"
+
+The cleanup section treated closing the tabs as the end of a run. It isn't — the watcher is a process, and nothing was stopping it.
+
+### Fixed
+
+- **A spawned agent's watcher outlived the agent.** A `Monitor` armed with `persistent: true` runs until `TaskStop` or the end of the session that armed it, and a *spawned* agent's session ending does not reap it. Observed live at the end of a six-agent run: one agent had finished, its surface was closed and its ledger deleted, and its watcher was still streaming the global event bus. The cleanup section closed surfaces and pruned ledger rows and never mentioned the process. It now ends by stopping the watcher and checking `pgrep -fl watch-workers.py` for orphans — matching only your own, since another live run's watcher is indistinguishable except by the ledger path in its command line. Deleting the ledger file (not just its rows) is what makes a survivor harmless: a watcher whose ledger is gone matches no session id and reports nothing.
+
 ## [0.1.1] — 2026-08-06 — "Backstop"
 
 Both shipped skills claimed guarantees they did not deliver, and this release closes the gap in every case rather than softening the claim. `cmux-spawn-agent`'s mandatory watcher was silently deaf, its guard checked the wrong variable, and its pane reuse could split into a dead tab; `/release`'s staging gate was advertised as making a half-applied release impossible while being structurally blind to the failure a broken `regex` entry actually causes. Nothing here changes what either skill is for — every change makes an existing promise true.
