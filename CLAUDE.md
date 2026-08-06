@@ -55,9 +55,16 @@ files:
     kind: changelog
   - path: README.md
     kind: regex
-    pattern: 'Latest: \*\*v(?<version>\d+\.\d+\.\d+) — '
-    replace: 'Latest: **v{version} — '
+    pattern: 'Latest: \*\*v(?<version>\d+\.\d+\.\d+) — "(?<codename>[^"]+)"\*\* \((?<summary>[^)]*)\)'
+    replace: 'Latest: **v{version} — "{codename}"** ({summary})'
 ```
+
+The README pattern deliberately spans the **whole** line, not just the digits. An
+earlier version captured only `(?<version>…)`, which meant a release bumped the
+number and left the codename and one-line summary describing the *previous*
+release — a README that quietly claimed the new version shipped the old version's
+contents. A `regex` entry must capture every field that goes stale, not only the
+one that is obviously a version.
 
 The plugin version and the marketplace entry's version must always agree — `claude plugin validate .` fails when they drift.
 

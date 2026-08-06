@@ -23,22 +23,31 @@ release worked." It was live before you started.
 
 ## 1. Pre-flight
 
-Refuse rather than guess. Run all four checks and report every failure at once:
+Refuse rather than guess. Every check is in the block — nothing hides in the prose:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-git status --porcelain                       # must be empty
-git rev-parse --abbrev-ref HEAD              # must NOT be main
-gh auth status                               # must be logged in
-claude plugin validate . && claude plugin validate ./plugins/agent-toolkit
+LAST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+git status --porcelain                          # A. must be empty
+git rev-parse --abbrev-ref HEAD                 # B. must NOT be main
+git log ${LAST:+$LAST..}HEAD --oneline          # C. must be non-empty
+gh auth status                                  # D. must be logged in
+claude plugin validate . && claude plugin validate ./plugins/agent-toolkit   # E.
 ```
 
-- **Dirty tree** — refuse. A release commit must contain only the release files;
-  anything else belongs in its own commit first.
-- **On `main`** — refuse, and offer `git checkout -b release/vX.Y.Z` once the version
-  is known (step 2). The PR needs a branch to come from.
-- **No commits since the last release** — refuse. `git log <last-tag>..HEAD --oneline`
-  empty means there is nothing to ship.
+Report **every** failure at once, then refuse. Precedence when several fire:
+
+| # | Failure | Refuse with |
+| --- | --- | --- |
+| **C** | No commits since `$LAST` | *"nothing to release since `<tag>`"* — **this one wins outright.** It is terminal: there is no release to cut, so do not offer a branch, a version, or anything else. |
+| A | Dirty tree | *"commit or stash first"* — a release commit must contain only the release files. |
+| B | On `main` | Offer `git checkout -b release/vX.Y.Z` once the version is known (step 2). The PR needs a branch to come from. Any branch name works; `release/…` is a convention, not a gate. |
+| D | Not authenticated | *"`gh auth login` first"* — only blocks step 6, so you may proceed to the diff and stop there if the user asks. |
+| E | A manifest fails validation | Refuse. Shipping a broken manifest is worse than not shipping. |
+
+**B and C together are the common case, and they contradict each other** — B says
+branch and carry on, C says stop. C wins. Never offer a branch for a release that
+has no commits in it.
 
 ## 2. Decide the version
 
@@ -65,7 +74,9 @@ pre-1.0 clause. Say so when you propose it, rather than silently doing something
 different from the table.
 
 Then pick a **codename** — one word, evocative of what shipped. Use `--codename` if
-the user gave one; otherwise propose one and let the diff review be the approval.
+the user gave one; otherwise propose one. It reaches both the CHANGELOG heading and
+the README's `Latest:` line, so the diff in step 4 shows its full effect and the
+review of that diff is its approval.
 
 ## 3. Rewrite every file in the Release Files block
 
@@ -92,12 +103,34 @@ Per `kind`:
   ```
 
   Use only the subsections that have content. Get the date from `date +%F`, not from
-  memory. Group by Conventional Commit type: `feat` → Added, `fix` → Fixed,
-  `refactor`/`perf`/`style` → Changed, a removal → Removed.
-- **`regex`** — the `pattern` carries a `(?<version>...)` named group; substitute the
-  new version into `replace`. If the pattern does not match, **stop and say so** —
-  do not invent a replacement line. An entry marked `optional: true` may be skipped
-  when the file is absent, but never when it exists and simply fails to match.
+  memory. Every Conventional Commit type in `CLAUDE.md` has a bucket — there is no
+  "use your judgement" case:
+
+  | Type | Section |
+  | --- | --- |
+  | `feat` | Added |
+  | `fix` | Fixed |
+  | `refactor`, `perf`, `style`, `docs`, `build`, `ci`, `chore`, `test`, `revert` | Changed |
+  | anything that removes a capability (regardless of type) | Removed |
+
+  A `!` / `BREAKING CHANGE:` commit keeps its type's section and is additionally
+  called out in the entry's opening paragraph.
+- **`regex`** — substitute **every** named group in `pattern` into `replace`, not
+  just `version`. A pattern that names `codename` or `summary` expects those to be
+  rewritten too; leaving them is how a README ends up claiming the new version
+  shipped the previous version's contents. If the pattern does not match, **stop and
+  say so** — do not invent a replacement line. An entry marked `optional: true` may
+  be skipped when the file is absent, but never when it exists and fails to match.
+
+**Then re-validate**, before showing anything:
+
+```bash
+claude plugin validate . && claude plugin validate ./plugins/agent-toolkit
+```
+
+Pre-flight validated the manifests *before* you rewrote them; this validates what you
+actually produced. A `json` rewrite that broke a manifest is exactly the failure the
+indent-and-newline warning above exists to prevent, and only this check catches it.
 
 ## 4. Show the diff and get approval
 
@@ -114,13 +147,26 @@ abort — the user may want to hand-edit the CHANGELOG prose and re-run.
 
 ## 5. Commit
 
-Stage each Release Files path explicitly. `git add -A` is forbidden — it is the one
-thing that could sweep an unrelated file into a release commit.
+Stage exactly the paths from the `## Release Files` block you read in step 3 — the
+same list, not a list you retype here. `git add -A` is forbidden: it is the one thing
+that could sweep an unrelated file into a release commit.
 
 ```bash
-git add plugins/agent-toolkit/.claude-plugin/plugin.json .claude-plugin/marketplace.json CHANGELOG.md README.md
+git add <every path from the Release Files block, one per entry you rewrote>
 git commit -m "chore(release): vX.Y.Z" -m "<one-line summary>" -m "Release: vX.Y.Z \"Codename\""
 ```
+
+Then prove the two sets agree, and refuse if they do not:
+
+```bash
+git status --porcelain          # must be empty — nothing rewritten was left unstaged
+```
+
+An earlier version of this skill hard-coded four paths here while step 3 read the
+block. They matched by coincidence; the moment a fifth entry was added, step 3 would
+rewrite it and step 5 would leave it behind — a half-applied release, which the last
+Rule calls worse than a refused one. The check above is what makes that impossible
+rather than merely discouraged.
 
 The `commit-msg` hook enforces the subject format; if it rejects, fix the message
 rather than bypassing with `--no-verify`.
