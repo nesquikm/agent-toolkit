@@ -42,7 +42,7 @@ The skill is written as a set of verified behaviours rather than an API tour —
 
 Releases are cut with the repo-local `/release` skill: it derives the bump from the Conventional Commits since the last tag, rewrites every file listed in the `## Release Files` block of [`CLAUDE.md`](./CLAUDE.md), shows the diff, commits, opens a PR, and asks before merging.
 
-The bump is not cosmetic — Claude Code caches a plugin's payload by version string, so an unbumped edit never reaches an installed profile.
+The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a cache keyed by version string, so an unbumped edit never reaches anyone who installed it that way. (A `directory`-sourced install — how you'd develop against a local clone — reads the working tree directly and is live without one.)
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history. Latest: **v0.1.0 — "Surface"** (initial release: `spawn-agent` moves out of dotfiles into a versioned plugin as `cmux-spawn-agent`, with its bundled watcher anchored on `${CLAUDE_PLUGIN_ROOT}`).
 

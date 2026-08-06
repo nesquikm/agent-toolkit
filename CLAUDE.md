@@ -34,7 +34,12 @@ Run `/release` from this repo. It bumps the version, writes the CHANGELOG entry,
 
 The `## Release Files` block below is the single source of truth for what a release rewrites — `/release` reads it rather than hard-coding paths. Add a file here and the next release picks it up.
 
-**The version bump is not cosmetic.** The plugin payload cache is keyed by version string: `claude plugin update` is a no-op unless the version actually changed, and the stale cached copy keeps being served. Editing a skill without bumping means the change never reaches an installed profile. (The marketplace *catalog* is read live off the working tree, so `marketplace.json` edits appear immediately — a confusing asymmetry when debugging.)
+**Who sees an unbumped edit depends on how the marketplace was added**, and the two cases are opposite:
+
+- **`directory` source** (how this repo is installed locally, pointing at this working tree) — Claude Code loads the plugin *from the source tree*. An edit is live in the next session with no bump at all. The version-keyed copy under `<config>/plugins/cache/agent-toolkit/` is written at install time and then never read; do not diff against it to check whether a change landed.
+- **`github` source** (how anyone else installs this) — the cached payload is what gets served, and `claude plugin update` is a no-op unless the version string changed. For them, the bump *is* the delivery mechanism.
+
+So local dogfooding never needs a release, and shipping to anyone else always does.
 
 ## Release Files
 

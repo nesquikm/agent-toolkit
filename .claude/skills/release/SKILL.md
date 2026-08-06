@@ -12,13 +12,14 @@ Every step below shows the user what it is about to do and stops for approval **
 
 ## Why the bump is load-bearing
 
-The plugin payload cache is keyed by version string. `claude plugin update` returns
-`already at the latest version` and keeps serving the stale copy unless the version
-actually changed. A release that forgets the bump is a release nobody receives.
+Not for the local installs — those add this repo as a `directory` source and load the
+plugin straight from the working tree, so every edit is already live. The bump is what
+reaches **everyone installing from GitHub**: their payload is served from a
+version-keyed cache, and `claude plugin update` returns `already at the latest version`
+and keeps serving the old copy unless the version string changed.
 
-The marketplace *catalog* is different — it is read live off the working tree, so
-`marketplace.json` edits show up immediately. Do not let that mislead you into
-thinking a skill edit landed.
+The practical consequence for this skill: never conclude "the change is live, so the
+release worked." It was live before you started.
 
 ## 1. Pre-flight
 
@@ -150,9 +151,8 @@ The tag matters beyond bookkeeping: step 2 reads `git tag --list 'v*'` to find w
 "since the last release" means. Skip it and the next release derives its bump from
 the whole history.
 
-Then refresh both profiles, because the local marketplace is a `directory` source
-reading this working tree — and the payload cache only re-copies now that the version
-string changed:
+Then refresh both profiles. The skills were already live (directory source), but this
+re-syncs the recorded version so `claude plugin list` stops reporting the old one:
 
 ```bash
 for CFG in "$HOME/.claude" "$HOME/.claude-st"; do
