@@ -41,6 +41,29 @@ The `## Release Files` block below is the single source of truth for what a rele
 
 So local dogfooding never needs a release, and shipping to anyone else always does.
 
+### `git checkout` is the deployment command
+
+This follows from the above and is worth stating on its own, because it is the most
+surprising property of this repo:
+
+**Whatever branch is checked out here is what every session in both profiles loads** —
+including sessions in unrelated projects, since the plugin is installed at *user*
+scope. Not the tagged version, not `main`, not the cache: the bytes on disk at
+`plugins/agent-toolkit/skills/…` at the moment a skill loads. Uncommitted edits count
+too; it tracks the filesystem, not git.
+
+Verified 2026-08-06: with `test/release-dry` checked out, a probe session in each
+profile loaded skill text byte-identical to that branch's tip and differing from
+`main` by 28 lines, while `claude plugin list` reported a clean `0.1.0` in both.
+
+Two consequences:
+
+- **The version string tells you nothing about what is loaded.** `installed_plugins.json`
+  pinned `0.1.0` and `gitCommitSha: cd966c7` while `HEAD` was several commits past it.
+  To know what a session is running, check `git rev-parse HEAD` here — not the version.
+- **Don't leave an experimental branch checked out.** Return to `main` when you stop
+  working on a branch, or you are silently running unreviewed skill text everywhere.
+
 ## Release Files
 
 ```yaml
