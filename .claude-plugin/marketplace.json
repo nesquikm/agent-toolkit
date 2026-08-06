@@ -1,0 +1,32 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-toolkit",
+  "description": "Plugins for agent orchestration — spawning, watching, and chaining Claude Code agents across visible terminal surfaces.",
+  "owner": {
+    "name": "nesquikm",
+    "url": "https://github.com/nesquikm"
+  },
+  "plugins": [
+    {
+      "name": "agent-toolkit",
+      "version": "0.1.0",
+      "source": "./plugins/agent-toolkit",
+      "description": "Skills for running work in separate, visible Claude Code sessions — spawn agents into cmux surfaces, watch them by push event, and chain multi-stage pipelines across them.",
+      "author": {
+        "name": "nesquikm",
+        "url": "https://github.com/nesquikm"
+      },
+      "homepage": "https://github.com/nesquikm/agent-toolkit",
+      "license": "MIT",
+      "category": "automation",
+      "keywords": [
+        "agents",
+        "orchestration",
+        "multi-agent",
+        "cmux",
+        "fan-out",
+        "pipelines"
+      ]
+    }
+  ]
+}
