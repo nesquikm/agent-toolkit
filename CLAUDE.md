@@ -27,6 +27,7 @@ plugins/agent-toolkit/                   → The plugin
 - **Bundled scripts** — a skill references its own files through `${CLAUDE_PLUGIN_ROOT}/skills/<skill>/<file>`, never through a relative path or the base directory printed at load. The token is substituted **into the skill text at load time**, so the reading model sees an absolute path; it is *not* exported to the shell, and `echo "$CLAUDE_PLUGIN_ROOT"` from a Bash call prints nothing. Prose next to such a path must therefore still read correctly once the token has been replaced by a directory.
 - **One plugin, many skills** — new agent skills go into `plugins/agent-toolkit/skills/`. A second plugin is warranted only when a bundle needs its own version line.
 - **JSON formatting** — 2-space indent, trailing newline. `/release` rewrites these files in place; anything else makes a release diff rewrite whole files.
+- **Skill frontmatter is a plain YAML scalar** — so a `description` may not contain `": "` (colon followed by a space). YAML reads it as a nested mapping and the whole block fails to parse, and the failure is *silent at runtime*: the skill loads with empty metadata, every field dropped, so it simply never triggers again. Nothing in the skill's own text looks wrong. Use an em dash where the sentence wants a colon, and run `claude plugin validate ./plugins/agent-toolkit` — the marketplace-level `claude plugin validate .` does **not** read skill frontmatter and passes happily while the skill is broken.
 
 ## Releasing
 
