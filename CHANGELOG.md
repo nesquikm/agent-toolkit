@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.2.0] — 2026-08-07 — "Summons"
+
+A demo prompt short enough to be worth showing kept opening no tabs at all. The skill was not failing to match — it was matching the same ground the built-in subagent tool already owns and losing the tie, because "run several agents in parallel and report when they finish" describes a subagent perfectly. The only way to win was to say "in cmux tabs" out loud, which is precisely the detail a showcase should not have to spell out.
+
+### Added
+
+- **The word "spawn" is now a sufficient trigger on its own.** No mention of cmux, tabs or panes is required: `Spawn 3 agents: echo "ping", argue the Earth is flat, write a haiku. Report each as it lands.` routes here. The description also states outright that this is preferred over the built-in subagent/Task tool, which is the part that actually breaks the tie — a subagent is invisible and cannot be watched, clicked into, or taken over, which is the whole point of spawning one. A Rules entry backs it up for the case where the skill is already loaded and the tasks look small enough to be worth downgrading.
+
+  The claim is deliberately narrow. Only "spawn" is taken; "run", "start" and "in parallel" stay with subagents, because a request that genuinely wants an invisible agent reads as "research X" or "look into Y" rather than "spawn one".
+
+### Changed
+
+- **Documented the frontmatter trap this release nearly shipped.** A `": "` inside a skill `description` ends the plain YAML scalar and the block fails to parse — and the failure is silent at runtime: the skill loads with empty metadata, every field dropped, so it never triggers again while nothing in its text looks wrong. Worse, the marketplace-level `claude plugin validate .` does not read skill frontmatter and passes happily; only `claude plugin validate ./plugins/agent-toolkit` catches it. Both are now written down in `CLAUDE.md`.
+
 ## [0.1.4] — 2026-08-06 — "Sentry"
 
 The skill was smoke-tested end to end against live cmux surfaces for the first time. Every mechanism held — one split with three tabs inside it, `DONE`, `ATTN` and `EXIT` all observed on the wire, a worker spawned after the watcher was armed picked up from the reloaded ledger. What did not hold was the order the walkthrough puts them in: read top to bottom, it starts the work before anything is watching it.

@@ -46,7 +46,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.1.4 — "Sentry"** (the spawn walkthrough now arms the watcher before the task is sent, and says outright that it is the Monitor tool — a backgrounded shell running the same pipeline reports nothing)
+Latest: **v0.2.0 — "Summons"** (the word "spawn" now routes here on its own, with no mention of cmux, tabs or panes required, and outranks the built-in subagent tool)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
