@@ -312,7 +312,42 @@ Each output line becomes a chat notification that re-invokes you:
   answer. Not an ending, and no `DONE` follows until someone answers it.
 - `ATTN <name> (<tool>)` — suspended on a permission prompt for that tool, or on
   an `ExitPlanMode` plan approval. Not an ending either.
-- `EXIT <name>` — the session ended.
+- `EXIT <name>` — the session ended **normally**, firing `agent.hook.SessionEnd`.
+
+**`EXIT` is not a death notice, and a killed worker sends nothing at all.** A
+worker that dies outright — `SIGKILL`, a host crash, a surface torn down under it
+— never gets to run the hook, so no `SessionEnd` is published and no `EXIT` will
+ever reach you. Measured 2026-08-07: a worker `SIGKILL`ed while parked on an
+`AskUserQuestion` produced **no bus event whatsoever**, while the `~115 s` timeout
+twins for its blocks still arrived on schedule afterwards — so the run looked
+exactly like a worker still sitting on its question, and waiting longer never
+helped. A graceful `/exit` in the same run did fire `SessionEnd` and did print
+`EXIT`, which is the whole distinction. The signal is uncatchable at the source;
+what follows is how to notice anyway.
+
+**The registry is the only thing that catches it, so check it as well as the
+watcher — not instead.** Push is still the default and still covers the three
+cases that do emit; death is the one case with no line to miss, which is why it
+cannot be the *only* thing you rely on for a long run. `claude agents --json`
+drops a killed session immediately:
+
+```bash
+while IFS=$'\t' read -r sid su pu name state; do
+  [ "$state" = reported ] && continue
+  reg=$(claude agents --json | python3 -c "
+import json,sys
+print(next((a['status'] for a in json.load(sys.stdin) if a['sessionId']=='$sid'),'gone'))")
+  [ "$reg" = gone ] && echo "$name died without saying so (sid $sid)"
+done < "$LEDGER"
+```
+
+Run that whenever the watcher wakes you and once more before you report a run
+finished. `gone` on a row you never reported is a worker that died mid-stage: read
+its transcript for what it had already done, then re-spawn it rather than waiting
+on a `DONE` that cannot come. Check **every profile you use** — a worker in
+another `CLAUDE_CONFIG_DIR` reads as `gone` in yours whether it is alive or dead,
+so confirm against the right registry before concluding anything (see "Several
+config profiles" below).
 
 `ASK` and `ATTN` both mean *a human is being waited on, and the run is stopped
 until one shows up*. Neither line tells you what was asked: `tool_input` is
@@ -382,6 +417,19 @@ needs-input substitute. Spawning with that flag was refused in this environment,
 so the fallback rests on the wrapper's comments rather than on a live run: it is
 built to stay inert in normal mode (verified), but treat a bypass worker's
 watcher as **unproven** and check on that worker by hand.
+
+**`ATTN` on a permission prompt rests on older evidence than the rest.**
+`agent.hook.PermissionRequest` was observed live when this filter was first
+written, and that single sighting is what the `ATTN` line stands on. It was
+**not** re-witnessed when the block reporting above was verified: every command
+tried came back auto-approved — including with the worker cycled into manual mode
+— so no permission prompt could be provoked to fire one. What that leaves untested
+in practice is precisely the part that *changed*: blocks now de-duplicate by
+`_opencode_request_id` instead of by the 5 s window, and that key has been
+exercised hard against `AskUserQuestion` and never once against a live
+`PermissionRequest`. Both names run through the same branch, so this is a hole in
+the evidence rather than a known fault — but it is a hole, and a run that leans on
+`ATTN` deserves the same hand-check as the bypass case above.
 
 **There is no lighter option for one worker.** A backgrounded
 `cmux events --name agent.hook.Stop … | grep -m1 "claude-$SID"` looks like it
