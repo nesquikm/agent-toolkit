@@ -15,7 +15,7 @@ before launch**. That id is the join key to its status and its output.
 | --- | --- |
 | where you are | `cmux --json identify` → `.caller` (`.focused` is wherever the user drifted) |
 | layout, ttys, titles | `cmux --json --id-format both tree --workspace "$CMUX_WORKSPACE_ID"` |
-| identity + busy/idle | `claude agents --json` (keyed by the id you assigned) |
+| identity + busy/waiting/idle | `claude agents --json` (keyed by the id you assigned) |
 | structured output | `<config-dir>/projects/<esc-cwd>/<sessionId>.jsonl` |
 | send input | `cmux send --surface <ref>` + `cmux send-key --surface <ref> enter` |
 | handed-back-to-you | `cmux list-notifications --json`, matched on `surface_id` |
@@ -246,6 +246,13 @@ A worker stays `idle` for a beat after you press Enter, so a bare "wait until no
 busy" returns instantly and reports a stage that never ran. Take the edge from an
 event, and use the registry for liveness.
 
+**A stage stops being worked on in two different ways, and only one of them is an
+ending.** It can *end* — the turn finishes and `agent.hook.Stop` fires — or it can
+*suspend*, parked on a question or a permission prompt with the turn still open
+and no `Stop` ever fired. Both leave the worker doing nothing; only the first ever
+resolves on its own. Anything you build here has to observe both, because the
+suspended case is the one where waiting longer never helps.
+
 There are two ways to wait, and **the push one is the default**. A polling loop
 only runs while you are inside a turn, so any stage that outlives the turn is a
 stage nobody is watching. That is how a run goes quiet: you do not decide to stop
@@ -298,20 +305,66 @@ build the path yourself from that variable.
 
 Each output line becomes a chat notification that re-invokes you:
 
-- `DONE <name>` — that worker's turn ended.
-- `ATTN <name>` — blocked mid-turn on a permission prompt. **Not** an ending.
+- `DONE <name>` — that worker's turn **ended**. That is not the same as "the work
+  is finished": a worker that parks awaiting its own background sub-agent ends its
+  turn too, so read its transcript before treating a `DONE` as results to collect.
+- `ASK <name>` — **suspended** on an `AskUserQuestion` prompt, waiting for an
+  answer. Not an ending, and no `DONE` follows until someone answers it.
+- `ATTN <name> (<tool>)` — suspended on a permission prompt for that tool, or on
+  an `ExitPlanMode` plan approval. Not an ending either.
 - `EXIT <name>` — the session ended.
+
+`ASK` and `ATTN` both mean *a human is being waited on, and the run is stopped
+until one shows up*. Neither line tells you what was asked: `tool_input` is
+redacted to a length on the bus, so the event can only say that a worker is
+blocked and on which kind of prompt. Read the screen
+(`cmux read-screen --workspace "$WS" --surface <ref>`) or the transcript for the
+question itself, then answer it the way you send any other input.
 
 Pass `persistent: true` for a run that may outlast a single Monitor timeout.
 
-Four verified behaviours are already handled in that filter. Do not "simplify"
+**Confirm the watcher is still alive before you send the task.** An armed
+`Monitor` can die within the minute — observed exit 144, roughly 60 s in, with no
+output file ever written — and a dead watcher is indistinguishable from a healthy
+one that has nothing to report yet. Arming it is not the same as having it:
+
+```bash
+pgrep -f "watch-workers.py.*${CMUX_SURFACE_ID}" >/dev/null \
+  || echo "watcher is not running -- re-arm it before sending the task"
+```
+
+Re-arm and re-check if that comes back empty. Sending a task to an unwatched
+worker is the silent deafness this section exists to prevent, and it costs one
+`pgrep` to rule out.
+
+Five verified behaviours are already handled in that filter. Do not "simplify"
 them away:
 
+- **A question *suspends* the turn rather than ending it, so no `Stop` fires.**
+  A filter that watches only for endings is therefore totally deaf to the single
+  most common reason a worker needs you. Measured 2026-08-07: one watcher, one
+  worker — silence through two consecutive `AskUserQuestion` blocks, then a
+  correct `DONE` the moment that worker ended a turn for real. The pipeline was
+  never broken; it was listening for the wrong thing. cmux gives the block its own
+  event name, `agent.hook.AskUserQuestion`, and that is what `ASK` is built on.
 - **One turn end is four frames.** Each hook arrives as a `received`/`completed`
   pair, then again ~275 ms later once the surface resolves. Without the 5 s
-  collapse window you report three completions for one stage.
-- **`agent.hook.Notification` fires on normal finishes too**, so it cannot mean
-  "needs attention". `agent.hook.PermissionRequest` is the precise mid-turn block.
+  collapse window you report three completions for one stage. A *block* behaves
+  differently: one `received` frame the moment it blocks, then a `completed` twin
+  sharing its `_opencode_request_id` a fixed **~115 s** later carrying
+  `status: timed_out`. That twin is the hook's own timeout expiring, **not** the
+  question being answered — measured at 114.97–115.01 s across 10 of 10 blocks,
+  including ones answered in half that time. Do not read it as "the worker is
+  unblocked"; nothing on the bus says that. Blocks are therefore de-duplicated by
+  request id rather than by a time window — two questions eight seconds apart are
+  two questions, and a window wide enough to swallow the second is this same
+  silent deafness in a smaller costume.
+- **`agent.hook.Notification` fires ~6.3 s after a block *and* after a normal
+  finish**, so on its own it still cannot mean "needs attention" — which is why it
+  is not in the filter. What makes the distinction is that cmux emits two precise,
+  separate names: `agent.hook.AskUserQuestion` and `agent.hook.PermissionRequest`
+  (the latter carries the tool in `tool_name`, e.g. `Bash`). Both were observed
+  live; neither is inferred from `Notification`.
 - **Filter by the ledger's session ids, always.** The bus is global across
   workspaces and every config profile, so an unfiltered watcher fires on tabs the
   user owns — and on your own turns, which is a self-trigger loop.
@@ -319,15 +372,27 @@ them away:
   lengths. The event is the trigger; `cmux list-notifications` is still how you
   read what it actually said.
 
+**One caveat this skill could not test.** Every block name above rides on Claude
+Code's `PermissionRequest` hook, and cmux's own wrapper documents that under
+`--dangerously-skip-permissions` (permission mode `bypassPermissions`) that hook
+does not fire at all — which would make a bypass worker silent again, one flag
+away from the bug this section exists to prevent. The filter carries a
+`PreToolUse` fallback for exactly that case, the path the wrapper names as its
+needs-input substitute. Spawning with that flag was refused in this environment,
+so the fallback rests on the wrapper's comments rather than on a live run: it is
+built to stay inert in normal mode (verified), but treat a bypass worker's
+watcher as **unproven** and check on that worker by hand.
+
 **There is no lighter option for one worker.** A backgrounded
 `cmux events --name agent.hook.Stop … | grep -m1 "claude-$SID"` looks like it
 gives you the single notification you need, and it is wrong twice over:
 
-- **It can only see turn *ends*.** `PermissionRequest` and `SessionEnd` are not
-  `Stop`, so a worker blocked on an approval prompt and a worker that died are
-  both indistinguishable from one still working. You wait, it waits, nothing
-  reports. The three-way `DONE`/`ATTN`/`EXIT` split is the entire point of the
-  filter, and this throws it away to save one process.
+- **It can only see turn *ends*.** `AskUserQuestion`, `PermissionRequest` and
+  `SessionEnd` are not `Stop`, so a worker waiting on a question, a worker blocked
+  on an approval prompt, and a worker that died are all three indistinguishable
+  from one still working. You wait, it waits, nothing reports. The four-way
+  `DONE`/`ASK`/`ATTN`/`EXIT` split is the entire point of the filter, and this
+  throws it away to save one process.
 - **`grep -m1` does not reliably end the pipeline.** It stops reading at the
   match, but `cmux events` only learns that on its *next* write, so the command
   can sit there matched-but-not-exited — and a completion notification that
@@ -404,10 +469,30 @@ unsent input it ought to clear. It is neither: it is a suggestion, and sending
 `enter` would submit it. Judge from the transcript or the event, and treat prompt
 contents as decoration.
 
-**`Waiting` on its own is still ambiguous** — a finished agent and one parked on
-a prompt both reach it, and `claude agents` says `idle` either way. When it
-matters, read the screen (`cmux read-screen --workspace "$WS" --surface <ref>`) or the transcript
-rather than guessing from the event.
+**A `Waiting` subtitle on its own is still ambiguous** — a finished agent and one
+parked on a prompt both reach it. The *registry* is what tells them apart, and it
+is a three-state field, not two: `claude agents --json` reports **`waiting`** for a
+worker suspended on a prompt, **`busy`** for one working, and **`idle`** for one
+that finished. Measured across transitions 2026-08-07 —
+`idle → busy → waiting → busy → idle`, with `waiting` held stably for 69 s — so it
+is a real state and not a blink between two others. That makes the registry a
+usable poll signal on its own; it does not need the event bus to notice a block.
+
+**`status` alone does not say *which* prompt — the sibling `waitingFor` field
+does.** Measured side by side, three workers blocked at once:
+
+| blocked on | `status` | `waitingFor` |
+| --- | --- | --- |
+| `AskUserQuestion` | `waiting` | `input needed` |
+| a tool approval | `waiting` | `permission prompt` |
+
+So the registry answers both questions on its own — *is it blocked* and *on what* —
+which makes it a complete poll-side equivalent of the bus's `ASK`/`ATTN` split.
+Read `waitingFor`, not just `status`; a loop that branches on `status` alone
+treats a question and an approval as the same event and will answer the wrong one.
+
+Neither field carries the *content* of the prompt. For that, read the screen
+(`cmux read-screen --workspace "$WS" --surface <ref>`) or the transcript.
 
 ## Chain stages
 
@@ -497,8 +582,10 @@ cmux close-surface --workspace "$WS" --surface "$ref"
   case the user is reading a third pane at the time.
 - The scrollback dies with the surface; the session does not.
   `claude --resume <sessionId>` brings it back, so say that when you ask.
-- `busy`, or a `Waiting` notification you have not read yet, means not done.
-  Leave those open and say which ones you left and why.
+- `busy`, `waiting`, or a `Waiting` notification you have not read yet, means not
+  done. A `waiting` worker is stopped on a prompt and will sit there forever —
+  closing it discards whatever it was about to do. Leave those open, and say which
+  ones you left and why.
 - `registry=gone` with `claude=no` is the true orphan: a dead worker sitting in a
   bare shell. Lead with those.
 - Prune closed rows from the ledger so the next offer is not a list of ghosts.
@@ -564,9 +651,17 @@ which is the one failure this whole section exists to prevent.
   running `watch-workers.py` against the ledger, for one worker or for ten. The
   `Monitor` **tool**: the same pipeline backgrounded with `Bash` streams into a
   file nobody reads and notifies you only if it exits, which it never does. A poll
-  loop dies with the turn; a run that outlives it is a run nobody is watching. Any
-  hand-rolled substitute that greps the bus directly is blind to `ATTN` and `EXIT`,
-  which is to say blind to every way a run fails.
+  loop dies with the turn; a run that outlives it is a run nobody is watching. A
+  hand-rolled substitute that greps the bus for `agent.hook.Stop` sees only turns
+  that **ended** — never a worker *suspended* on a question or a permission prompt,
+  because a suspended turn never fires `Stop` at all. That is not an edge case: a
+  question is the most common reason a worker needs you, and missing it looks
+  exactly like a worker still working. Match all four names the filter matches, or
+  use the filter.
+- **`DONE` means a turn ended, not that the work is done.** A worker parked
+  awaiting its own background sub-agent fires `Stop` like any other turn end, so
+  check the transcript before reporting a stage complete on the strength of a
+  `DONE` alone.
 - **The ledger is on disk**, at
   `${TMPDIR:-/tmp}/cmux-spawn-agent/<caller surface id>.tsv` — keyed by the
   caller's surface, so it is exactly this run's spawns and nothing else. That is
