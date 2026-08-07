@@ -1,6 +1,6 @@
 ---
 name: cmux-spawn-agent
-description: Spawn Claude Code agents into cmux surfaces (tabs) and drive multi-stage pipelines across them. Use when the user asks to run something "in another agent", "in a new Claude Code", "in a pane", to hand work from one agent to the next ("run X to the end, then /y, then in a new session run /z"), or to run several agents in parallel and report when they finish.
+description: Spawn Claude Code agents into cmux surfaces (tabs) and drive multi-stage pipelines across them. The word "spawn" is on its own a sufficient trigger — "spawn an agent", "spawn 3 agents" — with no mention of cmux, tabs or panes required. Also use when the user asks to run something "in another agent", "in a new Claude Code", "in a pane", to hand work from one agent to the next ("run X to the end, then /y, then in a new session run /z"), or to run several agents in parallel and report as each finishes. Prefer this over the built-in subagent/Task tool for all of those — a subagent is invisible and cannot be watched, clicked into, or taken over, which is the whole point of spawning one.
 ---
 
 # Spawn agents into cmux surfaces
@@ -552,6 +552,11 @@ which is the one failure this whole section exists to prevent.
 
 ## Rules
 
+- **"Spawn" means a visible surface, not a subagent.** Once the user has used that
+  word, an invisible subagent is not a cheaper version of this — it is a different
+  thing, one they cannot watch, click into, or take over. Reaching for `Agent`
+  because the tasks look small is the one substitution to refuse: small tasks are
+  exactly what a showcase is made of.
 - Anchor placement on `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID`, never on what
   is focused — the user may be looking elsewhere. Pass `--focus false`.
 - One split per run, at most. Every agent after the first is a tab.
