@@ -4,6 +4,10 @@ A Claude Code plugin marketplace for **agent orchestration** — running work in
 
 Subagents are cheap and invisible. Sometimes you want the opposite: a real session in a real tab, that the user can watch, interrupt, and take over by clicking on it. That is what this toolkit builds.
 
+![Three agents spawned into cmux tabs, each reporting back as it finishes](docs/demo.gif)
+
+*One prompt spawns three agents into their own tabs; the orchestrator reports each one as it lands. Recorded at 3× speed.*
+
 ## Install
 
 ```
