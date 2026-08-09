@@ -37,6 +37,14 @@ The skill is written as a set of verified behaviours rather than an API tour —
 
 **Requires:** [cmux](https://github.com/manaflow-ai/cmux) (the skill refuses to spawn outside a cmux terminal), `python3`, and `claude` on `PATH`.
 
+### `/agent-toolkit:cmux-spawn-agent-smoke`
+
+Makes the skill above prove itself on your machine — after an install, after an upgrade, or when a run has started feeling wrong. Ten checks, one split, one worker, about five minutes.
+
+It is not a code review. It exercises the handful of things that have actually broken here and that reading cannot settle: that a worker lands in its own pane rather than covering the session you are talking to, that it becomes addressable under the name it was launched with, that the round trip is accepted on the worker's first attempt, and that teardown leaves no stranded tab and no orphaned watcher. Each check names the signal you look at and what its failure means, because several unrelated faults in this plugin share one signature and "it timed out" is not a diagnosis.
+
+It opens with a staleness gate, which is the check most worth having and the one nobody thinks to write: skill text is resolved once at session start and cached for the life of that process, so a session that started before the plugin changed will smoke-test bytes nobody ships — and report a clean pass for them.
+
 ## Conventions
 
 - A skill bound to a specific terminal host carries that host as a prefix (`cmux-`). Host-agnostic skills take a bare name — the marketplace is about agents, not about any one terminal.
@@ -50,7 +58,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.4.0 — "Shakedown"** (an end-to-end audit against live workers — the watcher no longer swallows a DONE on a torn registry read, no longer goes deaf in silence, and the skill no longer tells you to kill the worker you are rescuing)
+Latest: **v0.5.0 — "Litmus"** (a five-minute smoke test that makes the machine prove spawning still works — a real worker in a real tab, a real round trip, and a staleness gate that catches a session testing bytes nobody ships)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that

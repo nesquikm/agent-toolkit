@@ -15,11 +15,13 @@ The marketplace is deliberately named for agents, not for any one terminal. `cmu
 plugins/agent-toolkit/                   → The plugin
 ├── .claude-plugin/plugin.json           → Plugin manifest
 └── skills/
-    └── cmux-spawn-agent/                → /agent-toolkit:cmux-spawn-agent
-        ├── SKILL.md
-        ├── peer.py                      → worker name → socket address / status / cwd / sessionId
-        ├── surface.py                   → cmux surface ref ↔ uuid, pane, tty
-        └── watch-workers.py             → polls the peer registry → one line per worker state change
+    ├── cmux-spawn-agent/                → /agent-toolkit:cmux-spawn-agent
+    │   ├── SKILL.md
+    │   ├── peer.py                      → worker name → socket address / status / cwd / sessionId
+    │   ├── surface.py                   → cmux surface ref ↔ uuid, pane, tty
+    │   └── watch-workers.py             → polls the peer registry → one line per worker state change
+    └── cmux-spawn-agent-smoke/          → /agent-toolkit:cmux-spawn-agent-smoke
+        └── SKILL.md                     → ten checks that prove the above works on this machine
 .claude/skills/release/                  → /release — this repo's own release ceremony
 ```
 
