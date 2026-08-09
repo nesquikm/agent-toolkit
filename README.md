@@ -24,13 +24,13 @@ Subagents are cheap and invisible. Sometimes you want the opposite: a real sessi
 
 Spawn Claude Code agents into [cmux](https://github.com/manaflow-ai/cmux) surfaces (tabs) and drive multi-stage pipelines across them.
 
-The move that makes a visible agent controllable is **assigning its session id before launch** — that id is the join key to its registry status, its notifications, and its transcript. Everything else follows from it.
+The move that makes a visible agent controllable is **naming it at launch** (`claude -n <name>`) — that name is the join key to its registry status, its notifications, and its transcript. Everything else follows from it.
 
 What the skill encodes:
 
-- **Placement that doesn't disturb the user.** One split per run at most; every agent after the first is a tab in that same pane. Placement is anchored on the caller's own workspace and surface, never on whatever happens to be focused — `new-pane` has no target flag and will cut an unrelated pane in half while you sit somewhere else.
-- **Push-based waiting.** A polling loop only runs while you are inside a turn, so any stage that outlives the turn is a stage nobody is watching. The bundled `watch-workers.py` filters cmux's event bus down to this run's workers and emits one line per turn end (`DONE` / `ATTN` / `EXIT`), each of which re-invokes the orchestrator. A polling fallback is documented for answers needed inside one turn.
-- **A ledger that survives you.** Every spawn writes a TSV row keyed by the caller's surface; rows flip to `reported` only once the user has actually been told that worker's outcome. `awk -F'\t' '$5!="reported"'` is the answer to "what am I still owed?" at the start of any turn, with nothing remembered.
+- **Placement that doesn't disturb the user.** One split per run at most; every agent after the first is a tab in that same pane. Placement is anchored on the caller's own workspace and surface, never on whatever happens to be focused — `new-pane` cannot be aimed at a pane and so will cut an unrelated pane in half while you sit somewhere else.
+- **Push-based waiting.** A polling loop only runs while you are inside a turn, so any stage that outlives the turn is a stage nobody is watching. The bundled `watch-workers.py` polls Claude Code's peer registry, filtered down to this run's workers, and emits one line per state change (`DONE` / `ASK` / `ATTN` / `CLEAR` / `GONE`), each of which re-invokes the orchestrator. A sixth line, `WARN`, is not a worker signal at all — it names no worker and fires once, about 30 s in, to say the watcher matches no live session and is therefore watching nothing.
+- **A ledger that survives you.** Every spawn writes a TSV row keyed by the caller's surface; rows flip to `reported` only once the user has actually been told that worker's outcome. `awk -F'\t' '$4!="reported"'` is the answer to "what am I still owed?" at the start of any turn, with nothing remembered.
 - **Cleanup as a proposal.** Only surfaces in this run's ledger are ever offered for closing, and only after the user confirms. A tab you did not spawn is the user's, however idle it looks.
 
 The skill is written as a set of verified behaviours rather than an API tour — each rule in it exists because the obvious alternative was tried and silently did the wrong thing.

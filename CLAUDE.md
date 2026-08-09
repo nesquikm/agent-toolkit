@@ -17,7 +17,9 @@ plugins/agent-toolkit/                   → The plugin
 └── skills/
     └── cmux-spawn-agent/                → /agent-toolkit:cmux-spawn-agent
         ├── SKILL.md
-        └── watch-workers.py             → stdin filter: cmux event bus → one line per worker turn end
+        ├── peer.py                      → worker name → socket address / status / cwd / sessionId
+        ├── surface.py                   → cmux surface ref ↔ uuid, pane, tty
+        └── watch-workers.py             → polls the peer registry → one line per worker state change
 .claude/skills/release/                  → /release — this repo's own release ceremony
 ```
 
@@ -50,20 +52,37 @@ surprising property of this repo:
 **Whatever branch is checked out here is what every session in both profiles loads** —
 including sessions in unrelated projects, since the plugin is installed at *user*
 scope. Not the tagged version, not `main`, not the cache: the bytes on disk at
-`plugins/agent-toolkit/skills/…` at the moment a skill loads. Uncommitted edits count
-too; it tracks the filesystem, not git.
+`plugins/agent-toolkit/skills/…` at the moment a session starts. Uncommitted edits
+count too; it tracks the filesystem, not git.
 
 Verified 2026-08-06: with `test/release-dry` checked out, a probe session in each
 profile loaded skill text byte-identical to that branch's tip and differing from
 `main` by 28 lines, while `claude plugin list` reported a clean `0.1.0` in both.
 
-Two consequences:
+Three consequences:
 
 - **The version string tells you nothing about what is loaded.** `installed_plugins.json`
   pinned `0.1.0` and `gitCommitSha: cd966c7` while `HEAD` was several commits past it.
   To know what a session is running, check `git rev-parse HEAD` here — not the version.
 - **Don't leave an experimental branch checked out.** Return to `main` when you stop
   working on a branch, or you are silently running unreviewed skill text everywhere.
+- **A session cannot see its own edits to a skill.** Skill text is resolved once, at
+  session start, and cached in the running process; the `Skill` tool does not re-read
+  the tree when it fires. A session that was already running when you edited a skill
+  keeps serving the old text for the rest of its life, and nothing in its behaviour
+  signals that it is stale. Subagents inherit the snapshot of the `claude` process
+  hosting them, so spawning a fresh one to check an edit returns its parent's text,
+  not the tree's — there is no way to verify the edit from inside. Read "an edit is
+  live in the next session" literally: **the next session**, meaning a `claude`
+  process started after the edit. Here the natural one is a worker spawned into a
+  fresh cmux tab by the very skill under test.
+
+  Verified 2026-08-09: `SKILL.md` was edited at 13:57:41. A subagent inside a `claude`
+  process started at 13:16:29 was served the pre-edit text — all seven markers checked
+  were absent and the served text matched the pre-edit content exactly — while a
+  worker spawned into a fresh cmux tab at 14:10:31 was served the post-edit text, all
+  seven markers present. Same working tree, same `directory`-source install, same
+  moment; the only variable was process start time.
 
 ## Release Files
 
