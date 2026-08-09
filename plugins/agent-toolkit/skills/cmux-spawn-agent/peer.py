@@ -40,7 +40,11 @@ def alive(pid):
 
 def find(name):
     root = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    for d in root.split(":"):
+    # Drop empty segments, as watch-workers.py does. A trailing or doubled colon
+    # — what a shell hook appending a profile path produces — otherwise leaves
+    # d == "" and the glob degrades to the relative `sessions/*.json`, read from
+    # whatever directory the caller happened to be standing in.
+    for d in [d for d in root.split(":") if d]:
         for path in glob.glob(os.path.join(d, "sessions", "*.json")):
             try:
                 with open(path) as fh:

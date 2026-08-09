@@ -18,15 +18,24 @@ One line per state change, each becoming a chat notification:
   DONE  <name>  went from working to idle, so a turn ended
   CLEAR <name>  stopped being blocked without a turn running — nothing to collect
   GONE  <name>  its process is no longer running (clean exit, crash, or kill)
+  WARN  <text>  the watcher itself is deaf — it matches nothing, so it will
+                never report anything. Emitted at most once per run.
 """
 
 import glob
 import json
 import os
+import signal
 import sys
 import time
 
-POLL = float(sys.argv[2]) if len(sys.argv) > 2 else 2.0
+USAGE = "usage: watch-workers.py <ledger.tsv> [poll_seconds]"
+
+# How long a watcher may match nothing before it says so. Not zero: the ledger
+# row is written *before* its worker is launched, so "no match yet" is the
+# normal state for the seconds a `claude` spends booting and registering, and
+# warning on the first poll would cry wolf on every healthy run.
+WARN_AFTER = 30.0
 
 
 def registry_dirs():
@@ -35,12 +44,18 @@ def registry_dirs():
 
 
 def wanted(ledger):
-    """Names this run owns. Missing/short lines are skipped, not fatal."""
+    """Names this run owns, or None when the ledger cannot be read at all.
+
+    Missing/short lines are skipped, not fatal. The None matters: returning an
+    empty set for an unreadable ledger makes "the path is wrong" look exactly
+    like "no workers yet", and both then look like a healthy quiet watcher.
+    Only main() has the context to say which, so hand it the difference.
+    """
     try:
         with open(ledger) as fh:
             return {ln.split("\t")[0].strip() for ln in fh if ln.strip()}
     except OSError:
-        return set()
+        return None
 
 
 def alive(pid):
@@ -58,19 +73,93 @@ def alive(pid):
     return True
 
 
-def snapshot(names):
-    """name -> state, for every wanted name with a live process."""
+def read_record(path):
+    """(record, torn) for one registry file.
+
+    A record is rewritten in place — read, modify, write to the live path, no
+    tmp file and no rename — so a reader can catch one mid-write. What it sees
+    then depends on the runtime: bun does not pass O_TRUNC, so a *shortening*
+    write leaves fresh JSON followed by a stale tail (`...}10,"waitingFor":...`,
+    measured at a 0.65 us window, 563 failures in 2.07 M reads); node does pass
+    it, so the file is genuinely empty for ~11 us on *every* write. Both land
+    here as ValueError, and a retry microseconds later clears it.
+
+    `torn` distinguishes the two failures that must not be treated alike: a file
+    that will not parse *while its process is still alive* is a session in an
+    unknown state, while a file that is not there — or one whose process is gone —
+    is a session that is gone. That liveness qualifier is what keeps a permanent
+    tear from reading as an immortal worker; see the comment on the fall-through.
+    """
+    for _ in range(2):
+        try:
+            with open(path) as fh:
+                rec = json.load(fh)
+        except OSError:
+            return None, False  # deleted between the glob and the open
+        except ValueError:
+            continue  # caught mid-write; read it again immediately
+        # A fragment can parse and still not be a record. Anything that is not
+        # a mapping would reach rec.get() below and take the whole watcher down
+        # with an AttributeError, so treat it as another torn read.
+        if isinstance(rec, dict):
+            return rec, False
+
+    # Falling out of the loop is *no information about the state*, which is not the
+    # same as evidence of life — though the two look identical while the process
+    # lives. A worker killed between the O_TRUNC and its write leaves a file that
+    # will never parse again, and SIGKILL skips the exit handler that would unlink
+    # it, so the corpse stays torn on disk forever. Called torn, that name is held
+    # by the absence loop, never counts a miss, and never gets its GONE — the one
+    # signal a dead worker cannot send for itself. So resolve it against the pid,
+    # which on this path lives only in the filename: the body is unparseable here
+    # by definition, so there is no second source to prefer over it.
+    try:
+        pid = int(os.path.basename(path).split(".")[0])
+    except ValueError:
+        return None, True  # not a pid-named file; nothing to check it against
+    # alive() answers True on PermissionError, so a pid we may not signal is held
+    # rather than reported dead. Deliberate: this path wants "provably alive" while
+    # the record path wants "not provably dead", and alive() spells only the second.
+    # The gap needs pid reuse across a user boundary *and* a permanent tear, so it
+    # is named here rather than engineered around — silence beats a false GONE.
+    return (None, True) if alive(pid) else (None, False)
+
+
+def snapshot(names, paths):
+    """(name -> state, names caught mid-write, the memo for the next poll).
+
+    `paths` maps a registry file to the wanted name last read out of it. It is
+    what makes a torn read attributable at all: the file is named for the pid,
+    so the name lives *inside* the bytes that failed to parse, and under node
+    there are none left to salvage it from.
+
+    It is rebuilt from this poll's glob rather than added to, so a watcher armed
+    for hours cannot accumulate an entry for every session file that has ever
+    existed on the machine — it holds at most one per wanted, live worker.
+    """
     out = {}
+    torn = set()
+    fresh = {}
     for d in registry_dirs():
         for path in glob.glob(os.path.join(d, "*.json")):
-            try:
-                with open(path) as fh:
-                    rec = json.load(fh)
-            except (OSError, ValueError):
-                continue  # mid-rewrite; the next poll gets it
+            rec, was_torn = read_record(path)
+            if rec is None:
+                # Neither a state nor an absence. Keep the name so the caller can
+                # leave its prior state standing, and keep the memo entry with it —
+                # dropping it here would strand the name on a second torn poll. A
+                # file never yet read has no name to keep, so it is skipped entirely
+                # and picked up whole on the next poll. The `in names` re-check is
+                # against the *current* ledger: a name dropped from it since the memo
+                # was written must not ride a further poll on a stale entry.
+                name = paths.get(path)
+                if was_torn and name in names:
+                    fresh[path] = name
+                    torn.add(name)
+                continue
             name = rec.get("name")
             if name not in names or not alive(rec.get("pid")):
                 continue
+            fresh[path] = name
             status = rec.get("status")
             if status == "waiting":
                 waiting_for = rec.get("waitingFor") or ""
@@ -84,20 +173,73 @@ def snapshot(names):
                 # otherwise become a state of its own, so the -> idle transition
                 # out of it would not be recognised and the DONE would be lost.
                 out[name] = "busy"
-    return out
+    return out, torn, fresh
 
 
 def main():
+    # Monitor closes the pipe when it stops reading, and CPython turns that into
+    # a BrokenPipeError plus an "Exception ignored in: <stdout>" dump at
+    # interpreter shutdown. Nothing is lost — the watcher was being torn down
+    # anyway — but the tail of a Monitor ends on what reads as a crash. Dying
+    # from SIGPIPE like any other filter says the same thing silently.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
     if len(sys.argv) < 2:
-        sys.exit("usage: watch-workers.py <ledger.tsv> [poll_seconds]")
+        sys.exit(USAGE)
     ledger = sys.argv[1]
+
+    # Parsed here, not at import: as a module-level `float(sys.argv[2])` this
+    # ran sixty lines before the check above could reject it, so the usage
+    # message was unreachable and a bad interval was a ValueError traceback in
+    # the supervisor's notification stream instead. Non-positive is rejected for
+    # the same reason — it reaches time.sleep and dies there.
+    poll = 2.0
+    if len(sys.argv) > 2:
+        try:
+            poll = float(sys.argv[2])
+        except ValueError:
+            sys.exit(USAGE)
+        if not 0 < poll < 86400:  # excludes nan and inf, which sleep rejects
+            sys.exit(USAGE)
+
     seen = {}
+    misses = {}
+    paths = {}  # registry file -> its name, so a torn read is still attributable
+    # A watcher that matches nothing *would* print nothing forever, which is
+    # exactly what a healthy watcher with busy workers looks like — that is the
+    # problem this clock exists to solve, not the behaviour still in effect. It
+    # is reachable today: the ledger path is keyed by the cmux surface, which
+    # outlives any one `claude`, so a restarted session inherits the old rows.
+    # Say it once. None once anything has matched, which also makes the warning
+    # one-shot without a second flag.
+    deaf_since = time.monotonic()
 
     while True:
         names = wanted(ledger)
-        now = snapshot(names)
+        if names:
+            now, torn, paths = snapshot(names, paths)
+        else:
+            now, torn = {}, set()
+
+        if now or torn:
+            deaf_since = None
+        elif deaf_since is not None and time.monotonic() - deaf_since >= WARN_AFTER:
+            if names is None:
+                print(f"WARN ledger unreadable, watching nothing: {ledger}", flush=True)
+            elif not names:
+                # Zero rows is its own case: "none match" reads as a mismatch,
+                # and there is nothing here to mismatch.
+                print(f"WARN ledger is empty, watching nothing: {ledger}", flush=True)
+            else:
+                print(
+                    f"WARN ledger has {len(names)} row(s), none match a live "
+                    f"session name: {ledger}",
+                    flush=True,
+                )
+            deaf_since = None
 
         for name, state in now.items():
+            misses.pop(name, None)
             was = seen.get(name)
             if was == state:
                 continue
@@ -123,10 +265,43 @@ def main():
         for name in [n for n in seen if n not in now]:
             # Only ever for a worker seen alive at least once, so a name in the
             # ledger before its `claude` has registered is not reported dead.
+            if name in torn:
+                # Its file is right there, it just could not be parsed this
+                # tick, which says nothing about the worker. Hold the last known
+                # state and say nothing. The state is what matters: dropping the
+                # name here would `del seen[name]` below, and the sighting after
+                # that would count as a *first* sighting — first sight of idle
+                # is silent by design, so a worker that finished during the gap
+                # would lose its DONE and never get another. That is the one
+                # line a supervisor is told to treat as an ending, for the one
+                # worker that cannot report itself. And the transitions this
+                # window can eat are exactly the ones worth keeping: a torn read
+                # only happens on a *shortening* write, so busy->idle (same
+                # length) is safe, but shell->idle is a DONE and waiting->idle
+                # is a CLEAR, and both shrink.
+                # `continue` also leaves any pending miss count standing rather
+                # than resetting it. Holding and resetting are indistinguishable
+                # in practice — nothing writes a dead session's file, so a worker
+                # cannot tear repeatedly on its way out — and the torn hazard that
+                # is actually reachable is the *permanent* tear, which read_record
+                # now resolves to an absence rather than leaving to this loop.
+                continue
+            # Two consecutive absences, not one. Insurance rather than a fix for
+            # something observed — 8.8 M reads produced no transient absence,
+            # and no code path makes one — so it costs a real death one poll
+            # (~2 s) of latency to cover a glob/stat race nobody has measured.
+            # Cheap in the right direction: a GONE worker is already dead and
+            # nothing races on it. Strictly consecutive, reset on every sighting
+            # above, because a cumulative count would eventually reach 2 on a
+            # name that merely missed twice over a long run and kill it.
+            misses[name] = misses.get(name, 0) + 1
+            if misses[name] < 2:
+                continue
             print(f"GONE {name}", flush=True)
             del seen[name]
+            del misses[name]
 
-        time.sleep(POLL)
+        time.sleep(poll)
 
 
 if __name__ == "__main__":
