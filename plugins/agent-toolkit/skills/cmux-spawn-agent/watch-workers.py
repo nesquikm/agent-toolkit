@@ -13,10 +13,11 @@ watch a non-default profile; colon-separate several to watch them all at once.
 
 One line per state change, each becoming a chat notification:
 
-  ASK  <name>   suspended on AskUserQuestion  — will not resolve without a human
-  ATTN <name>   suspended on a permission prompt or a plan approval — likewise
-  DONE <name>   its turn ended
-  GONE <name>   its process is no longer running (clean exit, crash, or kill)
+  ASK   <name>  suspended on AskUserQuestion — will not resolve without a human
+  ATTN  <name>  suspended on a permission prompt or a plan approval — likewise
+  DONE  <name>  went from working to idle, so a turn ended
+  CLEAR <name>  stopped being blocked without a turn running — nothing to collect
+  GONE  <name>  its process is no longer running (clean exit, crash, or kill)
 """
 
 import glob
@@ -43,6 +44,11 @@ def wanted(ledger):
 
 
 def alive(pid):
+    # Guard the value before signalling. os.kill(-1, 0) does not mean "no such
+    # process" — it addresses *every* process the user may signal, and answers
+    # yes, so a record with no usable pid would read as a healthy worker forever.
+    if not isinstance(pid, int) or pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -63,14 +69,21 @@ def snapshot(names):
             except (OSError, ValueError):
                 continue  # mid-rewrite; the next poll gets it
             name = rec.get("name")
-            if name not in names or not alive(rec.get("pid", -1)):
+            if name not in names or not alive(rec.get("pid")):
                 continue
             status = rec.get("status")
             if status == "waiting":
                 waiting_for = rec.get("waitingFor") or ""
                 out[name] = "ask" if "input" in waiting_for else "attn"
+            elif status == "idle":
+                out[name] = "idle"
             else:
-                out[name] = status or "idle"
+                # Everything that is not idle and not waiting means working.
+                # Collapse rather than pass through: the registry emits at least
+                # `busy` and `shell`, and a value this file has not seen would
+                # otherwise become a state of its own, so the -> idle transition
+                # out of it would not be recognised and the DONE would be lost.
+                out[name] = "busy"
     return out
 
 
@@ -94,8 +107,17 @@ def main():
                 print(f"ASK  {name}", flush=True)
             elif state == "attn":
                 print(f"ATTN {name}", flush=True)
-            elif state == "idle" and was in ("busy", "ask", "attn"):
+            elif state == "idle" and was == "busy":
                 print(f"DONE {name}", flush=True)
+            elif state == "idle" and was in ("ask", "attn"):
+                # Unblocked with no working state in between, so no turn ran.
+                # A terminal UI overlay opening and closing over an already-idle
+                # worker lands here, and so does a held peer message that was
+                # denied. Reporting DONE for either would hand a supervisor a
+                # completion for a worker that did nothing, which is worse than
+                # saying less: DONE is the one line it is told to trust as an
+                # ending. Observed 2026-08-09 as a spurious ATTN->DONE pair.
+                print(f"CLEAR {name}", flush=True)
             seen[name] = state
 
         for name in [n for n in seen if n not in now]:
