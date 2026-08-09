@@ -8,18 +8,100 @@ description: Spawn Claude Code agents into cmux surfaces (tabs) and drive multi-
 Run work in separate Claude Code sessions that live in visible cmux surfaces, so
 the user can watch each one and take it over by clicking its tab.
 
-The move that makes a *visible* agent controllable is **assigning its session id
-before launch**. That id is the join key to its status and its output.
+**The join key is the name you give at launch** (`claude -n <name>`). One string is
+the tab title, the peer-registry key and the message address at once. Nothing has
+to be pre-assigned — no `--session-id`, no `uuidgen`.
+
+Two channels reach a worker, and they are **not** interchangeable:
+
+| | `SendMessage` (cross-session messaging) | `cmux send` + `send-key` |
+| --- | --- | --- |
+| what it is | a message from a peer session | keystrokes, as if the user typed them |
+| carries | prose only | anything, including slash commands |
+| quoting | none — it is a tool argument | shell-quoted through a terminal |
+| the worker replies | yes, and the reply interrupts you with the result in it | no |
+| reaches a **blocked** worker | no — it queues until the block clears | yes, and it is the only thing that clears one |
+
+Default to `SendMessage` for tasks and prose. Use keys for slash commands, for
+answering a prompt, and whenever the worker must act on the user's own authority.
 
 | Need | Source |
 | --- | --- |
 | where you are | `cmux --json identify` → `.caller` (`.focused` is wherever the user drifted) |
 | layout, ttys, titles | `cmux --json --id-format both tree --workspace "$CMUX_WORKSPACE_ID"` |
-| identity + busy/waiting/idle | `claude agents --json` (keyed by the id you assigned) |
-| structured output | `<config-dir>/projects/<esc-cwd>/<sessionId>.jsonl` |
-| send input | `cmux send --surface <ref>` + `cmux send-key --surface <ref> enter` |
-| handed-back-to-you | `cmux list-notifications --json`, matched on `surface_id` |
-| finished, **pushed to you** | `cmux events --category agent`, matched on `payload.session_id` |
+| a worker's pid, cwd, session id, status, **message address** | `<config-dir>/sessions/<pid>.json`, matched on `name` |
+| finished / blocked / died, **pushed to you** | one `Monitor` running `watch-workers.py` |
+| a stage's actual findings | the worker's own reply message |
+| send a task | `SendMessage` to `uds:<socket>` |
+| answer a prompt | `cmux send-key --surface <ref> enter` |
+
+## The peer registry is a directory of JSON files
+
+Every session with messaging writes `<config-dir>/sessions/<pid>.json` and
+rewrites it whenever its status changes. That file is the whole coordination
+substrate — readable from `Bash`, no event bus, no cmux dependency:
+
+```json
+{"pid":30580,"sessionId":"8669cd04-…","cwd":"/Users/ns/workspace/agent-toolkit",
+ "messagingSocketPath":"/tmp/cc-socks/30580.sock","name":"exp-alpha",
+ "status":"waiting","waitingFor":"input needed"}
+```
+
+Three properties of it are load-bearing:
+
+- **`status` is three-state and `waitingFor` splits the blocked case in two.**
+  `busy` while working, `idle` when the turn ended, and `waiting` with
+  `waitingFor: "input needed"` (an `AskUserQuestion`) or
+  `waitingFor: "permission prompt"` (a tool approval or a plan approval). Both
+  measured live 2026-08-09.
+- **The file outlives the process.** A `SIGKILL`ed worker's JSON was still on
+  disk afterwards, unchanged, still saying `idle`. So a glob alone reports a dead
+  worker as healthy forever — **always check the pid** (`os.kill(pid, 0)`).
+  `claude agents --json` does that check for you and drops the row; the files do
+  not, and the watcher below is built on the files.
+- **No `messagingSocketPath` means not messageable.** Sessions started before
+  v2.1.224 register without one; they show up in `claude agents --json` and can
+  never be sent to. Measured: 8 sessions in the registry, 1 reachable.
+
+Look a worker up by name, and refuse to guess:
+
+```bash
+peer() {   # peer <name> -> uds:<socket>, empty if not registered or not messageable
+  python3 - "$1" <<'PY'
+import glob, json, os, sys
+name = sys.argv[1]
+root = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+for d in root.split(":"):
+    for f in glob.glob(os.path.join(d, "sessions", "*.json")):
+        try: r = json.load(open(f))
+        except Exception: continue
+        if r.get("name") != name or not r.get("messagingSocketPath"): continue
+        try: os.kill(r["pid"], 0)
+        except ProcessLookupError: continue
+        print("uds:" + r["messagingSocketPath"]); raise SystemExit
+PY
+}
+```
+
+## Address workers by `uds:`, never by bare name
+
+`SendMessage` takes the socket path straight from that lookup:
+
+```
+{"to": "uds:/tmp/cc-socks/30580.sock", "message": "…"}
+```
+
+**A bare name is refused on first contact.** It comes back
+`'exp-alpha' is not an agent in this conversation. Re-send with the ref…`, and
+the ref (`exp-alpha [28329f]`) is obtainable *only* from a `ListAgents` call —
+it is not derivable from the pid, the session id or the name, and it appears
+nowhere on disk. Worse, **a `uds:` send never whitelists the bare name**:
+`exp-beta` was still refused by name after four successful `uds:` sends to it.
+So a run that mixes the two forms hits the ref wall at an arbitrary moment.
+Address by `uds:` every time and the question never arises.
+
+`ListAgents` is still the right tool for *discovering* sessions this run did not
+spawn. It is the wrong tool for talking to ones it did.
 
 ## Surfaces by default, one pane to hold them
 
@@ -60,8 +142,8 @@ the user's keyboard mid-keystroke. Place the surface correctly instead.
 ## Anchor on yourself
 
 ```bash
-# Refuse rather than guess. BOTH ids, not just the workspace: every placement below
-# passes --surface "$CMUX_SURFACE_ID", and the ledger is keyed by it.
+# Refuse rather than guess. BOTH ids: every placement below passes
+# --surface "$CMUX_SURFACE_ID", and the ledger is keyed by it.
 [ -n "$CMUX_WORKSPACE_ID" ] && [ -n "$CMUX_SURFACE_ID" ] || {
   echo "not in a cmux terminal (need CMUX_WORKSPACE_ID and CMUX_SURFACE_ID); not spawning" >&2
   exit 1
@@ -101,6 +183,15 @@ would then offer you another run's surfaces to close.
 
 ## Spawn one agent
 
+Names are global across every live session on the machine, so **a name collision
+is a mis-delivered task, not a cosmetic clash** — `peer` would hand you the wrong
+socket and the watcher would report the wrong worker's state. Check first:
+
+```bash
+NAME=review-api                      # also the tab title the user reads
+[ -z "$(peer "$NAME")" ] || { echo "a live session is already named $NAME" >&2; exit 1; }
+```
+
 ```bash
 # Reuse this run's agents pane. UUIDs are the durable key; refs are per-call.
 # Every distinct pane this run owns, newest first -- not just the last row's. If the
@@ -121,11 +212,8 @@ else                             # first agent of the run: one split, anchored o
            | grep -o 'surface:[0-9]*')
 fi
 [ -n "$SURF" ] || { echo "no surface came back; not sending anything" >&2; exit 1; }
-PANE=$(surf_field "$SURF" pane_ref)
-SURF_UUID=$(surf_field "$SURF" id)   # notifications are keyed by the UUID, never by surface:N
 
-SID=$(uuidgen | tr 'A-Z' 'a-z')
-cmux send --workspace "$WS" --surface "$SURF" "cd $REPO && claude --session-id $SID -n <name>\n"
+cmux send --workspace "$WS" --surface "$SURF" "cd $REPO && claude -n $NAME\n"
 ```
 
 **`cd` is not optional, and it is easy to drop** — it sits mid-string inside a
@@ -133,46 +221,43 @@ longer `cmux send` line rather than standing on its own, so it goes missing with
 anything looking wrong. It is also self-concealing: a split off your own surface
 inherits *your* cwd, so if you happen to be in the right repo the omission passes
 silently and only misbehaves when you aren't. Read the launch line back before
-sending it, and check `claude agents --json`'s `cwd` afterwards.
+sending it, and check the registry's `cwd` afterwards.
 
-A new terminal inherits the cwd of the pane it came
-from, not the workspace's directory — split off the caller and you get the
-caller's cwd; split off something else and you get *its* cwd (a probe launched
-from one repo came up in an unrelated scratch directory that way). Never rely on
-either. `claude agents --json` reports the `cwd` the worker actually got; check
-it when a worker behaves as though the repo were empty, and remember the
-transcript path follows that cwd, not your intent.
+A new terminal inherits the cwd of the pane it came from, not the workspace's
+directory — split off the caller and you get the caller's cwd; split off something
+else and you get *its* cwd (a probe launched from one repo came up in an unrelated
+scratch directory that way). Never rely on either.
 
 Write the row down before anything else — cleanup reads nothing else, and a
 surface you failed to record is one you must never touch again:
 
 ```bash
-# sid, surface uuid, pane uuid, name, status
-printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$(surf_field "$SURF" id)" "$(surf_field "$SURF" pane_id)" "<name>" spawned >> "$LEDGER"
+# name, surface uuid, pane uuid, state
+printf '%s\t%s\t%s\t%s\n' "$NAME" "$(surf_field "$SURF" id)" "$(surf_field "$SURF" pane_id)" spawned >> "$LEDGER"
 ```
 
-The fifth column is what survives you. Push notifications can be missed — a
-Monitor times out, a turn's context gets summarized — so flip a row to `reported`
-only once you have actually told the user that worker's outcome. Then
-`awk -F'\t' '$5!="reported"' "$LEDGER"` is the answer to "what am I still owed?",
+**Column 1 must be the name and must come first** — the watcher reads exactly
+that field, and column 4 is what survives you. Push notifications can be missed —
+a Monitor times out, a turn's context gets summarized — so flip a row to
+`reported` only once you have actually told the user that worker's outcome. Then
+`awk -F'\t' '$4!="reported"' "$LEDGER"` is the answer to "what am I still owed?",
 and it is answerable at the start of any turn without remembering anything.
 
 **Arm the watcher now** — with that row on disk, and *before* the task is sent.
-It is the `Monitor` in "Push" below, one per run; that section has the exact
+It is the `Monitor` in "Watch" below, one per run; that section has the exact
 command. Arming it here rather than once you start wondering how the worker is
-doing is the difference between a watcher and a post-mortem: a task sent to an
-unwatched worker is only ever observed if this turn happens to still be alive
-when it finishes, and the reason the push path exists is that it usually isn't.
+doing is the difference between a watcher and a post-mortem.
 
-Then **wait for it to register** — that is the readiness signal, so don't guess a
-startup delay:
+Then **wait for it to become addressable** — that is the readiness signal, and it
+is stricter than "the process started": it means registered *and* holding an inbox
+socket, which is exactly the precondition for the `SendMessage` that follows.
 
 ```bash
 n=0
-until claude agents --json | grep -q "$SID"; do
+until [ -n "$(peer "$NAME")" ]; do
   sleep 1
   n=$((n+1))
-  [ "$n" -gt 60 ] && { echo "worker never registered: $SID" >&2; break; }
+  [ "$n" -gt 60 ] && { echo "worker never became addressable: $NAME" >&2; break; }
 done
 ```
 
@@ -182,17 +267,37 @@ until the harness SIGKILLs the whole call (`exit 143`), with the ledger row
 already written and the task never sent. Afterwards that is indistinguishable
 from a worker that sat there and did nothing.
 
-Only now send the task. Send the text and the Enter separately:
+Only now send the task, as a `SendMessage` to the address `peer "$NAME"` returned:
 
-```bash
-cmux send --workspace "$WS" --surface "$SURF" "<the full task prompt>"
-cmux send-key --workspace "$WS" --surface "$SURF" enter
+```
+{"to": "uds:/tmp/cc-socks/30580.sock",
+ "summary": "review-api: audit the auth middleware",
+ "message": "<the whole spec — goal, constraints, what done means>\n\nWhen you are finished, SendMessage the session named `<your own name>` with your findings."}
 ```
 
-Put the **whole** spec in that first prompt — goal, constraints, and what "done"
-means. These are one-shot kickoffs; a worker cannot be clarified as cheaply as a
-conversation. If the user asked for `ultracode`, include that word in the prompt
-text — it is a keyword the worker reads, not a CLI flag.
+Put the **whole** spec in that message — goal, constraints, and what "done" means,
+plus the instruction to report back. These are one-shot kickoffs; a worker cannot
+be clarified as cheaply as a conversation. If the user asked for `ultracode`,
+include that word in the text — it is a keyword the worker reads, not a CLI flag.
+
+**Ask for the findings in the reply, not just an acknowledgement.** The reply
+interrupts you with its body in it, so a worker that answers "counted 89 lines"
+has finished the reporting round trip in one hop. A worker that answers "done"
+has sent you back to its transcript for no reason.
+
+**Name yourself in that instruction.** Your own name is the one thing the worker
+cannot look up about you:
+
+```bash
+ME=$(python3 -c "
+import json,os
+print(json.load(open(os.path.expanduser('~/.claude/sessions/%d.json' % $(ps -o ppid= -p $$ | tr -d ' ')))).get('name',''))")
+```
+
+A worker replying to a *name* hits the same first-contact ref wall you do — but
+the wall is one-sided: the message it received carries a `from=` address it can
+reply to directly, and telling it "reply to the session that sent you this" is
+always sufficient. Name plus that fallback covers both.
 
 ## Spawn several at once
 
@@ -201,7 +306,8 @@ second split, and reusing the pane is what keeps a five-agent run the same size
 as a one-agent run:
 
 ```bash
-for name in audit-api audit-web audit-jobs; do
+for NAME in audit-api audit-web audit-jobs; do
+  [ -z "$(peer "$NAME")" ] || { echo "name taken: $NAME" >&2; continue; }
   # Same live-pane scan as above: first candidate that still exists wins.
   PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
 import json,sys
@@ -215,382 +321,263 @@ print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
     SURF=$(cmux new-split right --workspace "$WS" --surface "$CMUX_SURFACE_ID" --focus false \
              | grep -o 'surface:[0-9]*')
   fi
-  [ -n "$SURF" ] || { echo "no surface for $name" >&2; continue; }
-  SID=$(uuidgen | tr 'A-Z' 'a-z')
-  cmux send --workspace "$WS" --surface "$SURF" "cd $REPO && claude --session-id $SID -n $name\n"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$(surf_field "$SURF" id)" "$(surf_field "$SURF" pane_id)" "$name" spawned >> "$LEDGER"
+  [ -n "$SURF" ] || { echo "no surface for $NAME" >&2; continue; }
+  cmux send --workspace "$WS" --surface "$SURF" "cd $REPO && claude -n $NAME\n"
+  printf '%s\t%s\t%s\t%s\n' "$NAME" "$(surf_field "$SURF" id)" "$(surf_field "$SURF" pane_id)" spawned >> "$LEDGER"
 done
 ```
 
-**Do not collect the refs in a space-joined string** — `for s in $SURFS` iterates
-once in zsh, not once per worker, and you will drive one agent while believing
-you drove four. The ledger is the list: re-read it with
-`while IFS=$'\t' read -r sid su pu name state` and resolve each ref with
-`surf_field "$su" ref` when you need one.
+Then send each one its task with its own `SendMessage`, once `peer "$NAME"` answers.
+
+**Do not collect the names in a space-joined string** — `for n in $NAMES` iterates
+once in zsh, not once per worker, and you will drive one agent while believing you
+drove four. The ledger is the list: re-read it with
+`while IFS=$'\t' read -r name su pu state`.
 
 A new surface also lands **after the selected tab**, not at the end, so never
-infer which worker is which from tab order.
+infer which worker is which from tab order. The tab title is the name
+(`⠂ audit-api`), which is the only thing that distinguishes four identical
+terminals — so name them for the tab bar, because that is how the user reads a
+fan-out.
 
-Don't wait on a fan-out one worker at a time. The single watcher below already
-reports each `DONE` as it lands, keyed by its own ledger row, so a slow agent
-never blocks reporting a fast one — and you never have to pick which one to
-block on.
+Don't wait on a fan-out one worker at a time. Each worker's own reply lands as it
+finishes, so a slow agent never blocks reporting a fast one.
 
-The user watches a fan-out by cycling that pane's tab bar, so **name the sessions
-for the tab bar** (`-n audit-api`, `-n audit-web`): the title is all that
-distinguishes four identical terminals.
-
-## Wait for a stage to finish
-
-A worker stays `idle` for a beat after you press Enter, so a bare "wait until not
-busy" returns instantly and reports a stage that never ran. Take the edge from an
-event, and use the registry for liveness.
+## Watch — two pushes, and you need both
 
 **A stage stops being worked on in two different ways, and only one of them is an
-ending.** It can *end* — the turn finishes and `agent.hook.Stop` fires — or it can
-*suspend*, parked on a question or a permission prompt with the turn still open
-and no `Stop` ever fired. Both leave the worker doing nothing; only the first ever
-resolves on its own. Anything you build here has to observe both, because the
-suspended case is the one where waiting longer never helps.
+ending.** It can *end* — the turn finishes — or it can *suspend*, parked on a
+question or a permission prompt with the turn still open. Both leave the worker
+doing nothing; only the first ever resolves on its own. And a worker can simply
+*die*, which looks like neither.
 
-There are two ways to wait, and **the push one is the default**. A polling loop
-only runs while you are inside a turn, so any stage that outlives the turn is a
-stage nobody is watching. That is how a run goes quiet: you do not decide to stop
-watching, you simply never get called again. Push does not rely on you
-remembering.
+### The worker's reply — results, pushed
 
-### Push — let completion interrupt you
+A worker told to report back sends you a `SendMessage` when it is done, and that
+message interrupts your turn with its body in it. This is the only signal that
+carries **what actually happened**, and it needs no watcher, no polling and no
+transcript read.
 
-Spawned workers already feed cmux's event bus; the Claude wrapper injects the
-hooks, so there is nothing to install. `agent.hook.Stop` carries
-`payload.session_id` as `claude-<the id you assigned at spawn>` — which is the
-whole reason for assigning that id.
+It is not sufficient on its own, for one reason: **a worker that is blocked or
+dead cannot send it.** Which is what the watcher is for.
 
-Arm **one** `Monitor` right after the first spawn — always, including for a run of
-exactly one worker. It covers every worker in the run, including ones spawned
-later, because the filter re-reads the ledger when it changes:
+### The watcher — one Monitor, four signals
 
 ```bash
-cmux events --category agent --no-heartbeat --reconnect \
-| python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" \
+python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" \
     "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
 ```
+
+Arm **one** of these right after the first spawn — always, including for a run of
+exactly one worker. It covers every worker in the run, including ones spawned
+later, because it re-reads the ledger on every poll. Pass `persistent: true` for a
+run that may outlast a single Monitor timeout.
 
 **That block is the `Monitor` tool's `command` — never a `Bash` call.** It is
 written in shell, so backgrounding it with `Bash(run_in_background: true)` looks
 like the same thing done more cheaply. It is silently useless: only a `Monitor`'s
 stdout lines become chat notifications. A backgrounded `Bash` notifies you exactly
-once, when the command *exits* — and this one never exits, because `--reconnect`
-is precisely what keeps it alive. So every `DONE`, `ATTN` and `EXIT` lands in an
-output file nobody reads, while the watcher looks perfectly healthy in `pgrep`.
-The run reports nothing and nothing appears to be wrong, which is the same
-silent-deafness this whole section is built to prevent.
+once, when the command *exits* — and this one never exits. So every signal lands
+in an output file nobody reads, while the watcher looks perfectly healthy in
+`pgrep`.
 
 **That last line spells the ledger path out on purpose — do not shorten it to
 `"$LEDGER"`.** `Monitor` runs this in a shell of its own, which never saw the
 assignment you made in some earlier `Bash` call. `$LEDGER` there expands to the
-empty string, the watcher `stat`s nothing, its ledger reads as zero rows, and every
-worker is filtered out as unknown. You get a watcher that runs happily and reports
-nothing — indistinguishable from a run where nothing has finished yet, and the same
-silent-deafness failure the timestamp fallback exists to prevent.
+empty string, the watcher's ledger reads as zero rows, and every worker is
+filtered out as unknown. You get a watcher that runs happily and reports nothing —
+indistinguishable from a run where nothing has finished yet. `TMPDIR` and
+`CMUX_SURFACE_ID` *are* in that shell's environment, which is why the expanded
+form is safe where the variable is not.
 
-`TMPDIR` and `CMUX_SURFACE_ID` *are* in that shell's environment, which is why the
-expanded form is safe where the variable is not.
-
-That path is substituted when this skill loads, so by the time you read it it is
-already an absolute path to this plugin's own copy of the watcher — run it as
-written rather than searching for the file. It is **not** an environment variable
-at that point: `echo "$CLAUDE_PLUGIN_ROOT"` from a shell prints nothing, so never
-build the path yourself from that variable.
+That `${CLAUDE_PLUGIN_ROOT}` path is substituted when this skill loads, so by the
+time you read it it is already an absolute path to this plugin's own copy — run it
+as written rather than searching for the file. It is **not** an environment
+variable at that point: `echo "$CLAUDE_PLUGIN_ROOT"` from a shell prints nothing.
 
 Each output line becomes a chat notification that re-invokes you:
 
-- `DONE <name>` — that worker's turn **ended**. That is not the same as "the work
-  is finished": a worker that parks awaiting its own background sub-agent ends its
-  turn too, so read its transcript before treating a `DONE` as results to collect.
-- `ASK <name>` — **suspended** on an `AskUserQuestion` prompt, waiting for an
-  answer. Not an ending, and no `DONE` follows until someone answers it.
-- `ATTN <name> (<tool>)` — suspended on a permission prompt for that tool, or on
-  an `ExitPlanMode` plan approval. Not an ending either.
-- `EXIT <name>` — the session ended **normally**, firing `agent.hook.SessionEnd`.
+- `DONE <name>` — that worker's turn **ended**. Not the same as "the work is
+  finished": a worker parked awaiting its own background sub-agent ends its turn
+  too. The worker's own reply is what tells you the outcome; this only tells you
+  to expect one.
+- `ASK <name>` — **suspended** on an `AskUserQuestion`. Not an ending, and no
+  `DONE` follows until someone answers it.
+- `ATTN <name>` — suspended on a permission prompt, a plan approval, or a held
+  peer message. Not an ending either.
+- `GONE <name>` — the process is no longer running: a clean `/exit`, a crash, or a
+  kill. The registry cannot tell those apart, and neither can you from this line
+  alone — check whether that worker had already reported.
 
-**`EXIT` is not a death notice, and a killed worker sends nothing at all.** A
-worker that dies outright — `SIGKILL`, a host crash, a surface torn down under it
-— never gets to run the hook, so no `SessionEnd` is published and no `EXIT` will
-ever reach you. Measured 2026-08-07: a worker `SIGKILL`ed while parked on an
-`AskUserQuestion` produced **no bus event whatsoever**, while the `~115 s` timeout
-twins for its blocks still arrived on schedule afterwards — so the run looked
-exactly like a worker still sitting on its question, and waiting longer never
-helped. A graceful `/exit` in the same run did fire `SessionEnd` and did print
-`EXIT`, which is the whole distinction. The signal is uncatchable at the source;
-what follows is how to notice anyway.
+All four were observed firing through a live `Monitor` on 2026-08-09.
 
-**The registry is the only thing that catches it, so check it as well as the
-watcher — not instead.** Push is still the default and still covers the three
-cases that do emit; death is the one case with no line to miss, which is why it
-cannot be the *only* thing you rely on for a long run. `claude agents --json`
-drops a killed session immediately:
+**`GONE` is the signal an event bus cannot give you.** A worker that dies outright
+— `SIGKILL`, a host crash, a surface torn down under it — never runs a hook, so
+nothing is ever published about it. Measured 2026-08-07: a worker `SIGKILL`ed
+while parked on an `AskUserQuestion` produced no bus event whatsoever, and the run
+looked exactly like a worker still sitting on its question. Polling the registry
+for pid liveness is what closes that hole, and it is why this watcher is built on
+process state rather than on events.
 
-```bash
-while IFS=$'\t' read -r sid su pu name state; do
-  [ "$state" = reported ] && continue
-  reg=$(claude agents --json | python3 -c "
-import json,sys
-print(next((a['status'] for a in json.load(sys.stdin) if a['sessionId']=='$sid'),'gone'))")
-  [ "$reg" = gone ] && echo "$name died without saying so (sid $sid)"
-done < "$LEDGER"
-```
+Three things the filter already handles. Do not "simplify" them away:
 
-Run that whenever the watcher wakes you and once more before you report a run
-finished. `gone` on a row you never reported is a worker that died mid-stage: read
-its transcript for what it had already done, then re-spawn it rather than waiting
-on a `DONE` that cannot come. Check **every profile you use** — a worker in
-another `CLAUDE_CONFIG_DIR` reads as `gone` in yours whether it is alive or dead,
-so confirm against the right registry before concluding anything (see "Several
-config profiles" below).
-
-`ASK` and `ATTN` both mean *a human is being waited on, and the run is stopped
-until one shows up*. Neither line tells you what was asked: `tool_input` is
-redacted to a length on the bus, so the event can only say that a worker is
-blocked and on which kind of prompt. Read the screen
-(`cmux read-screen --workspace "$WS" --surface <ref>`) or the transcript for the
-question itself, then answer it the way you send any other input.
-
-Pass `persistent: true` for a run that may outlast a single Monitor timeout.
+- **The pid check.** The registry file survives the process, so liveness is the
+  only thing separating "idle" from "dead" (see the registry section above).
+- **First sight is not a transition.** A worker already blocked when the watcher
+  starts is reported immediately, because a human is needed *now*; one that is
+  merely `busy` or `idle` is recorded silently, so arming a watcher does not
+  fabricate a `DONE` for every worker already sitting there.
+- **`GONE` only for a worker seen alive at least once**, so a ledger row written
+  before its `claude` has registered is not reported dead a second later.
 
 **Confirm the watcher is still alive before you send the task.** An armed
 `Monitor` can die within the minute — observed exit 144, roughly 60 s in, with no
 output file ever written — and a dead watcher is indistinguishable from a healthy
-one that has nothing to report yet. Arming it is not the same as having it:
+one that has nothing to report yet:
 
 ```bash
 pgrep -f "watch-workers.py.*${CMUX_SURFACE_ID}" >/dev/null \
   || echo "watcher is not running -- re-arm it before sending the task"
 ```
 
-Re-arm and re-check if that comes back empty. Sending a task to an unwatched
-worker is the silent deafness this section exists to prevent, and it costs one
-`pgrep` to rule out.
+## Answer a blocked worker
 
-Five verified behaviours are already handled in that filter. Do not "simplify"
-them away:
-
-- **A question *suspends* the turn rather than ending it, so no `Stop` fires.**
-  A filter that watches only for endings is therefore totally deaf to the single
-  most common reason a worker needs you. Measured 2026-08-07: one watcher, one
-  worker — silence through two consecutive `AskUserQuestion` blocks, then a
-  correct `DONE` the moment that worker ended a turn for real. The pipeline was
-  never broken; it was listening for the wrong thing. cmux gives the block its own
-  event name, `agent.hook.AskUserQuestion`, and that is what `ASK` is built on.
-- **One turn end is four frames.** Each hook arrives as a `received`/`completed`
-  pair, then again ~275 ms later once the surface resolves. Without the 5 s
-  collapse window you report three completions for one stage. A *block* behaves
-  differently: one `received` frame the moment it blocks, then a `completed` twin
-  sharing its `_opencode_request_id` a fixed **~115 s** later carrying
-  `status: timed_out`. That twin is the hook's own timeout expiring, **not** the
-  question being answered — measured at 114.97–115.01 s across 10 of 10 blocks,
-  including ones answered in half that time. Do not read it as "the worker is
-  unblocked"; nothing on the bus says that. Blocks are therefore de-duplicated by
-  request id rather than by a time window — two questions eight seconds apart are
-  two questions, and a window wide enough to swallow the second is this same
-  silent deafness in a smaller costume.
-- **`agent.hook.Notification` fires ~6.3 s after a block *and* after a normal
-  finish**, so on its own it still cannot mean "needs attention" — which is why it
-  is not in the filter. What makes the distinction is that cmux emits two precise,
-  separate names: `agent.hook.AskUserQuestion` and `agent.hook.PermissionRequest`
-  (the latter carries the tool in `tool_name`, e.g. `Bash`). Both were observed
-  live; neither is inferred from `Notification`.
-- **Filter by the ledger's session ids, always.** The bus is global across
-  workspaces and every config profile, so an unfiltered watcher fires on tabs the
-  user owns — and on your own turns, which is a self-trigger loop.
-- `notification.created` events have `title`/`subtitle`/`body` **redacted** to
-  lengths. The event is the trigger; `cmux list-notifications` is still how you
-  read what it actually said.
-
-**One caveat this skill could not test.** Every block name above rides on Claude
-Code's `PermissionRequest` hook, and cmux's own wrapper documents that under
-`--dangerously-skip-permissions` (permission mode `bypassPermissions`) that hook
-does not fire at all — which would make a bypass worker silent again, one flag
-away from the bug this section exists to prevent. The filter carries a
-`PreToolUse` fallback for exactly that case, the path the wrapper names as its
-needs-input substitute. Spawning with that flag was refused in this environment,
-so the fallback rests on the wrapper's comments rather than on a live run: it is
-built to stay inert in normal mode (verified), but treat a bypass worker's
-watcher as **unproven** and check on that worker by hand.
-
-**`ATTN` on a permission prompt rests on older evidence than the rest.**
-`agent.hook.PermissionRequest` was observed live when this filter was first
-written, and that single sighting is what the `ATTN` line stands on. It was
-**not** re-witnessed when the block reporting above was verified: every command
-tried came back auto-approved — including with the worker cycled into manual mode
-— so no permission prompt could be provoked to fire one. What that leaves untested
-in practice is precisely the part that *changed*: blocks now de-duplicate by
-`_opencode_request_id` instead of by the 5 s window, and that key has been
-exercised hard against `AskUserQuestion` and never once against a live
-`PermissionRequest`. Both names run through the same branch, so this is a hole in
-the evidence rather than a known fault — but it is a hole, and a run that leans on
-`ATTN` deserves the same hand-check as the bypass case above.
-
-**There is no lighter option for one worker.** A backgrounded
-`cmux events --name agent.hook.Stop … | grep -m1 "claude-$SID"` looks like it
-gives you the single notification you need, and it is wrong twice over:
-
-- **It can only see turn *ends*.** `AskUserQuestion`, `PermissionRequest` and
-  `SessionEnd` are not `Stop`, so a worker waiting on a question, a worker blocked
-  on an approval prompt, and a worker that died are all three indistinguishable
-  from one still working. You wait, it waits, nothing reports. The four-way
-  `DONE`/`ASK`/`ATTN`/`EXIT` split is the entire point of the filter, and this
-  throws it away to save one process.
-- **`grep -m1` does not reliably end the pipeline.** It stops reading at the
-  match, but `cmux events` only learns that on its *next* write, so the command
-  can sit there matched-but-not-exited — and a completion notification that
-  depends on the command exiting never fires. Observed: the match sat in the
-  output file while the run went silently unreported.
-
-One worker still gets one `Monitor` and the filter above. A one-row ledger is a
-valid ledger.
-
-### Poll — only when you need the answer inside this turn
-
-`$SURF_UUID` below is the surface **UUID** assigned at spawn (`surf_field "$SURF"
-id`) — column 2 of the ledger, the `su` you read back when waiting on a fan-out.
-It is not interchangeable with the `surface:N` ref: notifications carry only the
-UUID, so a ref — or an unset variable — matches nothing and `newest` returns
-empty forever. That failure is silent and looks exactly like "no notification
-yet", so the loop below never breaks on a **healthy** agent and exits only when
-the worker dies.
+`ASK` and `ATTN` both mean *a human is being waited on, and the run is stopped
+until one shows up*. Neither line says what was asked. Read the screen, then
+answer with keys:
 
 ```bash
-newest() { cmux list-notifications --json | python3 -c "
-import json,sys
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('notifications',[])
-m=[n for n in d if n.get('surface_id','').lower()=='$SURF_UUID'.lower()]
-print(m[0]['id'], m[0]['subtitle'], sep='\t') if m else print()"; }
-
-IFS=$'\t' read -r BEFORE _ <<<"$(newest)"   # capture BEFORE sending the prompt
-# ... send + send-key enter ...
-while :; do
-  IFS=$'\t' read -r id sub <<<"$(newest)"
-  if [ -n "$id" ] && [ "$id" != "$BEFORE" ]; then
-    case "$sub" in
-      Permission*) echo "$SURF wants approval"; BEFORE=$id ;;   # mid-turn, not an ending
-      *) break ;;
-    esac
-  fi
-  state=$(claude agents --json | python3 -c "
-import json,sys
-print(next((a['status'] for a in json.load(sys.stdin) if a['sessionId']=='$SID'),'gone'))")
-  [ "$state" = gone ] && { echo "worker died before finishing" >&2; break; }
-  sleep 2
-done
+cmux read-screen --workspace "$WS" --surface "$(surf_field "$su" ref)"
+cmux send-key --workspace "$WS" --surface "$(surf_field "$su" ref)" down    # move the selection
+cmux send-key --workspace "$WS" --surface "$(surf_field "$su" ref)" enter   # choose it
 ```
 
-**Budget the loop by its real cadence, not by the `sleep`.** Each iteration
-shells out twice (`cmux list-notifications` + `claude agents`), measured at
-~400 ms on top of the `sleep 2` — so the true period is ~2.4 s, and an iteration
-count sized as `N × 2 s` overruns its budget by 20%. At a 300 s harness ceiling
-that means ~125 iterations, not 150; exceed it and the call is SIGKILLed
-(`exit 143`) with the loop's findings still unprinted. For waits longer than one
-call, don't stretch the loop — poll in bounded chunks, or watch the worker's
-child pids from a backgrounded `until` loop and let it notify you once.
+**`SendMessage` cannot clear a block, and it does not fail loudly when you try.**
+Measured 2026-08-09: a message sent to a worker parked on an `AskUserQuestion`
+returned `success: true`, appeared on that worker's screen as queued text *beneath*
+the open dialog, and was not read until after the question had been answered by
+key — at which point it arrived appended to the tool result. So `success` means
+*handed to the session*, never *read by Claude*. A supervisor that answers `ASK`
+with a message will sit forever watching a worker that has already been told.
 
-`status` is a read-only variable in zsh — name it anything else. The list keeps
-only the **newest notification per surface** and replaces it in place, so compare
-ids rather than counting, tolerate a momentarily empty read, and never expect
-history: closing a surface takes its notification with it.
+Send `send-key` calls **one per `Bash` call**, not bundled into a script. Observed
+repeatedly on 2026-08-09: the auto-mode classifier denies the compound form and
+sometimes the single form too. The single form succeeds on retry; a denied
+keystroke leaves the worker blocked and looks exactly like a worker that ignored
+you.
 
-The `subtitle` is what tells the three cases apart, so read it before anything
-else:
-
-- `Completed in <dir>` — the turn ended; `body` carries the final message.
-- `Waiting` — the agent handed the turn back. A normal finish usually fires both,
-  `Completed` first.
-- `Permission` (body: `Claude needs your permission`) — a **mid-turn** approval
-  prompt, not an ending. Each one is a fresh notification id, so a loop that
-  breaks on "any new id" will report a stage that is still running. Rebase your
-  cursor on it and keep waiting, as above.
-
-**A worker's input box may show text nobody typed.** `read-screen` renders Claude
-Code's suggested-follow-up ghost text in the prompt exactly like real input, so a
-supervisor falling back to the screen can read it as a pending user message, or as
-unsent input it ought to clear. It is neither: it is a suggestion, and sending
-`enter` would submit it. Judge from the transcript or the event, and treat prompt
-contents as decoration.
-
-**A `Waiting` subtitle on its own is still ambiguous** — a finished agent and one
-parked on a prompt both reach it. The *registry* is what tells them apart, and it
-is a three-state field, not two: `claude agents --json` reports **`waiting`** for a
-worker suspended on a prompt, **`busy`** for one working, and **`idle`** for one
-that finished. Measured across transitions 2026-08-07 —
-`idle → busy → waiting → busy → idle`, with `waiting` held stably for 69 s — so it
-is a real state and not a blink between two others. That makes the registry a
-usable poll signal on its own; it does not need the event bus to notice a block.
-
-**`status` alone does not say *which* prompt — the sibling `waitingFor` field
-does.** Measured side by side, three workers blocked at once:
-
-| blocked on | `status` | `waitingFor` |
-| --- | --- | --- |
-| `AskUserQuestion` | `waiting` | `input needed` |
-| a tool approval | `waiting` | `permission prompt` |
-
-So the registry answers both questions on its own — *is it blocked* and *on what* —
-which makes it a complete poll-side equivalent of the bus's `ASK`/`ATTN` split.
-Read `waitingFor`, not just `status`; a loop that branches on `status` alone
-treats a question and an approval as the same event and will answer the wrong one.
-
-Neither field carries the *content* of the prompt. For that, read the screen
-(`cmux read-screen --workspace "$WS" --surface <ref>`) or the transcript.
+**A worker's input box may show text nobody typed.** `read-screen` renders
+suggested-follow-up ghost text in the prompt exactly like real input, and a queued
+peer message sits there too. Neither is pending user input, and pressing `enter`
+on either submits it. Judge from the dialog, not from the prompt line.
 
 ## Chain stages
 
-Same session, next command (context carries over — use this when the next stage
-needs what the previous one just found):
+Same session, next task — context carries over, so use this when the next stage
+needs what the previous one found. Prose goes by message; **a slash command must
+go by keys**:
 
 ```bash
 cmux send --workspace "$WS" --surface "$SURF" "/spec-write <what to write up>"
 cmux send-key --workspace "$WS" --surface "$SURF" enter
 ```
 
+**Slash commands do not execute over cross-session messaging.** Verified
+2026-08-09 by sending `/context` to a worker: it arrived as literal text inside
+the message wrapper, no expansion, nothing run. Expansion happens in the CLI on
+input the user types; a message is injected past that path. The nuance that makes
+this a trap rather than a clean failure: a worker that reads "run /foo" may still
+*choose* to invoke `foo` through its `Skill` tool, so a plugin skill can appear to
+work by persuasion while a built-in like `/context` or `/compact` can never run at
+all. Do not let one lucky stage convince you the channel expands commands.
+
 Fresh session for a stage that should start clean: another surface in the same
 agents pane, exactly as above — a new stage is never a reason for a new split. It
-shares no context, so **pass the handoff explicitly** — name the file the
-previous stage wrote, rather than referring to "the findings."
+shares no context, so **pass the handoff explicitly** — name the file the previous
+stage wrote, rather than referring to "the findings."
+
+## Permission classes decide whether messaging works at all
+
+**Two sessions can only message each other freely when they are in the same
+permission class**, where the classes are "bypasses prompts" and "everything
+else". Across the line, the message is *held* for a human to approve in the
+receiving session — and a held message is not an error you see, it is a dialog
+somebody has to find.
+
+Measured 2026-08-09, both directions, with a `--dangerously-skip-permissions`
+worker and an `auto`-mode supervisor:
+
+| direction | outcome |
+| --- | --- |
+| supervisor → bypass worker | **held at the worker.** Its task never arrived; it parked at `waiting` / `permission prompt` until the dialog was answered by hand |
+| bypass worker → supervisor | **held at the supervisor.** Its reply never arrived; the supervisor's own session went to `waiting` / `permission prompt` |
+
+So a bypass worker is deaf and mute by default, in both directions at once, and
+nothing in either session's normal output says so.
+
+Two things save the run. The first is that **the watcher still sees it**: a held
+message shows up as `waiting` / `permission prompt`, so it reports `ATTN` and you
+find out. The second is the rule that avoids it entirely:
+
+- **Spawn workers in your own permission class.** If you prompt, they prompt.
+  Then every message flows automatically, which is the whole design.
+- If the user insists on a bypass worker, **drive it with keys, not messages** —
+  `cmux send` is unaffected by any of this — and keep the watcher for its state.
+- The product's own held-message dialog names the escape hatch,
+  `crossSessionInbound: "accept"`, settable per worker via
+  `--settings '{"crossSessionInbound":"accept"}'`. **Untested here** — the launch
+  line was refused by the auto-mode classifier — and it only fixes the inbound
+  half, since the reply direction is governed by the *supervisor's* setting, which
+  is the user's to change and not yours.
+
+Note also that **the registry does not record a session's permission mode**, so
+you cannot tell a bypass worker from its JSON. What you can read is the
+`from-mode` attribute on a message that arrives from it.
+
+**A bypass worker does not register until its acceptance gate is answered.**
+`--dangerously-skip-permissions` opens a "Yes, I accept" confirmation before the
+session starts, so it has no registry entry and no socket until a key clears it —
+the readiness loop above will simply time out, and the tab is what tells you why.
 
 ## Read a worker's output
+
+Normally you don't have to: the worker's reply carries its findings. When you
+need the raw record — a worker that died mid-stage, or one whose `DONE` arrived
+without a report — the transcript is at
 
 ```
 <config-dir>/projects/<esc-cwd>/<sessionId>.jsonl
 ```
 
-`esc-cwd` replaces **every** non-alphanumeric character with `-`
-(`/Users/you/work/stock_check_app` → `-Users-you-work-stock-check-app`).
-Records are `{"type": "assistant", "message": {...}}` in the Anthropic message
-shape — `content`, `stop_reason`, `usage`.
+with `sessionId` and `cwd` both read from that worker's registry file. `esc-cwd`
+replaces **every** non-alphanumeric character with `-`
+(`/Users/you/work/stock_check_app` → `-Users-you-work-stock-check-app`). Records
+are `{"type": "assistant", "message": {...}}` in the Anthropic message shape.
 
-**The file does not exist until the session takes its first turn.** A freshly
-spawned worker has a registry entry and no transcript; handle that rather than
-assuming the path resolves. The path follows the worker's *actual* cwd, so read
-`cwd` from `claude agents --json` instead of assuming it matched your `cd`.
+**The file does not exist until the session takes its first turn**, and a worker
+that has already exited has no registry file to resolve it from — so if a stage
+may need forensics, read the `sessionId` while it is still alive.
 
 ## Several config profiles — check before spawning
 
-`claude agents --json` reads only the active `CLAUDE_CONFIG_DIR`. A worker
-launched into a directory that selects a different profile — a shell hook that
-switches `CLAUDE_CONFIG_DIR` per directory is a common setup — registers there
-and nowhere else, so a supervisor watching one registry will report it as
-**gone**. Search every profile you use:
+The registry lives under the active `CLAUDE_CONFIG_DIR`. A worker launched into a
+directory that selects a different profile — a shell hook that switches
+`CLAUDE_CONFIG_DIR` per directory is a common setup — registers there and nowhere
+else, so `peer` and the watcher will both report it as absent. The watcher takes a
+colon-separated `CLAUDE_CONFIG_DIR` and watches every profile at once; give it one
+when a run spans profiles, and search by hand the same way:
 
 ```bash
-claude agents --json                                       # default profile
-CLAUDE_CONFIG_DIR=~/.claude-<other> claude agents --json   # each additional profile
+ls ~/.claude/sessions/                       # default profile
+ls ~/.claude-<other>/sessions/               # each additional profile
 ```
 
-Read its transcript from the matching profile's `projects/` tree too.
+Messaging itself is not profile-scoped — the socket path is absolute and a `uds:`
+send crosses profiles fine. It is *discovery* that is scoped.
 
-Plugins are installed per profile, so **the command a stage needs may not exist
-in the profile its directory selects**. Check the installed plugins for the
-relevant profile (`claude plugin list`, or `enabledPlugins` in that profile's
+Plugins are installed per profile, so **the command a stage needs may not exist in
+the profile its directory selects**. Check the installed plugins for the relevant
+profile (`claude plugin list`, or `enabledPlugins` in that profile's
 `settings.json`) before building a pipeline on a slash command.
 
 ## Offer to close what the run opened
@@ -599,14 +586,26 @@ When the last stage is reported, the ledger rows are spent surfaces. Resolve eac
 one, then **offer** — cleanup is a proposal, never a side effect of finishing:
 
 ```bash
-while IFS=$'\t' read -r sid su pu name state; do
+while IFS=$'\t' read -r name su pu state; do
   ref=$(surf_field "$su" ref)
   [ -n "$ref" ] || continue               # the user already closed it; drop the row
-  reg=$(claude agents --json | python3 -c "
-import json,sys
-print(next((a['status'] for a in json.load(sys.stdin) if a['sessionId']=='$sid'),'gone'))")
-  alive=no; ps -t "$(surf_field "$su" tty)" -o command= 2>/dev/null | grep -q '[c]laude' && alive=yes
-  echo "$ref  $name  ledger=$state  registry=$reg  claude=$alive"
+  addr=$(peer "$name")
+  reg=$(python3 - "$name" <<'PY'
+import glob, json, os, sys
+name = sys.argv[1]
+root = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+for d in root.split(":"):
+    for f in glob.glob(os.path.join(d, "sessions", "*.json")):
+        try: r = json.load(open(f))
+        except Exception: continue
+        if r.get("name") != name: continue
+        try: os.kill(r["pid"], 0)
+        except ProcessLookupError: continue
+        print(r.get("status"), r.get("sessionId")); raise SystemExit
+print("gone")
+PY
+)
+  echo "$ref  $name  ledger=$state  registry=$reg  addressable=${addr:-no}"
 done < "$LEDGER"
 ```
 
@@ -629,14 +628,17 @@ cmux close-surface --workspace "$WS" --surface "$ref"
   the pane it was split off from — yours. Harmless, but say so when you offer, in
   case the user is reading a third pane at the time.
 - The scrollback dies with the surface; the session does not.
-  `claude --resume <sessionId>` brings it back, so say that when you ask.
-- `busy`, `waiting`, or a `Waiting` notification you have not read yet, means not
-  done. A `waiting` worker is stopped on a prompt and will sit there forever —
-  closing it discards whatever it was about to do. Leave those open, and say which
-  ones you left and why.
-- `registry=gone` with `claude=no` is the true orphan: a dead worker sitting in a
-  bare shell. Lead with those.
+  `claude --resume <sessionId>` brings it back — that id is the second field the
+  loop above prints, and it is unreadable once the process is gone, so capture it
+  before you close anything.
+- `busy` or `waiting` means not done. A `waiting` worker is stopped on a prompt and
+  will sit there forever — closing it discards whatever it was about to do. Leave
+  those open, and say which ones you left and why.
+- `registry=gone` on a row you never reported is a worker that died mid-stage.
+  Lead with those.
 - Prune closed rows from the ledger so the next offer is not a list of ghosts.
+- A dead worker leaves its `<pid>.json` behind. It is not yours to delete, and
+  `peer` and the watcher both ignore it on the pid check.
 
 Only ever propose surfaces from this run's ledger. A tab you did not spawn is the
 user's, however idle it looks — leave it alone even when it is obviously a dead
@@ -648,17 +650,17 @@ Closing the surfaces is not the end. The watcher is a *process*, and a `Monitor`
 armed with `persistent: true` runs until `TaskStop` or the end of the session that
 armed it — and **if you are yourself a spawned agent, your session ending does not
 reap it.** Observed: an agent finished, its surface was closed, and its watcher was
-still streaming the global event bus.
+still polling.
 
-Do these in order. The order matters: stopping the watcher before deleting the ledger
-leaves a window where a late event names a worker you have already reported.
+The order matters: stopping the watcher before deleting the ledger leaves a window
+where a late signal names a worker you have already reported.
 
 1. **Close each surface** you spawned, as above — resolving by UUID, never by the
    `OK surface:N` echo.
 2. **Delete the ledger file**, not just its rows:
    `rm -f "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"`. This is the
    belt-and-braces step — a watcher that somehow survives with no ledger matches no
-   session id and reports nothing, so it is inert rather than wrong.
+   name and reports nothing, so it is inert rather than wrong.
 3. **`TaskStop` the monitor** by the task id you were given when you armed it.
 4. **Confirm nothing of yours is left**, scoped to your own surface:
 
@@ -692,41 +694,41 @@ which is the one failure this whole section exists to prevent.
   thing, one they cannot watch, click into, or take over. Reaching for `Agent`
   because the tasks look small is the one substitution to refuse: small tasks are
   exactly what a showcase is made of.
+- **The name is the key.** `claude -n <name>` at launch, unique among live
+  sessions, and every lookup afterwards goes through it.
+- **Address by `uds:`.** A bare name is refused on first contact and needs a ref
+  only `ListAgents` can give you; the socket path is derivable from disk and always
+  works.
 - Anchor placement on `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID`, never on what
   is focused — the user may be looking elsewhere. Pass `--focus false`.
 - One split per run, at most. Every agent after the first is a tab.
 - **Arm the watcher at the first spawn, before sending any task** — one `Monitor`
   running `watch-workers.py` against the ledger, for one worker or for ten. The
-  `Monitor` **tool**: the same pipeline backgrounded with `Bash` streams into a
-  file nobody reads and notifies you only if it exits, which it never does. A poll
-  loop dies with the turn; a run that outlives it is a run nobody is watching. A
-  hand-rolled substitute that greps the bus for `agent.hook.Stop` sees only turns
-  that **ended** — never a worker *suspended* on a question or a permission prompt,
-  because a suspended turn never fires `Stop` at all. That is not an edge case: a
-  question is the most common reason a worker needs you, and missing it looks
-  exactly like a worker still working. Match all four names the filter matches, or
-  use the filter.
-- **`DONE` means a turn ended, not that the work is done.** A worker parked
-  awaiting its own background sub-agent fires `Stop` like any other turn end, so
-  check the transcript before reporting a stage complete on the strength of a
-  `DONE` alone.
+  `Monitor` **tool**: the same command backgrounded with `Bash` streams into a file
+  nobody reads and notifies you only if it exits, which it never does. The worker's
+  own reply is not a substitute, because a worker that is blocked or dead is
+  precisely the worker that cannot send one.
+- **Ask every worker to report its findings by message**, and name yourself in the
+  instruction. That reply is the only signal that carries content.
+- **`DONE` means a turn ended, not that the work is done.**
+- **Messages cannot clear a block and cannot run a slash command.** Keys can do
+  both, one `Bash` call per keystroke.
+- **Keep workers in your own permission class**, or messaging silently stops in
+  both directions.
 - **The ledger is on disk**, at
   `${TMPDIR:-/tmp}/cmux-spawn-agent/<caller surface id>.tsv` — keyed by the
   caller's surface, so it is exactly this run's spawns and nothing else. That is
   what lets a turn which remembers nothing still answer what it owes and what it
   may close.
 - Report each stage's outcome as it lands; don't go silent for a long pipeline.
-  Mark the ledger row `reported` when you do, so an interrupted run can still
-  answer what it owes.
+  Mark the ledger row `reported` when you do.
 - Never close a surface you did not spawn, and never close one without asking —
   not even your own.
-- **A run ends when its watcher is stopped, not when its last tab closes.** A
-  persistent `Monitor` outlives the session that armed it, so a spawned agent that
-  arms one and exits leaves it streaming. `TaskStop` it and delete the ledger.
+- **A run ends when its watcher is stopped, not when its last tab closes.**
 - Before a destructive or long-running task, say which repo and which profile it
   will run in and get confirmation.
 - Workers inherit the user's global `~/.claude/CLAUDE.md`. If you plan to parse a
-  worker's output, expect whatever that file makes every session emit.
+  worker's reply, expect whatever that file makes every session emit.
 - `cmux new-surface --type agent-session --provider claude` also opens a Claude
-  surface, but nothing lets you pre-assign its session id — which is the whole
-  lever here. Spawn terminals.
+  surface, but it takes no `-n`, so the worker comes up under a derived name you
+  did not choose — which is the join key here. Spawn terminals.
