@@ -58,7 +58,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.4.0 — "Shakedown"** (an end-to-end audit against live workers — the watcher no longer swallows a DONE on a torn registry read, no longer goes deaf in silence, and the skill no longer tells you to kill the worker you are rescuing)
+Latest: **v0.5.0 — "Litmus"** (a five-minute smoke test that makes the machine prove spawning still works — a real worker in a real tab, a real round trip, and a staleness gate that catches a session testing bytes nobody ships)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
