@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.3.0] — 2026-08-09 — "Switchboard"
+
+Claude Code 2.1.224 gives every session an inbox socket and a record on disk, and between them they replace both halves of this plugin's machinery. A worker is now addressed and reports its findings over cross-session messaging, and its state is read from the peer registry instead of parsed off cmux's event bus. The gain that matters is the case the bus could never cover at all: a worker that is killed runs no hook and publishes nothing, so it used to look exactly like a worker still working — which is why the two commits that landed after v0.2.0 were both about the watcher failing to say anything.
+
+### Added
+
+- **Workers report their findings in a message, and it arrives before the watcher notices.** A stage's outcome now interrupts the supervisor with the result in it, instead of being dug out of a transcript. Ask for the findings, not an acknowledgement — a reply saying "done" wastes the round trip.
+- **`peer.py` and `surface.py` ship as files.** Name to socket address, status, cwd and session id; surface ref to uuid and back, plus pane and tty. They were shell functions in the draft, which quietly failed: every Bash call is a fresh shell, so a function defined once and used ten sections later asks for its whole definition again every time.
+- **A fifth watcher signal, `CLEAR`.** A worker that stops being blocked without a turn running has nothing to collect, and saying so is what keeps `DONE` meaning what it claims.
+
+### Changed
+
+- **The watcher polls the peer registry instead of the cmux event bus**, and drops from 230 lines to 133 — no bus frames, no request-id de-duplication, no timing-collapse window, no `PreToolUse` fallback. It also no longer depends on cmux at all.
+- **`EXIT` became `GONE`**, and now covers every way a worker stops running rather than only the graceful one. The `EXIT` shipped after v0.2.0 could not fire for a killed worker, because the signal is uncatchable at the source; polling process liveness has no such blind spot.
+- **The launch name is the only join key.** No `--session-id`, no `uuidgen` — one string is the tab title, the registry key and the message address.
+- **The skill documents the two channels as non-interchangeable.** Messages cannot clear a block or run a slash command; keys can do both. Both were measured, not assumed.
+- README carries a 3× demo GIF of spawning three agents.
+
+### Fixed
+
+- **`DONE` no longer fires for a worker that did nothing.** Leaving a block counted as a turn ending, so a terminal overlay opening over an idle worker produced a completion for a session whose transcript never gained a record. `DONE` is now strictly working-to-idle.
+- **An unknown `status` no longer swallows a turn end.** The field is open-ended — a supervisor was caught reporting `shell` — and keeping each unseen value as a state of its own stopped the transition out of it from being recognised.
+- **Liveness no longer answers "alive" for every dead worker.** The registry file outlives the process, and the pid fallback was `os.kill(-1, 0)`, which addresses every process the user may signal and succeeds.
+- **The ledger row is written before the worker is launched**, as the prose beside it always said; the code did the opposite, leaving a window where a live worker had no ledger entry.
+- **A worker suspended on a question is reported as `ASK`.** A question suspends the turn rather than ending it, so a watcher listening only for endings was deaf to the single most common reason a worker needs a human — and a deaf watcher looks exactly like a worker still working.
+
 ## [0.2.0] — 2026-08-07 — "Summons"
 
 A demo prompt short enough to be worth showing kept opening no tabs at all. The skill was not failing to match — it was matching the same ground the built-in subagent tool already owns and losing the tie, because "run several agents in parallel and report when they finish" describes a subagent perfectly. The only way to win was to say "in cmux tabs" out loud, which is precisely the detail a showcase should not have to spell out.
