@@ -54,7 +54,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.6.0 — "Compass"** (one skill, two terminals — the host is decided by precedence before anything else runs, because inside herdr the cmux variables are live, wrong, and shared by every pane on the machine)
+Latest: **v0.6.1 — "Carve"** (a task that forbids tools gets printed instead of sent, and CALLER_SLOT never survived the Bash call that set it — both silent, both measured)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
