@@ -43,7 +43,7 @@ pane this session occupies.
   exit 1
 }
 WS="$HERDR_WORKSPACE_ID"
-export CALLER_SLOT="${HERDR_PANE_ID//:/-}"      # w9:p2 -> w9-p2
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # w9:p2 -> w9-p2
 ```
 
 **The `:` must go.** `$HERDR_PANE_ID` is a path component in the ledger path, and a
@@ -51,8 +51,13 @@ colon in a filename is legal at the POSIX layer but displays as `/` in Finder an
 breaks anything that splits on `:`. Sanitise once, here, and every later use — the
 ledger path, the watcher's `pgrep` pattern — agrees automatically.
 
-The `export` matters: the `Monitor` that runs the watcher gets a shell of its own,
-and an unexported `CALLER_SLOT` expands to nothing there.
+**Repeat those two lines at the top of every later `Bash` call that needs them, and do
+not try to `export` your way out of it.** A `Bash` call's shell state does not outlive
+the call — measured 2026-08-12, an exported variable read back empty both in the next
+`Bash` call and inside a `Monitor` command. `$HERDR_PANE_ID` and `$HERDR_WORKSPACE_ID`
+survive because they are in the process environment, which is exactly why the two names
+above are derived from them rather than carried forward. For the `Monitor` command,
+write the expanded slot id in literally.
 
 `$HERDR_PANE_ID` satisfies the four slot properties in `SKILL.md`: unique per pane,
 not reused after a close, durable across a `claude` restart inside that pane, and

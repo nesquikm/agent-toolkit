@@ -218,7 +218,15 @@ one is load-bearing somewhere below:
 ### The setup block
 
 ```bash
-# Refuse rather than guess. $CALLER_SLOT comes from the host file you just read.
+# Bind the slot HERE, in this call, with your host's line from the host file --
+# one of these two, not both. A Bash call's shell state does not outlive the call,
+# so the binding you made while reading the host file is already gone; measured
+# 2026-08-12, not even `export` crosses a Bash call. $CMUX_SURFACE_ID and
+# $HERDR_PANE_ID do survive, because they are in the process environment.
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr
+
+# Refuse rather than guess.
 [ -n "$CALLER_SLOT" ] || {
   echo "no caller slot; not spawning" >&2
   exit 1
@@ -442,44 +450,96 @@ interrupts you with its body in it, so a worker that answers "counted 89 lines"
 has finished the reporting round trip in one hop. A worker that answers "done"
 has sent you back to its transcript for no reason.
 
-**Tell it to reply to the `from` address, not to your name.** The instruction that
-belongs in a worker's task is "reply to the session that sent you this message, using
-its `from` address"; your name goes in the text as a human-readable label and nothing
-more — something the worker and the user can call the session, never the address it
-sends to.
+**Never tell a worker not to use tools in a message that asks it to reply.**
+`SendMessage` *is* a tool call. A blanket "do not read files, run commands, or
+investigate anything" — the natural way to keep a small task small — reads to a
+literal-minded worker as "do not use tools", and it then satisfies "reply with one
+line" by **printing** that line into its own transcript. Nothing arrives, nothing
+errors, and from every angle except the one that matters the worker looks finished.
+Measured 2026-08-12: two workers were sent the same one-line probe under that wording —
+identical but for their own names — and one sent while the other printed. One in two.
+
+Scope the *investigation*, and say the reply is exempt:
+
+```
+"Do not read files or run shell commands — but you MUST deliver the reply with the
+ SendMessage tool, and loading that tool first if it is deferred in your environment is
+ part of the job, not a violation of it. Printing the text as output does not count as
+ replying."
+```
+
+**The deferred-tool clause is not padding.** Where tool schemas are fetched on demand,
+`SendMessage` is not loaded at session start, so replying costs *two* calls — the fetch,
+then the send — and a worker told its "only action" is to reply can read the fetch
+itself as forbidden and print instead. The worker that succeeded in the measurement
+above made exactly that fetch first.
+
+And when you cap the length, cap the reply **body**, not the turn. "Reply with exactly
+one line and nothing else" is the clause that makes printing look compliant, because a
+worker reads it as a rule about everything it emits; "the reply body must be exactly
+one line" cannot be satisfied without sending one.
+
+**Put the literal `uds:` address in the task text. The `from` address is the fallback,
+not the instruction.** You already require exactly this of yourself — "Address workers
+by `uds:`, never by bare name", above — and the reply direction is the same wall with
+the same cure:
+
+```
+…When you are finished, SendMessage your findings to uds:/tmp/cc-socks/<your pid>.sock.
+That is the session that sent you this message, and the same address is on this message
+as its `from`. It is named `<your own name>` — that is a label, not an address; do not
+send to the name.
+```
+
+**"Use the `from` address on this message" is correct and it is not sufficient.**
+Measured 2026-08-12: **2 of 2 workers given exactly that instruction addressed the
+supervisor by name anyway**, were refused, and recovered via the ref in the refusal —
+each burning a round trip on the one message that carries the results:
+
+```
+'smoke-cmux' is not an agent in this conversation. Re-send with the ref to confirm you mean:
+  smoke-cmux [72dff0] — Claude session, on this machine, active 5m ago
+```
+
+That is byte-for-byte the failure recorded earlier for workers told to reply *by name*
+(3 of 3 refused), reached from the opposite instruction. So the variable that decides it
+is not "name versus `from`". A worker holds several plausible ways to address you —
+the `from` attribute, the name in the prose, a `ListAgents` row — and `SendMessage`'s
+own guidance leans toward names. A literal `uds:` string leaves nothing to choose.
+
+**Earlier runs where `from` alone worked are real, and that is the trap.** 5 of 5, then
+1 of 1 under herdr, then 0 of 2. It succeeds often enough to look settled and fails into
+a silent extra round trip that nothing surfaces unless you grep the worker's screen for
+`is not an agent in this conversation`. Treat a clean run as weak evidence here.
 
 **The ref wall is not one-sided.** It applies to a worker addressing you exactly as it
-applies to you addressing a worker, and it lands on the one message that carries the
-results. Measured: **3 of 3 workers had their first reply refused** when told to reply
-by name, each burning a round trip —
+applies to you addressing a worker. What *is* one-sided is the **recovery**: a worker
+holds the `from=` address on the message it received and can retry, where you on first
+contact hold nothing. That asymmetry is why a refused reply costs a round trip instead
+of costing the results.
 
-```
-'agent-toolkit-14' is not an agent in this conversation. Re-send with the ref to confirm you mean:
-  agent-toolkit-14 [a7dd41] — Claude session, on this machine, active 16m ago
-```
+**A worker cannot look up its own launch name either — do not ask it to.** Measured
+2026-08-12, 2 of 2: workers asked to include "the name you were launched with" in a
+reply both said outright that they had no read on it, both guessed from `ListAgents`,
+and **both guessed a name belonging to a different, concurrent run**. If you want a
+worker's identity in the reply body, write the name you launched it with into the task
+text yourself. Otherwise join on the transport instead — an incoming message carries
+`from-name`, which is authoritative and costs nothing.
 
-What *is* one-sided is the **recovery**. A worker holds something you do not on first
-contact: the `from=` address on the message it received, which works every time and
-costs nothing. That is the asymmetry — not the wall, the way out of it. And it only
-helps if the worker was told to use it: none of the three was. All three recovered via
-the ref in the refusal, and one burned an extra `ListAgents` call fetching a ref the
-error had already printed to it. Told to use the `from` address, 5 of 5 got through on
-the first attempt; measured again 2026-08-12 under herdr, first attempt, no refusal.
-
-Your own name is still the one thing the worker cannot look up about you:
+Your name and your address are both things the worker cannot look up about you, so read
+both from the same record and put both in the task:
 
 ```bash
 ME=$(python3 -c "
 import json,os,sys
 roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [os.path.expanduser('~/.claude')]
-name = ''
 for root in roots:
     try:
-        name = json.load(open(os.path.join(root,'sessions','%s.json' % sys.argv[1]))).get('name','')
-        break
+        r = json.load(open(os.path.join(root,'sessions','%s.json' % sys.argv[1])))
     except (OSError, ValueError):
         continue
-print(name)" "$(ps -o ppid= -p $$ | tr -d ' ')")
+    print(r.get('name',''), 'uds:' + (r.get('messagingSocketPath') or ''))
+    break" "$(ps -o ppid= -p $$ | tr -d ' ')")
 ```
 
 It honours `CLAUDE_CONFIG_DIR` rather than hardcoding `~/.claude` — **every
@@ -543,12 +603,46 @@ transcript read.
 It is not sufficient on its own, for one reason: **a worker that is blocked or
 dead cannot send it.** Which is what the watcher is for.
 
+There is a third way it fails to arrive, and **no watcher signal names it**: a worker
+that *printed* its reply instead of sending one has done nothing the registry can see as
+wrong. It took a turn and went idle. The best you get is a `DONE`, and you may not even
+get that — `DONE` is a sampled `busy → idle` transition, and a print-only turn is the
+shortest one a worker can take, so it can open and close inside a single poll.
+
+So the trigger is the absence of a signal, not the presence of one: **you are owed a
+reply and it has not come.** Before re-sending, ask whether the worker is idle and then
+look at what it actually did:
+
+```bash
+python3 "$P" "$NAME" status     # idle, with no reply in hand, is the signature
+```
+
+The evidence is spelled differently in the two places you can look, and only one of them
+is a file:
+
+| Where | A send that really happened |
+| --- | --- |
+| the worker's **screen** (the host file's read command) | a `SendMessage` call with `⎿ … → uds:/tmp/cc-socks/<pid>.sock` under it |
+| the worker's **transcript** (see "Read a worker's output") | a `tool_use` block named `SendMessage` — the `⎿` glyph is terminal rendering and is never in the file |
+
+Read it by the tool call, not by the address. **No `SendMessage` call at all** means the
+task's own wording talked the worker out of the tool — see "Send the task" above. A
+`SendMessage` call whose result says `is not an agent in this conversation` is the
+opposite fault, the ref wall, and its fix is the `from`-address instruction rather than
+any change to the prohibitions.
+
 ### The watcher — one Monitor, five worker signals
 
 ```bash
 python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/watch-workers.py" \
-    "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+    "${TMPDIR:-/tmp}/spawn-agent/<CALLER_SLOT>.tsv"
 ```
+
+**Write the slot id into that command literally** — expand `<CALLER_SLOT>` yourself
+before arming it. `${TMPDIR:-/tmp}` stays as written (see below); the slot does not,
+because `Monitor` runs its own shell and no assignment you made in a `Bash` call reaches
+it. Measured 2026-08-12: an exported `CALLER_SLOT` read back empty inside a `Monitor`
+command.
 
 Arm **one** of these right after the first spawn — always, including for a run of
 exactly one worker. It covers every worker in the run, including ones spawned
@@ -573,12 +667,23 @@ has finished yet. Then it says so: `WARN ledger unreadable, watching nothing:`
 with nothing after the colon, which is the empty path telling you exactly this.
 Treat an empty path in that line as the diagnosis, not as a puzzle.
 
-**`$CALLER_SLOT` is the one exception, and it must be exported for this to hold.**
-`TMPDIR` is already in that shell's environment; `CALLER_SLOT` is a name this skill
-invents, so unless the host file's binding line exported it, the `Monitor` shell has
-never heard of it and you are back to the empty-path failure. Either `export
-CALLER_SLOT=…` when you bind it, or write the expanded value into the `Monitor`
-command literally. The host file's binding line exports it.
+**`$CALLER_SLOT` is the one that bites, and exporting it does not save you.**
+`TMPDIR` is in that shell's environment because it is in the *process* environment,
+inherited from the terminal. `CALLER_SLOT` is a name this skill invents inside a `Bash`
+call — and a `Bash` call's shell state does not outlive the call, `export` included.
+
+Measured 2026-08-12: `export CALLER_SLOT_PROBE=probe-value` in one `Bash` call read back
+**empty** in the next `Bash` call *and* **empty** in a `Monitor` command, while
+`$CMUX_SURFACE_ID` — a genuine environment variable — was visible in both.
+
+So there is exactly one form that works here: **write the expanded slot id into the
+`Monitor` command literally**, the same way you write the plugin root. Bind it, echo it,
+paste the value.
+
+And the same rule governs every *other* `Bash` call in this skill: re-derive the slot in
+each block that needs it, from `$CMUX_SURFACE_ID` or `$HERDR_PANE_ID`, which survive
+precisely because they are in the process environment and `CALLER_SLOT` is not. Carrying
+the binding forward from an earlier call is the empty-path failure with extra steps.
 
 **Write `${TMPDIR:-/tmp}/spawn-agent/…` here and in the `LEDGER=` assignment
 character for character, and do not tidy either one.** `TMPDIR` on macOS ends in a
@@ -687,6 +792,9 @@ output file ever written — and a dead watcher is indistinguishable from a heal
 one that has nothing to report yet:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- refusing an unscoped pattern"; exit 1; }
 pgrep -f "watch-workers.py.*${CALLER_SLOT}" >/dev/null \
   || echo "watcher is not running -- re-arm it before sending the task"
 ```
@@ -695,6 +803,11 @@ pgrep -f "watch-workers.py.*${CALLER_SLOT}" >/dev/null \
 one too many.** Measured 2026-08-09: a bare `pgrep -f watch-workers.py | wc -l`
 answered `2` for a session that had exactly one watcher, and the author of that
 check read it as proof a second agent had armed its own. It had not.
+
+**Which is why the binding and the guard are in the block rather than assumed.** An
+unset `CALLER_SLOT` does not error — it expands to nothing, leaving `watch-workers.py.*`,
+which is exactly the bare form this paragraph forbids, reached by accident instead of by
+choice. The guard turns a silent widening into a refusal.
 
 The extra process is **not** the shell running the check — that was tested three ways,
 and a unique token planted in the checking shell's own argv was never matched by
@@ -1024,8 +1137,18 @@ one `GONE` per slot and read it as benign rather than chasing it.
 1. **`TaskStop` the monitor** by the task id you were given when you armed it.
 2. **Close each slot** you spawned, as above — resolving by locator, never by the
    close command's echo.
-3. **Delete the ledger file**, not just its rows:
-   `rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"`. This is the
+3. **Delete the ledger file**, not just its rows — re-deriving the slot in that same
+   call, since an empty `$CALLER_SLOT` deletes `…/spawn-agent/.tsv`, reports success,
+   and leaves the real ledger exactly where it was:
+
+```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- the real ledger would survive this"; exit 1; }
+rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+```
+
+   This is the
    belt-and-braces step, and what it buys is *bounded noise*, not silence. A watcher
    that somehow survives the `TaskStop` finds no ledger, so it matches no name — and
    every worker it had seen alive is then two missed polls from `GONE`. Reproduced by
@@ -1036,6 +1159,9 @@ one `GONE` per slot and read it as benign rather than chasing it.
 4. **Confirm nothing of yours is left**, scoped to your own slot:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- refusing an unscoped pattern"; exit 1; }
 pgrep -fl "watch-workers.py.*${CALLER_SLOT}"
 ```
 
@@ -1044,13 +1170,27 @@ watcher on the machine, including live ones belonging to other sessions and othe
 projects, wrapped in 400-character zsh preambles you then have to read. That is not a
 check, it is an invitation to kill someone else's run: an agent doing exactly this
 reported two healthy watchers as orphans — one of them its own supervisor's. Scoped to
-`$CALLER_SLOT` the answer is yes-or-no and cannot implicate anyone else.
+a non-empty `$CALLER_SLOT` the answer is yes-or-no and cannot implicate anyone else.
+
+**And "bare" is reachable without typing it.** `CALLER_SLOT` does not survive from the
+`Bash` call that bound it, so left unbound here it expands to nothing and the pattern
+collapses to `watch-workers.py.*` — the machine-wide form, silently. That is why the
+binding and the emptiness guard are inside the block. This is the one place in the
+skill where the widening is not merely wrong but destructive, because of what comes
+next.
 
 If a line does come back after `TaskStop`, it is yours and it is stuck:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- refusing to pkill unscoped"; exit 1; }
 pkill -f "watch-workers.py.*${CALLER_SLOT}"
 ```
+
+Re-derive and re-guard here too, in this block, even though you just did it above —
+this is a `pkill`, and an empty slot turns it into "kill every watcher on this machine,
+including the ones belonging to sessions that are still running."
 
 **Never reap a watcher you cannot prove is dead.** A watcher is a true orphan only if
 the `claude` process that armed it is gone — check with
