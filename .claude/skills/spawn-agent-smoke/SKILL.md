@@ -1022,6 +1022,15 @@ and delivery is immediate, while `DONE` waits on the next poll — up to a poll 
 later. `DONE` arriving *first*, or arriving with no reply at all, is still a PASS for
 the watcher and a FAIL for check 8.
 
+**A fresh worker emits one `DONE` before you have sent it anything, and it is not
+yours.** Its boot ends as a `busy → idle` transition like any other, so the watcher
+reports it. Observed 2026-08-12 on herdr: the first `DONE <NAME>` in the log landed right
+after the worker registered, ahead of any task. Harmless, and it is *not* a case of "the
+watcher fabricates a completion" — first sight of `idle` is silent by design, so this is
+a real transition it genuinely saw. But a supervisor reading "the first `DONE` means my
+task finished" will act on a worker that has not read the task yet. Match `DONE` against
+the reply you were owed, not against its position in the log.
+
 `GONE` here means the worker died. `CLEAR` means it stopped being blocked without
 taking a turn, so nothing is coming and the task needs re-sending.
 
@@ -1068,13 +1077,30 @@ real as any other and check 12 must find it.
 
 ### 11a. `ATTN` — a worker parked on a permission prompt
 
-Spawn one worker the way your host file says, into the scratch repo you already trusted
-in 7e — so no trust gate can fire and the only thing that can block it is the prompt you
-are about to cause. The permission class is the point, so pass it explicitly:
+**Place a new slot for it first, by the host file's fan-out rule** — the same way check 7
+placed its worker. Do **not** reuse check 7's worker's slot: on herdr `agent start`
+refuses an occupied pane with `{"error":{"code":"agent_pane_busy",…}}` at exit 1
+(measured 2026-08-12 — it fails safe and loudly, but it fails), and on cmux you would be
+typing a shell line into a running `claude`.
+
+```bash
+# cmux: another tab in this run's agents pane -- no second split
+cmux new-surface --workspace "$CMUX_WORKSPACE_ID" --pane "<this run's agents pane>" --type terminal --focus false
+```
+
+```bash
+# herdr: its own tab, as always here
+herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "<REPO>" --label "<NAME2>" --no-focus
+```
+
+Resolve both locators from the new slot and **write the ledger row**, exactly as 7b
+requires, before anything is launched. Then launch it into the scratch repo you already
+trusted in 7e — so no trust gate can fire and the only thing that can block it is the
+prompt you are about to cause. The permission class is the point, so pass it explicitly:
 
 ```
-cmux:  cd "<REPO>" && claude -n <NAME2> --permission-mode manual
-herdr: herdr agent start <NAME2> --kind claude --pane "<L1>" -- -n <NAME2> --permission-mode manual
+cmux:  cmux send --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF2>" "cd \"<REPO>\" && claude -n <NAME2> --permission-mode manual\n"
+herdr: herdr agent start <NAME2> --kind claude --pane "<the NEW pane id>" -- -n <NAME2> --permission-mode manual
 ```
 
 Wait for the registry as usual, then give it something that must ask:
@@ -1085,8 +1111,14 @@ Wait for the registry as usual, then give it something that must ask:
  "message": "Run this exact shell command and reply with its first line: ls /usr/share/dict\n\nSend the reply to uds:/tmp/cc-socks/<your own pid>.sock — that is the session that sent you this message, and the same address is on this message as its `from`."}
 ```
 
-PASS on **`ATTN <NAME2>`** from the run's watcher, within about ten seconds. Measured on
-herdr 2026-08-12: `blocked` in 3.9 s, with the registry agreeing exactly.
+PASS on **`ATTN <NAME2>`** from the run's watcher. Measured 2026-08-12 on herdr: 7.07 s
+from sending the task to the registry recording the block, and 3.9 s in an earlier
+probe.
+
+**That interval is model latency, not plugin latency, so do not treat it as a
+timeout.** The worker has to read the task and decide to run the command before anything
+can block; a slow turn is a slow turn. Ten seconds is a reasonable place to look again,
+not a deadline — the failure signature is silence at *twenty*, below.
 
 Corroborate from the registry rather than trusting the line alone — this pair is what
 decides whether `ATTN` means what the skill claims:
@@ -1103,17 +1135,44 @@ substring is the entire discriminator — `watch-workers.py` prints `ASK` when
 `ASK` means the two have been transposed and check 8's diagnosis has been pointing at
 the wrong branch all along.
 
-**Run those two only after the `ATTN` line has landed.** `waitingFor` is absent from the
-record whenever the worker is not blocked, and `peer.py` exits 1 on an absent field
-(measured: a `busy` session prints `busy` for `status` and nothing at exit 1 for
-`waitingFor`). An exit 1 here means you looked too early, not that the field is missing
-or the guard is broken — which is the same "absent and refused look identical" shape
-check 3 is built around.
+**Read `status` first, and interpret `waitingFor` only against a `status` that exited
+0.** `waitingFor` is absent from the record whenever the worker is not blocked, and
+`peer.py` exits 1 on an absent field — but it also exits 1 for a worker that does not
+exist, and the two are **byte-identical**. Measured 2026-08-12:
+
+| | `status` | `waitingFor` |
+| --- | --- | --- |
+| live worker, blocked | `waiting`, exit 0 | `permission prompt`, exit 0 |
+| live worker, not blocked | `idle`, exit 0 | nothing, exit 1 |
+| worker that died, or a name that never existed | nothing, exit 1 | nothing, exit 1 |
+
+So `waitingFor` exit 1 on its own means either "you looked too early" or "the worker is
+gone", and nothing distinguishes them. `status` does: exit 0 says the worker is alive and
+you are early, exit 1 says it is not there at all and you should be reading check 12's
+leak proof instead of hunting a phantom block. This is the same "absent and refused look
+identical" shape check 3 is built around, one field over.
 
 **Silence and `GONE` are both failures here, and they mean opposite things.** Silence
 past twenty seconds means the watcher never saw the wait: check that this worker's row
 is in the ledger the watcher was actually armed on, which is check 5's failure mode
 reappearing. `GONE` means it died instead of blocking.
+
+**`ATTN` alone does not prove your command caused the block — read the screen before
+recording it.** A *held peer message* parks a worker at exactly the same
+`waiting` / `permission prompt` pair (see check 1d and the skill's permission-class
+section), so a cross-class hold and a genuine tool prompt are indistinguishable from the
+registry. Caught and ruled out by hand on cmux 2026-08-12: the transcript showed the task
+message rendered rather than held, and the block was a real
+`Bash command / ls /usr/share/dict / Do you want to proceed?` dialog. Confirm the dialog
+is on screen and is the one you provoked.
+
+**That dialog has three options, and it is not the trust gate.** Measured on both hosts:
+`1. Yes`, `2. Yes, allow reading from dict/ from this project`, `3. No`, with `❯` already
+on 1. So `enter` alone is still the whole answer and the "never send `down` first" rule
+from 7e still holds — but for a different reason. On the trust gate option 2 is
+"No, exit"; here option 2 grants a *standing* permission you did not intend. Both are
+wrong to land on, which is why the rule is "read the screen and count the `❯` row"
+rather than a memorised keystroke.
 
 On herdr, wait on it directly as well — faster than polling, and evidence *alongside*
 the watcher line rather than instead of it (`SKILL.md`, "A host that publishes its own
@@ -1122,6 +1181,16 @@ agent states does not replace this"):
 ```bash
 herdr agent wait "<NAME2>" --until blocked --timeout 30000
 ```
+
+**And this check is where that "alongside, never instead" rule earns its keep, because
+here the host is measurably coarser than the registry.** herdr reports plain `blocked`
+for *both* kinds of block — it does not distinguish a permission prompt from an
+`AskUserQuestion`. Measured 2026-08-12: `agent wait` returned `blocked` for 11a and again
+for 11b, identically, while `waitingFor` read `permission prompt` and then `input needed`.
+So herdr can tell you *that* a human is needed and never *which* signal it is, and
+`waitingFor` is the only thing that splits `ATTN` from `ASK`. The two agreed at every
+point in that run, in both directions; agreement is what you want to record, not a
+substitute for the registry read.
 
 ### 11b. `ASK` — a worker waiting on `AskUserQuestion`
 
@@ -1141,10 +1210,21 @@ Let that turn finish, then ask for the other kind of block:
  "message": "Call the AskUserQuestion tool exactly once, asking whether to proceed with option A or option B. Do no other work and read nothing; just ask, and wait for the answer."}
 ```
 
-PASS on **`ASK <NAME2>`** — not `ATTN`. Then the same registry pair, and this time
-`waitingFor` **must** contain `input`. Those two lines are the whole content of this
-check: one `waiting` status routed to two different signals by a single substring test,
-observed going both ways within one run.
+PASS on **`ASK  <NAME2>`** — not `ATTN`. Note the **two** spaces: the watcher pads `ASK`
+to align with `ATTN`/`DONE`/`GONE` (`print(f"ASK  {name}")`), and this check invites
+matching the literal string. Then the same registry pair, and this time `waitingFor`
+**must** contain `input` — measured on both hosts 2026-08-12 as literally `input needed`.
+
+Those two lines are the whole content of this check: one `waiting` status routed to two
+different signals by a single substring test, observed going both ways within one run,
+on one worker.
+
+**And that substring is more fragile than it looks — record the literal `waitingFor`
+strings, not just which signal fired.** The discriminator is a bare "is `input` anywhere
+in this value" test. `permission prompt` merely happens not to contain the word. A future
+registry value like *"input needed for permission"* would route a permission prompt to
+`ASK` silently, with nothing anywhere reporting a fault — and the two strings this check
+recorded are the only evidence a later reader would have that the split ever worked.
 
 ### 11c. `CLEAR` or `DONE`, and then `GONE`
 
@@ -1163,15 +1243,25 @@ whether dismissing a question does that is not something this check controls. Se
 down which line appeared rather than recording "11c PASS" on its own; a suite that
 cannot say which of two signals it saw is not measuring the difference between them.
 
-Then kill it, **with the watcher still armed**:
+Then kill it, **with the watcher still armed**. On herdr the ledger holds the worker's
+*pane*, so derive the tab first — `["result"]["pane"]["tab_id"]`, the accessor
+`hosts/herdr.md` §9 warns about, since the shortened form raises `KeyError`:
 
 ```bash
 cmux close-surface --workspace "$CMUX_WORKSPACE_ID" --surface "<NAME2's ref>"
-herdr tab close "<NAME2's tab>"
 ```
 
-PASS on **`GONE <NAME2>`** within about four seconds — two polls, because the watcher
-requires two consecutive absences before calling a worker dead rather than missed.
+```bash
+TAB=$(herdr pane get "<NAME2's pane>" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["pane"]["tab_id"])')
+herdr tab close "$TAB"
+```
+
+PASS on **`GONE <NAME2>`**, and bound it at **two polls** rather than at a wall-clock
+number — the watcher requires two consecutive absences before calling a worker dead
+rather than merely missed (`if misses[name] < 2: continue`, default poll 2.0 s). Measured
+2026-08-12: **3.83 s** on herdr, sampling the Monitor output at 0.2 s; a cmux run
+sampling coarsely could only bracket the same event at ≤8.2 s. A few seconds is the
+expectation; anything past a minute is the failure.
 
 **This is the only place `GONE` is ever observed, and that is why it lives here.** Check
 12 stops every monitor first, so nothing is listening when its slots close — measured on
