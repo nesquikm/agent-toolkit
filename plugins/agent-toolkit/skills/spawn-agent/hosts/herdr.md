@@ -318,6 +318,16 @@ finished; focusing a tab marks it seen, and **CLI reads do not**. `unknown` mean
 agent is present but herdr cannot classify it — it does not prove completion, and it
 does not prove death.
 
+**So `--until idle` is the wrong way to wait for a finished worker.** Measured
+2026-08-12: `herdr agent wait <name> --until idle --timeout 90000` timed out with
+`{"error":{"code":"timeout"}}` on a worker that had *already* finished, because a
+worker whose tab you never focused settles as `done`, and `done` does not satisfy
+`--until idle`. Since a worker spawned `--no-focus` is by construction one whose tab
+nobody focused, that is the normal case here, not an edge one. Wait on `done`, wait on
+both, or omit `--until` entirely — bare `agent wait` uses the settled-state defaults
+and accepts all three. To block on "finished", prefer the watcher's `DONE`, which is
+driven by the registry rather than by whether a human looked at a tab.
+
 **Use this in addition to the watcher, never instead of it** (`SKILL.md`, "A host
 that publishes its own agent states does not replace this"). Nothing here reports a
 worker that died; only the registry pid check does.
@@ -332,8 +342,15 @@ The ledger stores the worker's **pane** id, so derive its tab at teardown rather
 carrying a fifth column:
 
 ```bash
-TAB=$(herdr pane get "$l1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["tab_id"])')
+TAB=$(herdr pane get "$l1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["pane"]["tab_id"])')
 ```
+
+**`["result"]["pane"]`, not `["result"]`.** `pane get` wraps its payload:
+`{"result":{"pane":{…,"tab_id":"w9:t8"},"type":"pane_info"}}`. The shortened accessor
+raises `KeyError: 'tab_id'` — caught by a live smoke run on 2026-08-12, where it threw
+on the **first** step of teardown and would have left the worker tab open and its
+ledger row unpruned. `pane current` wraps the same way. Read the shape rather than
+predicting it; that is herdr's own advice and this is what ignoring it costs.
 
 That command is also the liveness check — it exits 1 with `pane_not_found` if the user
 already closed the worker, in which case drop the row and close nothing.
