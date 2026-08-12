@@ -96,7 +96,7 @@ PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
 import json,sys
 live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
 print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
-  $(awk -F'\t' 'NF>=3 && $3!=""{a[++n]=$3} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
+  $(awk -F'\t' -v c=3 'NF>=3 && $c!=""{a[++n]=$c} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
 
 if [ -n "$PANE" ]; then          # tab into the pane this run already owns
   SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
@@ -107,6 +107,11 @@ else                             # first agent of the run: one split, anchored o
 fi
 [ -n "$SURF" ] || { echo "no surface came back; not sending anything" >&2; exit 1; }
 ```
+
+`-v c=3` rather than a dollar sign followed by the digit 3, for the reason `SKILL.md`
+gives under "The ledger" — a bare dollar-plus-digit in skill text is replaced by the
+skill's own invocation arguments before you read it, so the literal form silently scans
+the wrong column.
 
 Then resolve both locators for the ledger row (`SKILL.md`, "Spawn one agent", step 2):
 

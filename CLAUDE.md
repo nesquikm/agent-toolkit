@@ -58,6 +58,27 @@ plugins/agent-toolkit/                   → The plugin (the only thing that shi
 - **One plugin, many skills** — new agent skills go into `plugins/agent-toolkit/skills/`. A second plugin is warranted only when a bundle needs its own version line.
 - **JSON formatting** — 2-space indent, trailing newline. `/release` rewrites these files in place; anything else makes a release diff rewrite whole files.
 - **Skill frontmatter is a plain YAML scalar** — so a `description` may not contain `": "` (colon followed by a space). YAML reads it as a nested mapping and the whole block fails to parse, and the failure is *silent at runtime*: the skill loads with empty metadata, every field dropped, so it simply never triggers again. Nothing in the skill's own text looks wrong. Use an em dash where the sentence wants a colon, and run `claude plugin validate ./plugins/agent-toolkit` — the marketplace-level `claude plugin validate .` does **not** read skill frontmatter and passes happily while the skill is broken.
+- **Never write a bare `$` followed by a digit in skill markdown.** When a skill is
+  invoked *with arguments*, every `$0`, `$1`, … in its text is replaced by those
+  arguments — **zero-indexed**, so `$0` is the first word — before the model reads a
+  byte of it. Measured 2026-08-12 with a probe skill invoked as
+  `/probe ZULU YANKEE XRAY WHISKEY VICTOR`\:
+
+  | in the file | served as |
+  | --- | --- |
+  | `$0` `$1` `$2` `$4` | `ZULU` `YANKEE` `XRAY` `VICTOR` |
+  | `awk -F'\t' '$4!="reported"'` | `awk -F'\t' 'VICTOR!="reported"'` |
+  | `$$`, `${TMPDIR:-/tmp}`, `$LEDGER` | untouched |
+
+  Only `$` + digit and `$ARGUMENTS` are rewritten; `$` + letter is safe. This is the
+  same shape of failure as the frontmatter trap above — it produces *valid* awk that
+  queries the wrong column, with no error anywhere — and it is worse in one way: it
+  only fires when someone passes arguments, so a skill triggered by description match
+  behaves perfectly right up until the day a user types the slash command with a
+  sentence after it. Two of these were shipped in this repo before the probe found
+  them. Write `awk -v c=4 '$c…'` and iterate with `$i`; if you genuinely need to show a
+  literal `$1` in prose, say so in words rather than typing it.
+  `grep -rn --include='*.md' -E '\$[0-9]' plugins .claude/skills` is the check.
 
 ## Releasing
 

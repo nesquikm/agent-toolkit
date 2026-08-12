@@ -269,8 +269,18 @@ name <tab> loc1 <tab> loc2 <tab> state
 - **column 4 is the state**, and it is what survives you. Push notifications can be
   missed — a Monitor times out, a turn's context gets summarized — so flip a row to
   `reported` only once you have actually told the user that worker's outcome. Then
-  `awk -F'\t' '$4!="reported"' "$LEDGER"` is the answer to "what am I still owed?",
-  and it is answerable at the start of any turn without remembering anything.
+  `awk -F'\t' -v c=4 '$c!="reported"' "$LEDGER"` is the answer to "what am I still
+  owed?", and it is answerable at the start of any turn without remembering anything.
+
+  **That `-v c=4` is not a style choice — an awk field reference written as a dollar
+  sign followed by the digit 4 does not survive being read.** A skill invoked with
+  arguments has every bare dollar-plus-digit in its text replaced by one of those
+  arguments, zero-indexed, before you ever see it. Measured 2026-08-12 with a probe
+  skill invoked as `/probe ZULU YANKEE XRAY WHISKEY VICTOR`, where the literal field
+  reference for column 4 was served as `VICTOR` — leaving valid awk, the wrong query,
+  and no error anywhere. A dollar sign followed by a *letter* is untouched, which is
+  why `$c`, `$i` and `$LEDGER` are all safe. This is why you will not see a bare
+  dollar-digit anywhere in this skill, including in prose warning you about it.
 
 The ledger is keyed by the caller's slot, so it is exactly "the agents this run
 spawned" — the only slots you are ever allowed to close.

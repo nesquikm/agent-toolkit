@@ -378,6 +378,16 @@ If `VICTIM` comes back empty, every live session here has a socket. Record the c
 as SKIPPED with that reason and confirm the third line alone (an absent name exits 1);
 do not invent a session to test against.
 
+**Expect that skip to become permanent, and say so when it does.** The
+named-but-unreachable session is a pre-v2.1.224 artifact, so it disappears from a
+machine as its sessions turn over — measured 2026-08-12, twice in one day, `10 live
+sessions, 10 with a socket, 0 without`, where three days earlier the same machine had
+6 of 7 without. Once a machine is fully updated there is nothing left for the
+name-versus-address contrast to bite on, and this check reports SKIPPED forever while
+the guard it covers goes untested. That is a gap to close with a synthetic registry
+fixture, not a result to keep re-recording; note it in the verdict rather than letting
+a permanent SKIPPED read as a temporary one.
+
 ## 4. The prune, in both directions — *core*
 
 Both halves of the documented one-liner are load-bearing and they fail in **opposite**
@@ -475,19 +485,34 @@ is that the shipped procedure works; a hand-rolled launch tests your typing. Two
 
 - `NAME` is `smoke-$$` or anything else unlikely to collide, within
   `[a-z][a-z0-9_-]{0,31}`.
-- `REPO` is a **throwaway checkout whose path contains a space**, created below. That
-  choice does two jobs at once. On cmux it exercises the quoting fix — an unquoted path
-  dies at `cd` before `claude` ever starts, and zsh's message for it is the unhelpful
-  `string not in pwd`. On both hosts it gives the cwd verification power it does not
-  otherwise have, and it guarantees the folder-trust gate fires, which is what checks
-  7d and 7e are about.
+- `REPO` is a **throwaway checkout whose path contains a space and is unique to this
+  run**, created below. Both properties are load-bearing. The space exercises cmux's
+  quoting fix — an unquoted path dies at `cd` before `claude` ever starts, and zsh's
+  message for it is the unhelpful `string not in pwd` — and on both hosts it gives the
+  cwd verification power it does not otherwise have, since a comparison against a path
+  you would have landed in anyway proves nothing.
 
 ```bash
-REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/smoke repo"
+CLPID="<the session pid check 0b printed>"
+REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/smoke repo $CLPID"
 mkdir -p "$REPO"
 git -C "$REPO" init -q
 [ -d "$REPO/.git" ] && echo "PASS scratch repo: $REPO"
 ```
+
+**The pid suffix is what keeps the folder-trust gate reachable, and without it this
+procedure quietly stops testing the thing it claims to.** Trust is recorded per path in
+the profile's `~/.claude.json` as `hasTrustDialogAccepted`, and it **outlives the
+directory** — teardown's `rm -rf` deletes the folder while the trust record stays. So a
+fixed scratch path is gated on a machine's *first* run and silently pre-trusted on every
+run after that, which retires the gate-clearing half of 7d and 7e and all of 7d's
+failure-signature table. Caught on 2026-08-12, when a cmux run registered at `n=0` with
+no gate at all and the earlier record was still in the profile — including one under the
+pre-rename `…/cmux-spawn-agent-smoke/smoke repo`.
+
+A fresh pid per run means a fresh path, so the gate fires every time. It also means the
+profile accumulates one trust record per smoke run; they are inert, and clearing them is
+optional housekeeping, not part of this procedure.
 
 Record the baseline before you place anything — *host*:
 
@@ -555,8 +580,19 @@ shrank the user's view, which is the herdr version of the same mistake.
 
 ```bash
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
-awk -F'\t' '{print NR": "NF" cols: "$0}' "$LEDGER"
+awk -F'\t' '{printf "%d: %d cols:", NR, NF; for (i=1; i<=NF; i++) printf " [%s]", $i; print ""}' "$LEDGER"
 ```
+
+**Brackets, and no whole-record reference.** The brackets are what make an empty field
+visible — this check's own FAIL criterion is "two blank-looking fields", which
+unbracketed output cannot show you. And awk's whole-record variable, a dollar sign
+followed by the digit zero, cannot appear here at all: a skill invoked with arguments
+has every bare dollar-plus-digit replaced by one of those arguments before you read it.
+Measured 2026-08-12 — an earlier version of this very block was served as
+`{print NR": "NF" cols: "Run}`, `Run` being the first word of that run's arguments and
+an uninitialised awk variable, so it printed every row blank on a perfectly healthy
+ledger and framed it as the failure it was written to detect. `$i` is safe; only
+dollar-plus-digit is substituted.
 
 ```bash
 P="<plugin root>/skills/spawn-agent/lib/peer.py"
@@ -682,7 +718,8 @@ Then re-run the readiness loop, and verify where it landed. Compare the two as
 
 ```bash
 P="<plugin root>/skills/spawn-agent/lib/peer.py"
-REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/smoke repo"
+CLPID="<the session pid check 0b printed>"
+REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/smoke repo $CLPID"
 python3 -c '
 import os, sys
 want, got = sys.argv[1], sys.argv[2]
