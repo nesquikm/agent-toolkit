@@ -925,22 +925,36 @@ recent-unwrapped` does not help: it joins *soft* wraps, and this is a hard one. 
 `1`. Any run that recorded `0` from the old pattern proved nothing, and that includes the
 runs behind the 5-of-5 figure quoted above.
 
-Then the real read — *host*:
+Then the real read. **Capture it once and report how much you read alongside what you
+matched** — *host*:
 
 ```bash
-cmux read-screen --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" --scrollback --lines 200 \
-  | tr '\n' ' ' | tr -s ' ' | grep -o "is not an agent in this conversation" | wc -l | tr -d ' '
+OUT=$(cmux read-screen --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" --scrollback --lines 200)
+echo "lines=$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')  refusals=$(printf '%s\n' "$OUT" \
+  | tr '\n' ' ' | tr -s ' ' | grep -o 'is not an agent in this conversation' | wc -l | tr -d ' ')"
 ```
 
 ```bash
 # herdr: only once the worker is idle -- see below
-herdr agent read "<NAME>" --source recent-unwrapped --lines 200 \
-  | tr '\n' ' ' | tr -s ' ' | grep -o "is not an agent in this conversation" | wc -l | tr -d ' '
+OUT=$(herdr agent read "<NAME>" --source recent-unwrapped --lines 200)
+echo "lines=$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')  refusals=$(printf '%s\n' "$OUT" \
+  | tr '\n' ' ' | tr -s ' ' | grep -o 'is not an agent in this conversation' | wc -l | tr -d ' ')"
 ```
 
-PASS on `0` **from the wrap-tolerant form, and only after the control above printed 1**.
-Any non-zero count means the worker addressed you by name, retried, and paid for it —
-record it, because that is the regression, not a hiccup.
+PASS needs **both halves**: `refusals=0`, *and* `lines` in the tens — a real transcript of
+a worker that booted, took a task and replied runs to dozens of lines (53 and 47 in the
+two runs measured on 2026-08-12). Any non-zero `refusals` means the worker addressed you
+by name, retried, and paid for it; record it, because that is the regression, not a
+hiccup.
+
+**`lines` is there because the control alone does not cover the read.** The control
+proves the *pattern* can match. It says nothing about whether the command returned any
+content, and a read that failed also produces `refusals=0` with the control still green
+— which is the bug fixed just above, displaced one layer out. On herdr the reachable
+version is concrete: `agent read` refuses with `agent_not_idle` while the worker is
+working, and that error is a single line of JSON, so `lines=1 refusals=0` is a failed
+read wearing a pass's clothes. `lines` in single digits means you measured nothing —
+wait for idle and read again rather than recording the zero.
 
 `tr -s ' '` matters as much as the join: the wrap inserts indentation, so the joined text
 reads `…in this   conversation…` with runs of spaces that a fixed pattern will not match.
