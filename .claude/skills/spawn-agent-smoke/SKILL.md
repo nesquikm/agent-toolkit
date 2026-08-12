@@ -908,73 +908,168 @@ Three separate PASS conditions here:
   contract. A refusal costs a round trip on the one message that carries the results, so
   it is silent unless you look.
 
-**Prove the detector can fire before you trust a zero from it.** This is not ceremony —
-the previous pattern here *could not match* and returned a clean `0` while the refusal
-was on screen, which is how a run reports a green it did not earn:
+**Read the refusal out of the worker's transcript, not off its screen — *core*.** That is
+a change from earlier versions of this check, and the measurement two subsections down is
+why: on cmux the screen read cannot see a refusal that has scrolled, and reports a clean
+`0` when it does. The transcript has no viewport, no wrapping and no host in it.
+
+Capture the two fields **while the worker is still alive** — `sessionId` is unreadable
+once it exits:
+
+```bash
+python3 "$P" "<NAME>" sessionId
+python3 "$P" "<NAME>" cwd
+```
+
+```bash
+python3 - "<the sessionId>" "<the cwd>" <<'PY'
+import json, os, re, sys
+sid, cwd = sys.argv[1], sys.argv[2]
+esc = re.sub(r'[^a-zA-Z0-9]', '-', cwd)
+roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [os.path.expanduser('~/.claude')]
+path = next((p for p in (os.path.join(r, 'projects', esc, sid + '.jsonl') for r in roots)
+             if os.path.exists(p)), None)
+if not path:
+    sys.exit('no transcript for %s -- that worker has taken no turn at all' % sid)
+sends = refused = 0
+for line in open(path):
+    try:
+        r = json.loads(line)
+    except ValueError:
+        continue
+    c = (r.get('message') or {}).get('content')
+    if not isinstance(c, list):
+        continue
+    for b in c:
+        if not isinstance(b, dict):
+            continue
+        if b.get('type') == 'tool_use' and b.get('name') == 'SendMessage':
+            sends += 1
+        elif b.get('type') == 'tool_result' and \
+                'is not an agent in this conversation' in json.dumps(b.get('content')):
+            refused += 1
+print('SendMessage calls=%d  refusals=%d' % (sends, refused))
+PY
+```
+
+**Read the two numbers together** — they separate the three outcomes this check exists to
+tell apart, and all three were produced on this machine on 2026-08-12:
+
+| result | what happened | verdict |
+| --- | --- | --- |
+| `calls=0 refusals=0` | it never called the tool; it printed | FAIL the **second** PASS condition — work the row-one note below |
+| `calls=1 refusals=1` | the ref wall; it addressed you by name | FAIL the **third**, not the second |
+| `calls>=1 refusals=0` | it sent, first try | PASS |
+
+**The detector was proved able to fire, against a real refusal, not a synthetic one.** A
+worker was told to `SendMessage` to a bare name deliberately and not to retry; it was
+refused, and this read returned `calls=1 refusals=1`. The print-only shape is measured
+too — the throwaway worker in the scrollback experiment below never called the tool and
+returned `calls=0 refusals=0`. A smoke run cannot provoke a refusal on purpose without
+breaking the thing it is measuring, so those recorded numbers are the control.
+
+**Do not grep the raw `.jsonl` instead.** The phrase is ordinary prose and lands in the
+file whenever anyone *writes about* the ref wall — a supervisor whose task text mentions
+it, a worker narrating what happened. Measured on the same transcript: a plain
+`grep -c` returned **4** where the structured read returned **1**, the other three being
+the phrase in message text. Match on a `tool_result`, which is the only place the
+product itself puts it. (The `⎿` glyph is terminal rendering and is never in the file;
+grepping for it there returns nothing on a perfectly healthy send.)
+
+### Why not the screen — cmux saturates at the viewport, silently
+
+**Measured 2026-08-12 in a cmux surface**, against a throwaway worker that emitted 120
+uniquely marked lines as assistant text and had exactly one real refusal in its
+transcript. Viewport was 55 rows:
+
+| read | lines | of 120 marked lines | refusals |
+| --- | --- | --- | --- |
+| `read-screen` (no flags) | 55 | 47 — from marker 074 | 0 |
+| `read-screen --scrollback` | 55 | 47 — from marker 074 | 0 |
+| `read-screen --lines 40` | 40 | 32 — from marker 089 | 0 |
+| `read-screen --lines 200` | 55 | 47 — from marker 074 | 0 |
+| `read-screen --lines 600` | 55 | 47 — from marker 074 | 0 |
+| `read-screen --scrollback --lines 2000` | 55 | 47 — from marker 074 | 0 |
+| `capture-pane`, same three flag forms | 55 | 47 — from marker 074 | 0 |
+| **the transcript** | — | — | **1** |
+
+**Every form returns the viewport and nothing more.** `--scrollback` adds nothing,
+`--lines` only ever *truncates* (40 gave less than the default did), and raising it to
+2000 changes not one line. `cmux capture-pane` is the same command wearing a tmux name
+and saturates identically. So the old read here — `--scrollback --lines 200` — returned
+`lines=55 refusals=0`, which satisfied **both** of the old PASS conditions while a
+genuine ref-wall refusal sat in that worker's history. A false green, in exactly the
+class of the hard-wrap bug fixed on the herdr side, reached from a different direction.
+
+**The flags are not broken, and that is the point — it is the alternate screen.** Control
+run in the *same surface*, immediately after `/exit` dropped it back to a plain shell,
+with 120 marked lines printed by `seq`:
+
+| read | lines | of 120 marked lines |
+| --- | --- | --- |
+| `read-screen` (no flags) | 33 | 32 — from marker 089 |
+| `read-screen --scrollback` | 128 | **120 — from marker 001** |
+| `read-screen --lines 40` | 40 | 39 — from marker 082 |
+| `read-screen --lines 200` | 128 | **120 — from marker 001** |
+
+So `--scrollback` works perfectly on a normal-screen program and reaches every line.
+Claude Code runs on the **alternate screen**, which has no scrollback to read — the same
+property herdr's own error message names when it says alternate-screen history "can only
+be captured by scrolling while idle". herdr solved it by scrolling; cmux exposes no
+command that does, so on cmux there is nothing to fix in the read and the transcript is
+the answer.
+
+`cmux read-screen --help` also documents that **`--lines <n>` implies `--scrollback`**, so
+the two flags are one control, not two — do not read a difference between them into a
+result.
+
+### The screen reads, kept as diagnosis only
+
+They are still how you answer "what is on that worker's screen right now" for the
+ordered diagnosis below, and for anything you have to *look* at:
+
+```bash
+cmux read-screen --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" --scrollback --lines 200
+```
+
+```bash
+# herdr: only once the worker is idle -- see below
+herdr agent read "<NAME>" --source recent-unwrapped --lines 200
+```
+
+Two things still govern any *matching* you do against that output.
+
+**Claude Code hard-wraps a tool result**, so the phrase is split across rendered lines and
+no line-oriented `grep` can ever see it whole. Join the lines and squeeze the runs of
+indentation the wrap inserts, or the joined text reads `…in this   conversation…` and a
+fixed pattern misses it. Prove the pattern can fire before trusting a zero from it:
 
 ```bash
 printf '%s\n' "'w' is not an agent in this" "conversation. Re-send with the ref" \
   | tr '\n' ' ' | tr -s ' ' | grep -o "is not an agent in this conversation" | wc -l | tr -d ' '
 ```
 
-Must print `1`. **Claude Code hard-wraps that tool result**, so the phrase is split
-across rendered lines and no line-oriented `grep` can ever see it whole. `--source
-recent-unwrapped` does not help: it joins *soft* wraps, and this is a hard one. Measured
-2026-08-12 against a worker that had genuinely been refused — the old
-`grep -c "is not an agent in this conversation"` returned `0`, the form above returned
-`1`. Any run that recorded `0` from the old pattern proved nothing, and that includes the
+Must print `1`. Measured 2026-08-12 against a worker that had genuinely been refused, the
+old `grep -c` form returned `0` and this one returned `1`; `--source recent-unwrapped`
+does not rescue the old form, because it joins *soft* wraps and this is a hard one. Any
+run that recorded a `0` from the plain `grep -c` proved nothing, and that includes the
 runs behind the 5-of-5 figure quoted above.
 
-Then the real read. **Capture it once and report how much you read alongside what you
-matched** — *host*:
-
-```bash
-OUT=$(cmux read-screen --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" --scrollback --lines 200)
-echo "lines=$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')  refusals=$(printf '%s\n' "$OUT" \
-  | tr '\n' ' ' | tr -s ' ' | grep -o 'is not an agent in this conversation' | wc -l | tr -d ' ')"
-```
-
-```bash
-# herdr: only once the worker is idle -- see below
-OUT=$(herdr agent read "<NAME>" --source recent-unwrapped --lines 200)
-echo "lines=$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')  refusals=$(printf '%s\n' "$OUT" \
-  | tr '\n' ' ' | tr -s ' ' | grep -o 'is not an agent in this conversation' | wc -l | tr -d ' ')"
-```
-
-PASS needs **both halves**: `refusals=0`, *and* `lines` in the tens — a real transcript of
-a worker that booted, took a task and replied runs to dozens of lines (53 and 47 in the
-two runs measured on 2026-08-12). Any non-zero `refusals` means the worker addressed you
-by name, retried, and paid for it; record it, because that is the regression, not a
-hiccup.
-
-**`lines` is there because the control alone does not cover the read.** The control
-proves the *pattern* can match. It says nothing about whether the command returned any
-content, and a read that failed also produces `refusals=0` with the control still green
-— which is the bug fixed just above, displaced one layer out. On herdr the reachable
-version is concrete: `agent read` refuses with `agent_not_idle` while the worker is
-working, and that error is a single line of JSON, so `lines=1 refusals=0` is a failed
-read wearing a pass's clothes. `lines` in single digits means you measured nothing —
-wait for idle and read again rather than recording the zero.
-
-`tr -s ' '` matters as much as the join: the wrap inserts indentation, so the joined text
-reads `…in this   conversation…` with runs of spaces that a fixed pattern will not match.
-Squeeze first, then search.
-
-**On herdr this read has two failure modes and only one of them is loud.**
+**And on herdr the read itself has two failure modes, only one of them loud.**
 
 - **Too early is loud.** `recent`/`recent-unwrapped` refuse outright while the agent is
   working — `{"error":{"code":"agent_not_idle",…"its alternate-screen history can only
-  be captured by scrolling while idle"}}` — because Claude Code runs on the alternate
-  screen and herdr has to scroll it to capture history. Wait for idle and retry; that
-  error is not a FAIL of anything.
-- **The wrong source is silent.** Substituting `--source visible` because it works
-  while busy returns a clean `0` having never looked at the line in question. Measured
-  against a worker that had emitted 120 marked lines, `visible` returned 46 matches at
+  be captured by scrolling while idle"}}`. Wait for idle and retry; that error is not a
+  FAIL of anything. Note it is a single line of JSON, so a run that matched against it
+  would read `lines=1 refusals=0` — a failed read wearing a pass's clothes.
+- **The wrong source is silent.** Substituting `--source visible` because it works while
+  busy returns a clean `0` having never looked at the line in question. Measured against
+  a worker that had emitted 120 marked lines, `visible` returned 46 matches at
   `--lines 200` and 46 again at `--lines 600` — it saturates at the viewport and says
   nothing about it, while `recent-unwrapped` returned all of them.
 
-So the order matters: wait for idle, *then* read with `recent-unwrapped`. Recording a
-`0` obtained from `visible` is recording nothing.
+That herdr saturation and the cmux one above are the same failure on two hosts, which is
+the reason the PASS condition no longer rests on a screen read at all.
 
 ### If the reply never arrives — the ordered diagnosis
 
@@ -985,8 +1080,11 @@ screen read:
    approval, which is what a permission-class mismatch looks like from here (see check
    1d) and is not a messaging failure at all. `GONE` means the worker died, which is
    check 9's result and not this one. Either way you are done here.
-2. **Then the worker's screen**, with the host command above. The single question is
-   whether a `SendMessage` call happened *at all*:
+2. **Then the transcript read above**, which answers the single question here — whether a
+   `SendMessage` call happened *at all* — as `calls=0` versus `calls>=1`, and does it
+   without a viewport in the way. Go to the screen only for what the numbers cannot show
+   you: what the worker actually wrote, and whether it is still mid-turn. The same three
+   shapes read on screen:
 
 | On the worker's screen | Cause | Record |
 | --- | --- | --- |
