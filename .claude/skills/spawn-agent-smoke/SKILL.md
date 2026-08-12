@@ -5,7 +5,7 @@ description: Smoke-test the spawn-agent skill on this machine — a bounded, evi
 
 # Smoke-test `spawn-agent`
 
-Eleven checks, one worker, about five minutes. It answers one question: **does this
+Twelve checks, two workers, about eight minutes. It answers one question: **does this
 plugin work on this machine right now** — after an edit, after a release, or when a
 run has started feeling wrong.
 
@@ -300,7 +300,7 @@ slash and the `.tsv` — is the empty-slot failure above, and it is the one to c
 because every later check builds the same path. On cmux it must carry the surface uuid.
 
 **This is a rail, not a check.** A non-empty ledger means the session in this slot has
-workers it has not finished with, and check 11 deletes the ledger and closes what it
+workers it has not finished with, and check 12 deletes the ledger and closes what it
 lists. Run the smoke test somewhere else instead. Do not "just move it aside" — the
 rows are the only record of which slots that run may close.
 
@@ -402,7 +402,7 @@ pid that the guard accepts and the kernel will answer for, which is why it uses 
 one.
 
 Cleanup is already covered — the fixture sits under `${TMPDIR:-/tmp}/spawn-agent-smoke/`,
-which check 11 step 4 removes along with the rest of this run's scratch. There is no
+which check 12 step 4 removes along with the rest of this run's scratch. There is no
 extra teardown step, and because that directory is keyed by `$CLPID` it is this run's
 alone — a concurrent smoke run on the same machine has its own.
 
@@ -487,7 +487,7 @@ A watcher that matches nothing used to be indistinguishable from a healthy watch
 whose workers are still busy. Prove it now says so. This runs **concurrently** with
 everything below — arm it, keep going, and collect its line later.
 
-Name the scratch ledger with this slot's id so the leak proof in check 11 catches
+Name the scratch ledger with this slot's id so the leak proof in check 12 catches
 this watcher too.
 
 Create its ledger first, with one row naming nobody:
@@ -529,7 +529,7 @@ naming the "rows match nothing" case, and no second one afterwards. Two `WARN`s,
 `GONE`, or silence past a minute, are all FAIL. Silence in particular is the exact
 regression this exists to catch.
 
-Keep the task id. Check 11 stops it.
+Keep the task id. Checks 11 and 12 both need it -- 11 reads its lines, 12 stops it.
 
 ## 6. Rails for everything below this line
 
@@ -1047,10 +1047,146 @@ by exactly one, and no existing tab's `pane_count` changed. That is the "a fan-o
 costs the user nothing" guarantee, and it is the opposite assertion to cmux's on
 purpose.
 
-## 11. Teardown, and proof that nothing leaked
+## 11. The blocked-worker signals — `ASK`, `ATTN`, `CLEAR`, `GONE` — *core, host commands*
 
-Order matters, and it is the skill's order. Stopping the watcher last means one `GONE`
-per slot you close, arriving exactly as you report a clean run.
+Check 5 proves `WARN` and check 9 proves `DONE`. The watcher's four remaining lines have
+never been proved by this suite at all — they are asserted from hand measurements taken
+elsewhere. One of them is load-bearing twice over: check 1d exists to stop a
+permission-class mismatch, and check 8's diagnosis tells you to read `ATTN` as "the
+message is being held, not lost". Nothing here has ever made an `ATTN` appear, so that
+branch has never been observed to work in a run.
+
+This check makes each of them fire on purpose.
+
+**It runs before teardown and it uses its own worker.** Before, because every line below
+comes from the run's watcher and teardown stops it. Its own worker, because 11c
+deliberately kills one, and killing the worker checks 7–10 rest on would destroy their
+evidence.
+
+**Write its ledger row before you launch it**, exactly as 7b requires. This worker is as
+real as any other and check 12 must find it.
+
+### 11a. `ATTN` — a worker parked on a permission prompt
+
+Spawn one worker the way your host file says, into the scratch repo you already trusted
+in 7e — so no trust gate can fire and the only thing that can block it is the prompt you
+are about to cause. The permission class is the point, so pass it explicitly:
+
+```
+cmux:  cd "<REPO>" && claude -n <NAME2> --permission-mode manual
+herdr: herdr agent start <NAME2> --kind claude --pane "<L1>" -- -n <NAME2> --permission-mode manual
+```
+
+Wait for the registry as usual, then give it something that must ask:
+
+```
+{"to": "uds:/tmp/cc-socks/<its pid>.sock",
+ "summary": "smoke - block on a permission prompt",
+ "message": "Run this exact shell command and reply with its first line: ls /usr/share/dict\n\nSend the reply to uds:/tmp/cc-socks/<your own pid>.sock — that is the session that sent you this message, and the same address is on this message as its `from`."}
+```
+
+PASS on **`ATTN <NAME2>`** from the run's watcher, within about ten seconds. Measured on
+herdr 2026-08-12: `blocked` in 3.9 s, with the registry agreeing exactly.
+
+Corroborate from the registry rather than trusting the line alone — this pair is what
+decides whether `ATTN` means what the skill claims:
+
+```bash
+P="<plugin root>/skills/spawn-agent/lib/peer.py"
+python3 "$P" "<NAME2>" status
+python3 "$P" "<NAME2>" waitingFor
+```
+
+PASS on `waiting`, and a `waitingFor` that does **not** contain the word `input`. That
+substring is the entire discriminator — `watch-workers.py` prints `ASK` when
+`waitingFor` contains `input` and `ATTN` otherwise — so a permission prompt reported as
+`ASK` means the two have been transposed and check 8's diagnosis has been pointing at
+the wrong branch all along.
+
+**Run those two only after the `ATTN` line has landed.** `waitingFor` is absent from the
+record whenever the worker is not blocked, and `peer.py` exits 1 on an absent field
+(measured: a `busy` session prints `busy` for `status` and nothing at exit 1 for
+`waitingFor`). An exit 1 here means you looked too early, not that the field is missing
+or the guard is broken — which is the same "absent and refused look identical" shape
+check 3 is built around.
+
+**Silence and `GONE` are both failures here, and they mean opposite things.** Silence
+past twenty seconds means the watcher never saw the wait: check that this worker's row
+is in the ledger the watcher was actually armed on, which is check 5's failure mode
+reappearing. `GONE` means it died instead of blocking.
+
+On herdr, wait on it directly as well — faster than polling, and evidence *alongside*
+the watcher line rather than instead of it (`SKILL.md`, "A host that publishes its own
+agent states does not replace this"):
+
+```bash
+herdr agent wait "<NAME2>" --until blocked --timeout 30000
+```
+
+### 11b. `ASK` — a worker waiting on `AskUserQuestion`
+
+Clear 11a's prompt first. **Read the screen before pressing anything**, exactly as 7e
+insists — a permission dialog's second option is not always harmless:
+
+```bash
+cmux send-key --workspace "$CMUX_WORKSPACE_ID" --surface "<NAME2's ref>" enter
+herdr agent send-keys "<NAME2>" enter
+```
+
+Let that turn finish, then ask for the other kind of block:
+
+```
+{"to": "uds:/tmp/cc-socks/<its pid>.sock",
+ "summary": "smoke - block on AskUserQuestion",
+ "message": "Call the AskUserQuestion tool exactly once, asking whether to proceed with option A or option B. Do no other work and read nothing; just ask, and wait for the answer."}
+```
+
+PASS on **`ASK <NAME2>`** — not `ATTN`. Then the same registry pair, and this time
+`waitingFor` **must** contain `input`. Those two lines are the whole content of this
+check: one `waiting` status routed to two different signals by a single substring test,
+observed going both ways within one run.
+
+### 11c. `CLEAR` or `DONE`, and then `GONE`
+
+Answer or dismiss the question from 11b and record **which line the watcher prints
+next**. The two are a real distinction and only one of them is guaranteed:
+
+| What follows | Means |
+| --- | --- |
+| `DONE <NAME2>` | it took a turn after unblocking — the normal case, and a PASS |
+| `CLEAR <NAME2>` | it unblocked without taking a turn, so nothing is coming and the task would need re-sending |
+
+**Record which you got; do not chase the other.** `CLEAR` is the one line this suite
+still cannot produce on demand — it needs a block that ends with no turn behind it, and
+whether dismissing a question does that is not something this check controls. Seeing
+`DONE` proves the unblock is *reported*, which is the property check 9 depends on. Write
+down which line appeared rather than recording "11c PASS" on its own; a suite that
+cannot say which of two signals it saw is not measuring the difference between them.
+
+Then kill it, **with the watcher still armed**:
+
+```bash
+cmux close-surface --workspace "$CMUX_WORKSPACE_ID" --surface "<NAME2's ref>"
+herdr tab close "<NAME2's tab>"
+```
+
+PASS on **`GONE <NAME2>`** within about four seconds — two polls, because the watcher
+requires two consecutive absences before calling a worker dead rather than missed.
+
+**This is the only place `GONE` is ever observed, and that is why it lives here.** Check
+12 stops every monitor first, so nothing is listening when its slots close — measured on
+both hosts 2026-08-12, where two full runs closed four workers between them and saw not
+one `GONE` line.
+
+Finally, prune `<NAME2>`'s row from the ledger, using the documented one-liner check 4
+exercises, so check 12 does not offer to close a slot that is already gone.
+
+## 12. Teardown, and proof that nothing leaked
+
+**Stopping the watcher first is deliberate, and it costs you the `GONE` lines.** Closing
+slots under a live watcher would emit one `GONE` each, which is benign but arrives mixed
+into the report you are writing; check 11c already observed `GONE` once, on purpose,
+which is what that signal needed. So stop the monitors, then close.
 
 1. **`TaskStop` every monitor this run armed** — normally two, the run's watcher and the
    deaf one from check 5. A partial re-run that skipped check 5 has only one, and a
@@ -1150,7 +1286,7 @@ Then one line of overall judgement, which is not a percentage:
 
 - **PASS** — every check passed, or the only non-passes are SKIPPED with a stated
   reason. The plugin works on this machine, on this host.
-- **PARTIAL** — checks 0 through 5 passed and something in 7 through 9 did not. The
+- **PARTIAL** — checks 0 through 5 passed and something in 7 through 11 did not. The
   guards hold but the live path is broken. **This is not a pass**, and it is the
   failure mode worth naming loudly: every cheap check can pass while spawning is
   entirely dead, because none of them touches a worker.
