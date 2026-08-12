@@ -309,6 +309,16 @@ sanitised pane id (`w9-p2`), not a colon and not a cmux uuid. A path with a uuid
 is the inherited-`CMUX_SURFACE_ID` bug, live, and it is the one failure that would
 silently merge this run's ledger with every other herdr pane's.
 
+**What that forbids is a colon or a cmux uuid — not a letter.** herdr slot ids are opaque
+and routinely letter-suffixed, and one of those can read as a placeholder that never got
+substituted: the examples in this file are all `w9:p2`-shaped, so a caller pane of `w9:pN`
+with a ledger at `w9-pN.tsv` looks exactly like a literal `<N>` left behind by a broken
+expansion. It is not one. `hosts/herdr.md` says so outright — "Ids are opaque and you must
+not pattern-match them" — and on 2026-08-12 `herdr pane list` confirmed `w9:pN` as a real,
+live pane while a careful cmux agent, reading that run's evidence, was flagging the
+filename as suspect. The suspicion was reasonable and the conclusion was wrong; settle it
+with `herdr pane list`, never with the shape of the string.
+
 ## 2. The stale-ledger guard — three fixtures, no spawn — *core*
 
 The ledger path is keyed by the slot id, so relaunching `claude` in the same slot
@@ -528,6 +538,17 @@ Measured in that form on 2026-08-09. Note the shape of the assertion: **one** li
 naming the "rows match nothing" case, and no second one afterwards. Two `WARN`s, or a
 `GONE`, or silence past a minute, are all FAIL. Silence in particular is the exact
 regression this exists to catch.
+
+**Give that `Monitor` an explicit timeout, and not a short one — use 180 s.** The command
+above names none, while the assertion in the paragraph you just read makes *silence past
+a minute* a FAIL. Those two only compose if the watching window comfortably outlives the
+minute: a `Monitor` that expires at or near 60 s cannot tell "no `WARN` ever came" from
+"the window shut before one was due", and the check stops being decidable in either
+direction. The floor is therefore **120 s** — past the FAIL threshold with room left to
+observe that no *second* `WARN` follows the first — and 180 s is what to actually pick.
+Both green runs on 2026-08-12, one on cmux and one on herdr, chose 180 s independently
+and both saw the single line at about 30 s, leaving two full minutes of quiet as
+evidence rather than as an unmeasured gap.
 
 Keep the task id. Checks 11 and 12 both need it -- 11 reads its lines, 12 stops it.
 
@@ -930,7 +951,8 @@ roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [
 path = next((p for p in (os.path.join(r, 'projects', esc, sid + '.jsonl') for r in roots)
              if os.path.exists(p)), None)
 if not path:
-    sys.exit('no transcript for %s -- that worker has taken no turn at all' % sid)
+    sys.exit('no transcript for %s under %s -- either that worker has taken no turn at '
+             'all, or its transcript lives under a profile not in roots' % (sid, roots))
 sends = refused = 0
 for line in open(path):
     try:
@@ -952,6 +974,17 @@ print('SendMessage calls=%d  refusals=%d' % (sends, refused))
 PY
 ```
 
+**That "no transcript" exit names two causes because its condition has two.** The same
+branch fires when the worker has genuinely taken no turn *and* when the transcript exists
+but sits under a profile that is not in `roots`; a missing path cannot tell them apart,
+and the earlier wording — "that worker has taken no turn at all" — was flatly more
+confident than the test above it. In practice the first cause is the one you have, because
+`peer.py` builds its roots with the same `CLAUDE_CONFIG_DIR`-then-`~/.claude` logic, so a
+worker it just resolved a `sessionId` for is a worker whose profile is in this list. Which
+means the second cause is not a shrug: seeing it against a name `peer.py` answered for is
+itself a finding, and `CLAUDE_CONFIG_DIR` is the first thing to read before believing a
+turn count of zero.
+
 **Read the two numbers together** — they separate the three outcomes this check exists to
 tell apart, and all three were produced on this machine on 2026-08-12:
 
@@ -961,12 +994,26 @@ tell apart, and all three were produced on this machine on 2026-08-12:
 | `calls=1 refusals=1` | the ref wall; it addressed you by name | FAIL the **third**, not the second |
 | `calls>=1 refusals=0` | it sent, first try | PASS |
 
-**The detector was proved able to fire, against a real refusal, not a synthetic one.** A
-worker was told to `SendMessage` to a bare name deliberately and not to retry; it was
-refused, and this read returned `calls=1 refusals=1`. The print-only shape is measured
-too — the throwaway worker in the scrollback experiment below never called the tool and
-returned `calls=0 refusals=0`. A smoke run cannot provoke a refusal on purpose without
-breaking the thing it is measuring, so those recorded numbers are the control.
+**A clean run can only ever produce the third row, by construction — so a green check 8 is
+not evidence that this detector discriminates.** A run that passes is a run whose worker
+sent on its first try, which is `calls>=1 refusals=0` and nothing else; the two FAIL rows
+describe outcomes the run did not have and therefore did not test. Read a green result as
+"it fires correctly on the healthy case", never as "it can tell the three apart". The
+discrimination rests entirely on recorded controls — which do exist, in two forms:
+
+- **Against a real refusal.** A worker was told to `SendMessage` to a bare name
+  deliberately and not to retry; it was refused, and this read returned
+  `calls=1 refusals=1`. The print-only shape is measured the same way — the throwaway
+  worker in the scrollback experiment below never called the tool and returned
+  `calls=0 refusals=0`.
+- **Against three synthetic transcripts.** A cmux run on 2026-08-12 wrote one `.jsonl` per
+  row — no call, one call with a refusing `tool_result`, one clean call — and ran this
+  check's own detector body over each, getting exactly `calls=0 refusals=0`,
+  `calls=1 refusals=1` and `calls>=1 refusals=0`. That is the cheap control, it needs no
+  worker, and it is the one to repeat whenever the detector body is edited.
+
+A smoke run cannot provoke a real refusal without breaking the very thing it is measuring,
+which is why those numbers are recorded here instead of being re-measured every run.
 
 **Do not grep the raw `.jsonl` instead.** The phrase is ordinary prose and lands in the
 file whenever anyone *writes about* the ref wall — a supervisor whose task text mentions
@@ -1068,8 +1115,33 @@ runs behind the 5-of-5 figure quoted above.
   `--lines 200` and 46 again at `--lines 600` — it saturates at the viewport and says
   nothing about it, while `recent-unwrapped` returned all of them.
 
-That herdr saturation and the cmux one above are the same failure on two hosts, which is
-the reason the PASS condition no longer rests on a screen read at all.
+That `visible` saturation and the cmux one above are the same failure on two hosts — but
+notice what it is a failure *of*: the **wrong source**. It is not the herdr argument for
+the transcript, because on herdr the right source genuinely reaches.
+
+**`recent-unwrapped` does not saturate, so do not carry the cmux argument over to
+herdr.** Re-measured 2026-08-12 on a real worker: it returned 2456 bytes — the complete
+turn, agreeing with the transcript line for line. Saturation is settled on this host, and
+the case for reading the transcript anyway is three other things, none of them a viewport:
+
+- **It only answers while idle.** `recent`/`recent-unwrapped` refuse outright mid-turn, as
+  the loud failure above describes. So the natural moment to ask "was the reply refused" —
+  while the worker is still working, which is when you notice nothing has arrived — is
+  exactly the moment the read is unavailable. The transcript has no such window; it is
+  append-only and readable at any instant.
+- **What it shows you is a rendering.** The send appears as the `summary` argument drawn
+  into `⎿ … → uds:…`, which is presentation, and presentation is the product's to change
+  at any release without anything here breaking loudly. A `tool_use` block named
+  `SendMessage` is the product's own structure, and the structure is what the check should
+  be pinned to.
+- **It cannot count sends at all, only refusals.** A refusal leaves a matchable phrase on
+  screen; a *send that never happened* leaves nothing to match. So the screen is blind to
+  check 8's **second** PASS condition — the print-instead-of-send failure, the one measured
+  1-in-2 on 2026-08-12 — and `calls=0` is a number only the transcript can produce.
+
+Between the two hosts, then: on cmux the screen read is broken and cannot be fixed from
+here, and on herdr it works and still answers the wrong question. That is why the PASS
+condition rests on the transcript on both.
 
 ### If the reply never arrives — the ordered diagnosis
 
