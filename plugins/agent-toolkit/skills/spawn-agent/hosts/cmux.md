@@ -18,12 +18,19 @@ surface — the tab this session occupies.
   exit 1
 }
 WS="$CMUX_WORKSPACE_ID"
-export CALLER_SLOT="$CMUX_SURFACE_ID"
+CALLER_SLOT="$CMUX_SURFACE_ID"
 ```
 
 Both ids, not one: every placement below passes `--surface "$CMUX_SURFACE_ID"`, and
-the ledger is keyed by it. The `export` matters — the `Monitor` that runs the watcher
-gets a shell of its own, and an unexported `CALLER_SLOT` expands to nothing there.
+the ledger is keyed by it.
+
+**Repeat those two lines at the top of every later `Bash` call that needs them, and do
+not try to `export` your way out of it.** A `Bash` call's shell state does not outlive
+the call — measured 2026-08-12, an exported variable read back empty both in the next
+`Bash` call and inside a `Monitor` command. `$CMUX_SURFACE_ID` and `$CMUX_WORKSPACE_ID`
+survive because they are in the process environment, which is exactly why the two names
+above are derived from them rather than carried forward. For the `Monitor` command,
+write the expanded slot id in literally.
 
 A cmux surface uuid satisfies the four slot properties in `SKILL.md` directly: it is
 globally unique, it outlives any one `claude` process, and it is already
