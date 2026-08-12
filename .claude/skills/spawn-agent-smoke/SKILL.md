@@ -1038,7 +1038,11 @@ purpose.
 Order matters, and it is the skill's order. Stopping the watcher last means one `GONE`
 per slot you close, arriving exactly as you report a clean run.
 
-1. **`TaskStop` both monitors** — the run's watcher and the deaf one from check 5.
+1. **`TaskStop` every monitor this run armed** — normally two, the run's watcher and the
+   deaf one from check 5. A partial re-run that skipped check 5 has only one, and a
+   check-5 watcher that already hit its own timeout is gone rather than leaked:
+   `TaskStop` answering `No task found with ID: …` is that case, not a failure. Step 5's
+   scoped `pgrep` is what settles it either way — count monitors there, not here.
 2. **Close each slot in the ledger**, and only those:
 
 ```bash
