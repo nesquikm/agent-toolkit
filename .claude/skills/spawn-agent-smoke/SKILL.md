@@ -225,6 +225,12 @@ the server's focused pane, which may belong to the user or another client. Two
 different answers here is a PASS and is exactly why every later command passes an
 explicit id.
 
+**The same answer both ways is not a failure either** — it means focus simply happened
+to be on the calling pane when you looked, which is common when the user is watching
+the session that is running this. Record it and move on. The assertion that decides
+this check is `pane_id == $HERDR_PANE_ID` under `--current`; the divergence is evidence
+when it appears, not a requirement. Observed identical on 2026-08-12.
+
 Also assert the server is reachable, because every herdr check below depends on it:
 
 ```bash
@@ -264,19 +270,34 @@ the session's own status line is the authority (`⏵⏵ auto mode on`, and so on
 
 ### 1e. The ledger rail — *host binding, core assertion*
 
-```bash
-# cmux:
-CALLER_SLOT="$CMUX_SURFACE_ID"
-# herdr:
-CALLER_SLOT="${HERDR_PANE_ID//:/-}"
-```
+Your host's binding line — one of these, not both:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr
+```
+
+**Re-derive it in every later block that uses it, and never carry it forward.** A
+`Bash` call's shell state does not outlive the call — measured 2026-08-12, `export
+CALLER_SLOT_PROBE=…` read back **empty** in the next `Bash` call *and* empty inside a
+`Monitor` command, while `$CMUX_SURFACE_ID` was visible in both because it is a real
+environment variable. So a block below that merely *uses* `${CALLER_SLOT}` is using the
+empty string, and none of the paths it builds will error — they will quietly be wrong.
+The blocks below therefore each carry the binding and a guard. That is not repetition
+to be tidied away; deleting it is the bug.
+
+```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or the herdr line above
+[ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot -- stop here"; exit 1; }
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 echo "ledger: $LEDGER"
 [ -s "$LEDGER" ] && { echo "STOP this session already owns spawned workers:"; cat "$LEDGER"; } \
   || echo "PASS no live ledger for this slot"
 ```
+
+**Read the printed path on both hosts.** `…/spawn-agent/.tsv` — nothing between the
+slash and the `.tsv` — is the empty-slot failure above, and it is the one to catch here
+because every later check builds the same path. On cmux it must carry the surface uuid.
 
 **This is a rail, not a check.** A non-empty ledger means the session in this slot has
 workers it has not finished with, and check 11 deletes the ledger and closes what it
@@ -322,20 +343,86 @@ the whole run.
 ## 3. The name-collision guard — it must ask for `name`, not for the address — *core*
 
 A name collision mis-delivers a task: `peer.py` hands back the wrong socket and the
-watcher reports the wrong worker. The guard is only worth anything if it sees names
-that are in use but unreachable, which on this machine is most of them.
+watcher reports the wrong worker. The guard is only worth anything if it sees a name
+that is **in use but unreachable** — registered under a live pid, with no messaging
+socket. Build that session rather than hunting the machine for one:
 
 ```bash
-VICTIM=$(python3 -c '
-import glob, json, os, sys
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/fixture-profile"
+mkdir -p "$D/sessions"
+printf '{"pid":1,"name":"smoke-victim-probe","cwd":"/","sessionId":"fixture-only"}\n' > "$D/sessions/1.json"
+```
+
+```bash
+P="<plugin root>/skills/spawn-agent/lib/peer.py"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/fixture-profile"
+CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe name; echo "  name    exit=$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe;      echo "  address exit=$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$P" no-such-session-xyz name; echo "  absent  exit=$?"
+```
+
+PASS on exactly:
+
+```
+smoke-victim-probe
+  name    exit=0
+  address exit=1
+  absent  exit=1
+```
+
+Measured in that form on 2026-08-12 against this `peer.py`. **The address form refusing
+a name the name form has just handed back is the whole check** — reversed, `peer.py`
+declares a name that is very much in use to be free, and the collision check in the
+spawn procedure waves a duplicate through.
+
+Two properties of `peer.py` make that fixture hermetic, and both are load-bearing:
+
+- **`find()` reads `CLAUDE_CONFIG_DIR` and falls back to `~/.claude` only when it is
+  unset.** Pointing it at the fixture directory means the real registry is never
+  searched, so `smoke-victim-probe` cannot collide with a real session name or be
+  confused for one by a later run.
+- **`alive()` returns `True` on `PermissionError` from `os.kill(pid, 0)`**, and a
+  non-root user signalling **pid 1** (launchd on macOS) raises exactly that. So pid 1
+  is permanently "alive" with no race against a real process and no cleanup dependency.
+
+**A sentinel pid will not do here, and it fails in the direction you would not guess.**
+`alive()` rejects non-positive pids *before* it signals anything — `pid <= 0` returns
+`False` — so a record carrying `"pid":-1` or `"pid":0` is simply dead to `peer.py`, the
+`name` form exits 1, and the fixture fails its own PASS block on the very first line.
+Measured 2026-08-12 against this `peer.py`: `pid=1` prints the name at exit 0, while
+`pid=-1` and `pid=0` each print nothing at exit 1. That guard exists because a *naive*
+liveness test — `os.kill(rec.get("pid") or -1, 0)` — signals `-1`, which addresses every
+process the user may signal and answers *yes*, classing a record with no usable pid as
+alive; `peer.py` carries a comment about it at `alive()`. The fixture therefore needs a
+pid that the guard accepts and the kernel will answer for, which is why it uses a real
+one.
+
+Cleanup is already covered — the fixture sits under `${TMPDIR:-/tmp}/spawn-agent-smoke/`,
+which check 11 step 4 removes wholesale. There is no extra teardown step.
+
+**Why a fixture and not the live registry.** Until 2026-08-12 this check hunted the
+machine's own sessions for a named-but-socketless one. That shape is a pre-v2.1.224
+artifact, so it ages off a machine as sessions turn over: 6 of 7 live sessions had no
+socket on 2026-08-09, and 0 of 10 three days later. The hunt started coming back empty,
+the check recorded SKIPPED, and on a fully-updated machine that skip was permanent — a
+reassuring SKIPPED reported forever while the guard underneath it went untested. The
+fixture makes this a real PASS/FAIL on every run, on every host, updated or not.
+
+The census that revealed it is still worth running once, for context. Record it in the
+run's notes **beside** check 3's row — never as check 3's own "literal signal", which is
+the four-line PASS block above and nothing else, and never as a gate on whether the
+check runs:
+
+```bash
+python3 -c '
+import glob, json, os
 roots = [d for d in os.environ.get("CLAUDE_CONFIG_DIR", "").split(":") if d] or [os.path.expanduser("~/.claude")]
+live = sock = 0
 for d in roots:
     for p in glob.glob(os.path.join(d, "sessions", "*.json")):
         try:
             r = json.load(open(p))
         except (OSError, ValueError):
-            continue
-        if r.get("messagingSocketPath") or not r.get("name"):
             continue
         pid = r.get("pid")
         if not isinstance(pid, int) or pid <= 0:
@@ -346,47 +433,10 @@ for d in roots:
             pass
         except OSError:
             continue
-        print(r["name"])
-        sys.exit(0)
-')
-echo "VICTIM=[$VICTIM]"
+        live += 1
+        sock += bool(r.get("messagingSocketPath"))
+print("%d live sessions, %d with a socket, %d without" % (live, sock, live - sock))'
 ```
-
-That liveness test is `peer.py`'s own, copied deliberately rather than written fresh.
-The obvious shorthand — `os.kill(r.get("pid") or -1, 0)` — is the bug `peer.py` carries
-a comment about: signal 0 to pid `-1` addresses every process the user may signal and
-answers *yes*, so a record with no usable pid is classed alive and its name is handed
-back as `VICTIM`. `peer.py` then correctly refuses that name, the block below records
-FAIL, and the guard being blamed is the one behaving properly. A fixture picker that
-disagrees with the script under test measures nothing but the disagreement.
-
-```bash
-P="<plugin root>/skills/spawn-agent/lib/peer.py"
-VICTIM="<paste the name printed above>"
-python3 "$P" "$VICTIM" name; echo "  name    exit=$?"
-python3 "$P" "$VICTIM";      echo "  address exit=$?"
-python3 "$P" no-such-session-xyz name; echo "  absent  exit=$?"
-```
-
-PASS when the name form prints the name and exits 0, the address form prints nothing
-and exits 1, and the absent name exits 1. That contrast **is** the check: the address
-form would call a name that is very much in use free. Measured on this machine
-2026-08-09 — 7 live sessions, 6 of them with no messaging socket, so the address form
-declared 6 of 7 names in use to be available.
-
-If `VICTIM` comes back empty, every live session here has a socket. Record the check
-as SKIPPED with that reason and confirm the third line alone (an absent name exits 1);
-do not invent a session to test against.
-
-**Expect that skip to become permanent, and say so when it does.** The
-named-but-unreachable session is a pre-v2.1.224 artifact, so it disappears from a
-machine as its sessions turn over — measured 2026-08-12, twice in one day, `10 live
-sessions, 10 with a socket, 0 without`, where three days earlier the same machine had
-6 of 7 without. Once a machine is fully updated there is nothing left for the
-name-versus-address contrast to bite on, and this check reports SKIPPED forever while
-the guard it covers goes untested. That is a gap to close with a synthetic registry
-fixture, not a result to keep re-recording; note it in the verdict rather than letting
-a permanent SKIPPED read as a temporary one.
 
 ## 4. The prune, in both directions — *core*
 
@@ -435,10 +485,20 @@ this watcher too.
 Create its ledger first, with one row naming nobody:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot"; exit 1; }
 D="${TMPDIR:-/tmp}/spawn-agent-smoke"
 mkdir -p "$D"
 printf 'smoke-warn-nobody\tL1-X\tL2-X\tspawned\n' > "$D/warn-${CALLER_SLOT}.tsv"
+ls "$D"/warn-*.tsv
 ```
+
+That `ls` is the check on the check: the name it prints must contain your slot id. A
+bare `warn-.tsv` means the binding line above was dropped, the file is in the wrong
+place, and the `Monitor` below — which takes the slot written out literally — will be
+armed on a path that does not exist. That produces `WARN ledger unreadable, watching
+nothing:` instead of this check's PASS line, which reads as the exact regression check 5
+exists to catch, on a completely healthy watcher.
 
 Then arm the `Monitor` tool with this `command`, **with `<plugin root>` and
 `<CALLER_SLOT>` written out literally** — `Monitor` runs its own shell, which never saw
@@ -579,6 +639,8 @@ shrank the user's view, which is the herdr version of the same mistake.
 ### 7b. The row is on disk before anything is launched — *core*
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot"; exit 1; }
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 awk -F'\t' '{printf "%d: %d cols:", NR, NF; for (i=1; i<=NF; i++) printf " [%s]", $i; print ""}' "$LEDGER"
 ```
@@ -750,8 +812,41 @@ the reply instruction spelled the way the measurements say it must be:
 ```
 {"to": "uds:/tmp/cc-socks/<pid>.sock",
  "summary": "smoke worker - confirm the round trip",
- "message": "Reply with exactly one line and nothing else: SMOKE-OK <the name you were launched with>. Do not read files, run commands, or investigate anything.\n\nSend that reply to the session that sent you this message, using the `from` address on this message. (That session is named `<your own name>`.)"}
+ "message": "Your only job is to send one reply message. Do not read files, do not run shell commands, do not investigate anything — but you MUST deliver the reply with the SendMessage tool, and loading that tool first if it is deferred in your environment is part of the job, not a violation of it. Printing the text as output does not count as replying.\n\nThe reply body must be exactly one line and nothing else: SMOKE-OK <the name you were launched with>\n\nSend it to the session that sent you this message, using the `from` address on this message. (That session is named `<your own name>`.)"}
 ```
+
+**Two of those placeholders are yours to fill and one is deliberately not.** Substitute
+`<pid>` (from the address `peer.py` printed) and `<your own name>` before sending. Leave
+`<the name you were launched with>` **exactly as written** — it is an instruction to the
+worker, which knows the name it was launched under and resolves it in its own reply, and
+that substitution is what joins a reply to a worker when more than one is running. A
+supervisor who "helpfully" fills it in has replaced the join key with a constant.
+
+Otherwise send that wording rather than a paraphrase, and **in particular do not
+compress the prohibition back into "do not read files, run commands, or investigate
+anything."** `SendMessage` is a tool call, so a literal-minded worker reads a blanket
+"no commands" as "no tools" and satisfies "exactly one line and nothing else" by
+*printing* the line as assistant output. The sentence meant to keep the probe cheap then
+forbids the one action this check exists to measure. Observed 1-in-2 on 2026-08-12: two
+workers received the same message under the old wording — identical but for their own
+names in the body and the summary — and one sent while the other printed.
+
+Each clause of the replacement does one job:
+
+- **the required action leads**, ahead of any prohibition;
+- **the deferred-tool carve-out** is there because `SendMessage` is not always loaded at
+  session start. Where tool schemas are fetched on demand, replying costs *two* calls —
+  the fetch, then the send — and a worker told its "only action" is to reply can read
+  the fetch as forbidden and print instead. The successful worker in the run above made
+  exactly that fetch first;
+- **"printing … does not count as replying"** is the explicit carve-out; without it,
+  "do not run shell commands" keeps reading as "do not use tools";
+- **"the reply *body*"** scopes "one line" to the message rather than to the worker's
+  whole turn, which is what made printing look compliant.
+
+The `from`-address sentence is unchanged and must stay: it is the measured fix for the
+ref wall (told to reply by name, 0 of 3 workers got through first try; told to use
+`from`, 5 of 5 did, and 1 of 1 again under herdr).
 
 Three separate PASS conditions here:
 
@@ -762,6 +857,10 @@ Three separate PASS conditions here:
   the token, not on the whole body — workers inherit the user's global
   `~/.claude/CLAUDE.md`, so a reply may carry whatever preamble that file makes every
   session emit.
+
+  If it does not arrive, record nothing yet. "No reply" has four causes here and only
+  two of them are a FAIL of anything; work the ordered diagnosis at the end of this
+  check rather than guessing between them.
 - **The reply was accepted on the worker's first attempt.** This is the reply-address
   contract, and it is the check with the sharpest measurement behind it — told to reply
   to the supervisor's *name*, 0 of 3 workers got through on the first try; told to use
@@ -799,10 +898,42 @@ paid for it — record it, because that is the regression, not a hiccup.
 So the order matters: wait for idle, *then* read with `recent-unwrapped`. Recording a
 `0` obtained from `visible` is recording nothing.
 
-If the reply never arrives at all, check the watcher's lines before concluding
-anything: `ATTN` means the message is being **held** for approval, which is what a
-permission-class mismatch looks like from here (see check 1d) and not a messaging
-failure.
+### If the reply never arrives — the ordered diagnosis
+
+Four causes, worked in this order because the first costs nothing and the last costs a
+screen read:
+
+1. **The watcher's lines, first.** `ATTN` means the message is being **held** for
+   approval, which is what a permission-class mismatch looks like from here (see check
+   1d) and is not a messaging failure at all. `GONE` means the worker died, which is
+   check 9's result and not this one. Either way you are done here.
+2. **Then the worker's screen**, with the host command above. The single question is
+   whether a `SendMessage` call happened *at all*:
+
+| On the worker's screen | Cause | Record |
+| --- | --- | --- |
+| `SMOKE-OK …` as plain assistant output, **no `SendMessage` call above it** | it printed instead of sending | depends on what you sent — see below |
+| a `SendMessage` call whose result reads `is not an agent in this conversation` | the ref wall; it addressed you by name | FAIL the **third** PASS condition, not the second |
+| a `SendMessage` call showing `⎿ … → uds:/tmp/cc-socks/<pid>.sock` | it really sent; the loss is on your side | FAIL, and re-read check 1d |
+| none of these, and the worker is still working | you looked too early | wait for idle and read again — not a result |
+
+**That `⎿` is terminal rendering, not file content.** The commands above read a screen,
+which is the only place it appears. Go to the session `.jsonl` instead and the same
+evidence is a `tool_use` block named `SendMessage`; the glyph is never in the file, for
+any worker, so grepping it there returns nothing on a perfectly healthy send.
+
+**Row one has two verdicts, and separating them is the point of this whole note.**
+Compare what you actually sent against the block at the top of this check:
+
+- **You paraphrased it, or dropped the carve-out.** The probe's wording failed, not the
+  plugin. Re-run the check with the block as written; the run's verdict for check 8 is
+  the re-run's, and the first attempt goes in the signal column with the wording you
+  used.
+- **You sent the block verbatim and it still printed.** That is a genuine FAIL of the
+  second PASS condition, and the most interesting thing this check can produce. Record
+  FAIL, quote the message, and say so plainly — the wording above is the current
+  mitigation for a model behaviour, not a guarantee, and its failing is precisely what
+  this note exists to surface rather than absorb.
 
 ## 9. `DONE`, from the run's own watcher — *core*
 
@@ -847,6 +978,8 @@ per slot you close, arriving exactly as you report a clean run.
 2. **Close each slot in the ledger**, and only those:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot -- do not close anything"; exit 1; }
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 while IFS=$'\t' read -r name l1 l2 state; do
   [ -n "$l1" ] || continue
@@ -873,25 +1006,47 @@ herdr pane get "<l1>"; echo "exit=$?  (want: pane_not_found, exit=1)"
 4. **Delete the ledger file**, not just its rows, and the scratch fixtures:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot -- the real ledger would survive this"; exit 1; }
 rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 rm -rf "${TMPDIR:-/tmp}/spawn-agent-smoke"
+ls "${TMPDIR:-/tmp}/spawn-agent/" 2>/dev/null; echo "  (your slot's .tsv must be gone)"
 ```
 
    The second line removes only this smoke test's own scratch directory — the throwaway
-   repo, the ledger fixtures and the deaf watcher's ledger. It never touches the real
-   ledger directory, which is the line above it.
+   repo, the ledger fixtures, the deaf watcher's ledger, and check 3's
+   `fixture-profile/`. Confirm that last one specifically: it is a synthetic
+   `CLAUDE_CONFIG_DIR` holding a session record for a session that never existed, and it
+   is the single artifact here that another tool could misread as real. It never touches
+   the real ledger directory, which is the line above it.
 
 5. **No watcher survived**, scoped to your own slot:
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- refusing an unscoped pgrep"; exit 1; }
 pgrep -fl "watch-workers.py.*${CALLER_SLOT}"
 ```
 
    PASS on no output. **Do not run this bare** — `pgrep -fl watch-workers.py` lists
    every watcher on the machine, including live ones belonging to other sessions, and
    an agent following that reported two healthy watchers as orphans, one of them its
-   own supervisor's. If a line does come back it is yours and it is stuck:
-   `pkill -f "watch-workers.py.*${CALLER_SLOT}"`.
+   own supervisor's.
+
+   **The binding and the guard above are what keep "bare" from happening by accident,
+   and this is the one place where the accident is destructive.** `CALLER_SLOT` does not
+   survive from the block that set it, so without them the pattern collapses to
+   `watch-workers.py.*` — the forbidden form, reached silently. Teardown then reports
+   every watcher on the machine as this run's leak, which the verdict rules turn into a
+   FAIL on a clean run; and the remedy below, run the same way, kills every other
+   session's watcher including your own supervisor's. If a line does come back it is
+   yours and it is stuck:
+
+```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- refusing to pkill unscoped"; exit 1; }
+pkill -f "watch-workers.py.*${CALLER_SLOT}"
+```
 
 6. **Topology is back to baseline** — re-run the counter from check 7 and compare with
    the numbers you recorded. Same counts. Anything left over is a leak, and the ledger
