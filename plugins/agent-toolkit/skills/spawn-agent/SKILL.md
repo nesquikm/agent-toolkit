@@ -479,44 +479,67 @@ one line and nothing else" is the clause that makes printing look compliant, bec
 worker reads it as a rule about everything it emits; "the reply body must be exactly
 one line" cannot be satisfied without sending one.
 
-**Tell it to reply to the `from` address, not to your name.** The instruction that
-belongs in a worker's task is "reply to the session that sent you this message, using
-its `from` address"; your name goes in the text as a human-readable label and nothing
-more — something the worker and the user can call the session, never the address it
-sends to.
+**Put the literal `uds:` address in the task text. The `from` address is the fallback,
+not the instruction.** You already require exactly this of yourself — "Address workers
+by `uds:`, never by bare name", above — and the reply direction is the same wall with
+the same cure:
+
+```
+…When you are finished, SendMessage your findings to uds:/tmp/cc-socks/<your pid>.sock.
+That is the session that sent you this message, and the same address is on this message
+as its `from`. It is named `<your own name>` — that is a label, not an address; do not
+send to the name.
+```
+
+**"Use the `from` address on this message" is correct and it is not sufficient.**
+Measured 2026-08-12: **2 of 2 workers given exactly that instruction addressed the
+supervisor by name anyway**, were refused, and recovered via the ref in the refusal —
+each burning a round trip on the one message that carries the results:
+
+```
+'smoke-cmux' is not an agent in this conversation. Re-send with the ref to confirm you mean:
+  smoke-cmux [72dff0] — Claude session, on this machine, active 5m ago
+```
+
+That is byte-for-byte the failure recorded earlier for workers told to reply *by name*
+(3 of 3 refused), reached from the opposite instruction. So the variable that decides it
+is not "name versus `from`". A worker holds several plausible ways to address you —
+the `from` attribute, the name in the prose, a `ListAgents` row — and `SendMessage`'s
+own guidance leans toward names. A literal `uds:` string leaves nothing to choose.
+
+**Earlier runs where `from` alone worked are real, and that is the trap.** 5 of 5, then
+1 of 1 under herdr, then 0 of 2. It succeeds often enough to look settled and fails into
+a silent extra round trip that nothing surfaces unless you grep the worker's screen for
+`is not an agent in this conversation`. Treat a clean run as weak evidence here.
 
 **The ref wall is not one-sided.** It applies to a worker addressing you exactly as it
-applies to you addressing a worker, and it lands on the one message that carries the
-results. Measured: **3 of 3 workers had their first reply refused** when told to reply
-by name, each burning a round trip —
+applies to you addressing a worker. What *is* one-sided is the **recovery**: a worker
+holds the `from=` address on the message it received and can retry, where you on first
+contact hold nothing. That asymmetry is why a refused reply costs a round trip instead
+of costing the results.
 
-```
-'agent-toolkit-14' is not an agent in this conversation. Re-send with the ref to confirm you mean:
-  agent-toolkit-14 [a7dd41] — Claude session, on this machine, active 16m ago
-```
+**A worker cannot look up its own launch name either — do not ask it to.** Measured
+2026-08-12, 2 of 2: workers asked to include "the name you were launched with" in a
+reply both said outright that they had no read on it, both guessed from `ListAgents`,
+and **both guessed a name belonging to a different, concurrent run**. If you want a
+worker's identity in the reply body, write the name you launched it with into the task
+text yourself. Otherwise join on the transport instead — an incoming message carries
+`from-name`, which is authoritative and costs nothing.
 
-What *is* one-sided is the **recovery**. A worker holds something you do not on first
-contact: the `from=` address on the message it received, which works every time and
-costs nothing. That is the asymmetry — not the wall, the way out of it. And it only
-helps if the worker was told to use it: none of the three was. All three recovered via
-the ref in the refusal, and one burned an extra `ListAgents` call fetching a ref the
-error had already printed to it. Told to use the `from` address, 5 of 5 got through on
-the first attempt; measured again 2026-08-12 under herdr, first attempt, no refusal.
-
-Your own name is still the one thing the worker cannot look up about you:
+Your name and your address are both things the worker cannot look up about you, so read
+both from the same record and put both in the task:
 
 ```bash
 ME=$(python3 -c "
 import json,os,sys
 roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [os.path.expanduser('~/.claude')]
-name = ''
 for root in roots:
     try:
-        name = json.load(open(os.path.join(root,'sessions','%s.json' % sys.argv[1]))).get('name','')
-        break
+        r = json.load(open(os.path.join(root,'sessions','%s.json' % sys.argv[1])))
     except (OSError, ValueError):
         continue
-print(name)" "$(ps -o ppid= -p $$ | tr -d ' ')")
+    print(r.get('name',''), 'uds:' + (r.get('messagingSocketPath') or ''))
+    break" "$(ps -o ppid= -p $$ | tr -d ' ')")
 ```
 
 It honours `CLAUDE_CONFIG_DIR` rather than hardcoding `~/.claude` — **every
