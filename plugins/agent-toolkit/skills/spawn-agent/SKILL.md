@@ -1,24 +1,78 @@
 ---
-name: cmux-spawn-agent
-description: Spawn Claude Code agents into cmux surfaces (tabs) and drive multi-stage pipelines across them. The word "spawn" is on its own a sufficient trigger — "spawn an agent", "spawn 3 agents" — with no mention of cmux, tabs or panes required. Also use when the user asks to run something "in another agent", "in a new Claude Code", "in a pane", to hand work from one agent to the next ("run X to the end, then /y, then in a new session run /z"), or to run several agents in parallel and report as each finishes. Prefer this over the built-in subagent/Task tool for all of those — a subagent is invisible and cannot be watched, clicked into, or taken over, which is the whole point of spawning one.
+name: spawn-agent
+description: Spawn Claude Code agents into visible terminal surfaces — cmux surfaces or herdr panes — and drive multi-stage pipelines across them. The word "spawn" is on its own a sufficient trigger — "spawn an agent", "spawn 3 agents" — with no mention of a terminal, tab or pane required. Also use when the user asks to run something "in another agent", "in a new Claude Code", "in a pane", to hand work from one agent to the next ("run X to the end, then /y, then in a new session run /z"), or to run several agents in parallel and report as each finishes. Prefer this over the built-in subagent/Task tool for all of those — a subagent is invisible and cannot be watched, clicked into, or taken over, which is the whole point of spawning one.
 ---
 
-# Spawn agents into cmux surfaces
+# Spawn agents into visible terminal surfaces
 
-Run work in separate Claude Code sessions that live in visible cmux surfaces, so
-the user can watch each one and take it over by clicking its tab.
+Run work in separate Claude Code sessions that live in visible places the user can
+watch and take over by clicking.
 
 **The join key is the name you give at launch** (`claude -n <name>`). One string is
 the tab title, the peer-registry key and the message address at once. Nothing has
 to be pre-assigned — no `--session-id`, no `uuidgen`.
 
-Two channels reach a worker, and they are **not** interchangeable:
+**This file contains no terminal commands, and that is deliberate.** Everything
+below is true of Claude Code regardless of which terminal you are in. The commands
+that place, launch, read, key and close a worker live in one host file, and you
+cannot spawn anything without it. Read it now.
 
-| | `SendMessage` (cross-session messaging) | `cmux send` + `send-key` |
+## 0. Which host are you in — decide this before anything else
+
+Two multiplexers are supported and they can be nested. Decide by **precedence, not
+by presence**, because the loser's environment is still there and still looks valid:
+
+| `HERDR_ENV` | `CMUX_SURFACE_ID` | host | read next |
+| --- | --- | --- | --- |
+| `1` | *(don't care)* | **herdr** | `hosts/herdr.md` |
+| unset | non-empty | **cmux** | `hosts/cmux.md` |
+| unset | empty | **neither** | stop — refuse to spawn |
+
+```bash
+if [ "${HERDR_ENV:-}" = 1 ]; then echo herdr
+elif [ -n "${CMUX_SURFACE_ID:-}" ]; then echo cmux
+else echo "not in a supported terminal (need HERDR_ENV=1 or CMUX_SURFACE_ID); not spawning" >&2; fi
+```
+
+Then read the matching file with `Read`:
+
+```
+${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/herdr.md
+${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux.md
+```
+
+Those paths are already absolute by the time you read this — the token is
+substituted into this text when the skill loads. It is **not** an environment
+variable, so `echo "$CLAUDE_PLUGIN_ROOT"` from a `Bash` call prints nothing.
+
+**The "don't care" in row one is load-bearing, and it is the reason this is a
+precedence table rather than a pair of checks.** herdr is a server/client
+architecture, so every herdr pane inherits the environment of whatever started the
+herdr *server*. Measured 2026-08-12, in a herdr pane whose server had been launched
+from a cmux surface:
+
+```
+HERDR_ENV=1   HERDR_PANE_ID=w9:p2
+CMUX_SURFACE_ID=7EF9AE59-F515-4A2A-BA0A-77DE93F2E39C   ← the herdr TUI's own surface
+```
+
+That id is not stale and not dead. It is a **live, valid** cmux surface — the one
+displaying the herdr window — and **every herdr pane on the machine carries the same
+one**. A worker that trusted it would aim every placement command at the herdr
+window and key its ledger to a file shared by every herdr pane there is, which is
+precisely the collision the per-caller key exists to prevent. Every command would
+return `OK`. Confirmed twice, once by dumping the pane's environment and once from
+inside a spawned worker reporting its own view.
+
+So: check herdr first, and when it answers, do not look at `CMUX_*` again.
+
+## Two channels reach a worker, and they are not interchangeable
+
+| | `SendMessage` (cross-session messaging) | the host's keystroke channel |
 | --- | --- | --- |
 | what it is | a message from a peer session | keystrokes, as if the user typed them |
 | carries | prose only | anything, including slash commands |
-| quoting | none — it is a tool argument | shell-quoted through a terminal |
+| quoting | none — it is a tool argument | shell- or argv-quoted through the host |
 | the worker replies | yes, and the reply interrupts you with the result in it | no |
 | reaches a **blocked** worker | no — it queues until the block clears | yes, and it is the only thing that clears one |
 
@@ -27,25 +81,29 @@ answering a prompt, and whenever the worker must act on the user's own authority
 
 | Need | Source |
 | --- | --- |
-| where you are | `cmux --json identify` → `.caller` (`.focused` is wherever the user drifted) |
-| layout, ttys, titles | `cmux --json --id-format both tree --workspace "$CMUX_WORKSPACE_ID"` |
+| which host you are in | the table in §0 |
+| where you are, and where to put a worker | the host file |
 | a worker's pid, cwd, session id, status, **message address** | `<config-dir>/sessions/<pid>.json`, matched on `name` |
 | finished / blocked / died, **pushed to you** | one `Monitor` running `watch-workers.py` |
 | a stage's actual findings | the worker's own reply message |
 | send a task | `SendMessage` to `uds:<socket>` |
-| answer a prompt | `cmux send-key --surface <ref> enter` |
+| answer a prompt | the host's keystroke command |
 
 ## The peer registry is a directory of JSON files
 
 Every session with messaging writes `<config-dir>/sessions/<pid>.json` and
 rewrites it whenever its status changes. That file is the whole coordination
-substrate — readable from `Bash`, no event bus, no cmux dependency:
+substrate — readable from `Bash`, no event bus, **no dependency on any terminal**:
 
 ```json
 {"pid":30580,"sessionId":"8669cd04-…","cwd":"/Users/ns/workspace/agent-toolkit",
  "messagingSocketPath":"/tmp/cc-socks/30580.sock","name":"exp-alpha",
  "status":"waiting","waitingFor":"input needed"}
 ```
+
+Verified 2026-08-12 that this is genuinely host-independent — the same unmodified
+`peer.py` resolved a worker's address, status, cwd and sessionId for a worker
+running in a herdr pane exactly as it does for one in a cmux surface.
 
 Three properties of it are load-bearing:
 
@@ -73,7 +131,7 @@ session by that name — which is the same answer for "never started", "already
 exited" and "killed":
 
 ```bash
-P="${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/peer.py"
+P="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/peer.py"
 
 python3 "$P" review-api              # uds:/tmp/cc-socks/30580.sock  — the SendMessage `to`
 python3 "$P" review-api status       # idle | busy | waiting | shell | …
@@ -86,7 +144,7 @@ python3 "$P" review-api cwd          # what the worker actually got, not what yo
 runs in a **fresh shell**: a function defined in one call does not exist in the
 next. A skill that defined `peer()` once and then used it ten sections later would
 be quietly asking for the whole definition to be pasted again every single time —
-measured as the single biggest source of friction in a live run of the previous
+measured as the single biggest source of friction in a live run of an earlier
 version of this file. The same applies to anything else you define: assume nothing
 survives between calls except files and exported environment.
 
@@ -111,74 +169,69 @@ Address by `uds:` every time and the question never arises.
 `ListAgents` is still the right tool for *discovering* sessions this run did not
 spawn. It is the wrong tool for talking to ones it did.
 
-## Surfaces by default, one pane to hold them
-
-A **pane** is a split; a **surface** is a tab inside a pane. Every split shrinks
-what the user is already reading, so a whole run adds at most one:
-
-| Asked for | Layout |
-| --- | --- |
-| one agent | a surface in this run's agents pane — split once, then reuse it |
-| several at once | one split, then one surface per agent inside it |
-| "in a pane", "split it off" | a new pane, as asked |
-
-Three verified behaviours decide how you place them:
-
-- **`new-pane` cannot be aimed at a pane.** It does take `--workspace`, `--window`,
-  `--placement` and `--direction`, so "no target flag" is too strong — what it
-  lacks is any *pane or surface* target, which means it splits whatever pane is
-  focused inside the workspace it lands in. It will cheerfully cut an unrelated
-  pane in half while you sit somewhere else. Split with
-  `new-split <dir> --surface "$CMUX_SURFACE_ID"`, which is anchored on the caller,
-  and note it prints `OK surface:N workspace:N` — **no pane ref**, so resolve the
-  pane from the surface afterwards.
-- In the **visible** workspace a new surface becomes its pane's selected tab.
-  `--focus` already defaults to `false`; passing it explicitly documents intent but
-  changes nothing, and it does **not** stop that tab switch either way. So never
-  spawn into the caller's own pane — the worker would cover the session the user is
-  talking to.
-- **`--workspace` defaults to `$CMUX_WORKSPACE_ID`, not to what is focused**
-  (`cmux new-surface --help`); `--pane` documents no default at all. So the risk is
-  not that these track the user's focus — it is that a shell variable which came out
-  blank hands the command an empty value and lets it fall back to its own default,
-  which for `--pane` is unspecified. Pass both explicitly and check they are
-  non-empty before using them.
-
-Never reach for `focus-pane` or `focus-panel` to tidy up afterwards — they steal
-the user's keyboard mid-keystroke. Place the surface correctly instead.
-
 ## Anchor on yourself
 
 **One command per `Bash` call — for this block and every other block in this
-file.** Under `auto` mode the classifier denies a long compound command outright,
-and denials *escalate*: after a few consecutive ones, every later command needs
-confirming too, down to `mkdir -p` and `touch`. Measured 2026-08-09 in a freshly
-spawned worker driving this skill — the setup below was denied as a unit, then
-each piece had to be approved by hand, one at a time, and even
-`mkdir -p … && touch …` was too compound to pass. A fresh worker has no permission
-history to lean on, so this bites hardest exactly where it is least convenient: an
-agent that spawns agents.
+file, and in the host file too.** Under `auto` mode the classifier denies a long
+compound command outright, and denials *escalate*: after a few consecutive ones,
+every later command needs confirming too, down to `mkdir -p` and `touch`. Measured
+2026-08-09 in a freshly spawned worker driving this skill — the setup below was
+denied as a unit, then each piece had to be approved by hand, one at a time, and
+even `mkdir -p … && touch …` was too compound to pass. A fresh worker has no
+permission history to lean on, so this bites hardest exactly where it is least
+convenient: an agent that spawns agents.
 
 The blocks in this file are grouped for **reading**, not for pasting. Split them
-on the way in, and reissue anything that comes back denied (see "A denial is not a
-failure" under Spawn one agent).
+on the way in, and reissue anything that comes back denied.
+
+**A denial is not a failure — reissue the call.** A placement command was denied by
+the auto-mode classifier twice in a row and succeeded on the third *identical*
+attempt (measured 2026-08-09). Your guards cannot tell the two apart: a denied call
+never reaches the shell, so the variable you were capturing is empty exactly as it
+would be for a real failure, and the run gives up on a command that would have
+worked. When a placement or launch call comes back denied, **issue the same `Bash`
+call again**, up to about three times, before believing it.
+
+Note *where* that retry has to happen. The classifier rejects the whole tool call
+before the shell starts, so wrapping the command in a shell `for` loop retries
+nothing — the loop is inside the thing that was refused. Only re-calling the tool
+retries.
+
+### The caller's slot
+
+A **slot** is the visible container a session occupies — a cmux surface, a herdr
+pane. `$CALLER_SLOT` is yours, and the host file's first section is the one line
+that binds it. Whatever a host binds to it must have four properties, because each
+one is load-bearing somewhere below:
+
+1. **Durable** — it outlives any one `claude` process, so quitting and relaunching
+   in the same place reopens the same ledger.
+2. **Unique per caller** — no two live sessions may share it, or their ledgers
+   merge and the cleanup section offers you another run's slots to close. (This is
+   the property inherited `CMUX_*` violates inside herdr, and the whole reason §0
+   is a precedence table.)
+3. **Filename-safe** — it is a path component. A host whose ids contain `:` or `/`
+   binds a sanitised form.
+4. **Non-empty, or you refuse.** Not defaulted — refused. A blank slot id would
+   send every run to one shared ledger.
+
+### The setup block
 
 ```bash
-# Refuse rather than guess. BOTH ids: every placement below passes
-# --surface "$CMUX_SURFACE_ID", and the ledger is keyed by it.
-[ -n "$CMUX_WORKSPACE_ID" ] && [ -n "$CMUX_SURFACE_ID" ] || {
-  echo "not in a cmux terminal (need CMUX_WORKSPACE_ID and CMUX_SURFACE_ID); not spawning" >&2
+# Refuse rather than guess. $CALLER_SLOT comes from the host file you just read.
+[ -n "$CALLER_SLOT" ] || {
+  echo "no caller slot; not spawning" >&2
   exit 1
 }
-WS="$CMUX_WORKSPACE_ID"
 
-# The repo every worker will be launched into. Guard it exactly like the ids above:
-# the cd is the single most-dropped part of the launch line, and an unset REPO must
-# fail loudly here rather than silently landing workers in the caller's cwd.
+# The repo every worker will be launched into. Guard it exactly like the slot
+# above: the working directory is the single most-dropped part of the launch, and
+# an unset REPO must fail loudly here rather than silently landing workers
+# somewhere neither you nor the user chose.
 REPO="<the repo you were asked to work in>"
 [ -d "$REPO/.git" ] || { echo "REPO is not a git checkout: '$REPO'; not spawning" >&2; exit 1; }
 
-LEDGER="${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 mkdir -p "$(dirname "$LEDGER")"
 touch "$LEDGER"   # so the first run's awk/wc don't print "no such file" to stderr
 
@@ -186,34 +239,55 @@ touch "$LEDGER"   # so the first run's awk/wc don't print "no such file" to stde
 awk -F'\t' 'NF && NF!=4 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$LEDGER" \
   || { echo "stale/foreign ledger at $LEDGER -- rm it or move it aside before spawning" >&2; exit 1; }
 
-# Both lookup helpers this file uses. They are scripts, not functions, because a
+# The lookup helper this file uses. It is a script, not a function, because a
 # function does not survive to the next Bash call (see peer.py above).
-# REPEAT THESE TWO LINES at the top of every later call that uses $P or $S --
-# variables die with the shell exactly like functions do.
-P="${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/peer.py"       # worker  -> address/status/cwd
-S="${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/surface.py"    # surface -> uuid/ref/pane/tty
+# REPEAT THIS LINE at the top of every later call that uses $P -- variables die
+# with the shell exactly like functions do.
+P="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/peer.py"
 ```
 
-`$P` and `$S` are used as shorthand throughout the rest of this file, and **they
-are not set for you** — a `Bash` call that uses one without assigning it first
-runs `python3 ""` and fails. Two short lines re-pasted is the whole cost, which is
-why these are worth naming at all; the twelve-line shell function they replaced
-was not. If you would rather not carry them, both paths above are absolute by the
-time you read this and can be written out in full instead.
+`$P` is used as shorthand throughout the rest of this file, and **it is not set for
+you** — a `Bash` call that uses it without assigning it first runs `python3 ""` and
+fails. One short line re-pasted is the whole cost, which is why it is worth naming
+at all; the twelve-line shell function it replaced was not. If you would rather not
+carry it, the path above is absolute by the time you read this and can be written
+out in full instead.
 
-`surface.py <ref|uuid> <field>` resolves both directions — `ref` -> `id`, `id` ->
-`ref` — plus `pane_ref`, `pane_id`, `tty` and `title`, and prints nothing (exit 1)
-once that surface is gone.
+### The ledger
 
-The ledger is keyed by the caller's surface, so it is exactly "the agents this
-run spawned" — the only surfaces you are ever allowed to close. That key is why
-the guard above refuses on an empty `$CMUX_SURFACE_ID` rather than defaulting it:
-a shared `unknown.tsv` would merge two runs' ledgers, and the cleanup section
-would then offer you another run's surfaces to close.
+Four tab-separated columns, and the core only ever interprets two of them:
 
-**That same key is why the format check is not paranoia.** A surface uuid outlives
-any one `claude` process, so quitting and relaunching in the same cmux tab reopens
-the *same* ledger file, rows and all — including rows written by an older, differently
+```
+name <tab> loc1 <tab> loc2 <tab> state
+```
+
+- **column 1 is the name** — the watcher reads exactly this field.
+- **columns 2 and 3 are host locators.** The host file says what they hold and how
+  to resolve them. Nothing in this file interprets them; it only requires that
+  resolving column 2 answers "does this slot still exist" and that both are
+  non-empty before a row is written.
+- **column 4 is the state**, and it is what survives you. Push notifications can be
+  missed — a Monitor times out, a turn's context gets summarized — so flip a row to
+  `reported` only once you have actually told the user that worker's outcome. Then
+  `awk -F'\t' -v c=4 '$c!="reported"' "$LEDGER"` is the answer to "what am I still
+  owed?", and it is answerable at the start of any turn without remembering anything.
+
+  **That `-v c=4` is not a style choice — an awk field reference written as a dollar
+  sign followed by the digit 4 does not survive being read.** A skill invoked with
+  arguments has every bare dollar-plus-digit in its text replaced by one of those
+  arguments, zero-indexed, before you ever see it. Measured 2026-08-12 with a probe
+  skill invoked as `/probe ZULU YANKEE XRAY WHISKEY VICTOR`, where the literal field
+  reference for column 4 was served as `VICTOR` — leaving valid awk, the wrong query,
+  and no error anywhere. A dollar sign followed by a *letter* is untouched, which is
+  why `$c`, `$i` and `$LEDGER` are all safe. This is why you will not see a bare
+  dollar-digit anywhere in this skill, including in prose warning you about it.
+
+The ledger is keyed by the caller's slot, so it is exactly "the agents this run
+spawned" — the only slots you are ever allowed to close.
+
+**That same key is why the format check is not paranoia.** A slot id outlives any
+one `claude` process, so quitting and relaunching in the same place reopens the
+*same* ledger file, rows and all — including rows written by an older, differently
 shaped version of this skill. Five such five-column ledgers were on this machine
 when the check was written. The watcher reads column 1 as a name, so on one of them
 it watches session uuids and matches nothing. It does now say so — one `WARN` line
@@ -239,160 +313,56 @@ named, **6 with no socket** (all on a CLI older than v2.1.224). Checked by addre
 the guard calls 6 of the 7 names in use free — and hands the collision it was built
 to catch straight through. `name` is present for every registered session.
 
-```bash
-# Reuse this run's agents pane. UUIDs are the durable key; refs are per-call.
-# Every distinct pane this run owns, newest first -- not just the last row's. If the
-# newest worker's tab was closed and it was that pane's last surface, the tail row
-# names a dead pane, and splitting again would break "one split per run". First live
-# candidate wins; empty means this run owns no live pane yet.
-PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
-import json,sys
-live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
-print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
-  $(awk -F'\t' 'NF>=3 && $3!=""{a[++n]=$3} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
+Keep the name within `[a-z][a-z0-9_-]{0,31}`. That is herdr's constraint on agent
+names, not Claude Code's, but a name that satisfies it works on every host and can
+be used unchanged as both the herdr agent name and the `claude -n` name — which is
+what keeps one string as the single join key.
 
-if [ -n "$PANE" ]; then          # tab into the pane this run already owns
-  SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
-           | grep -o 'surface:[0-9]*')
-else                             # first agent of the run: one split, anchored on YOU
-  SURF=$(cmux new-split right --workspace "$WS" --surface "$CMUX_SURFACE_ID" --focus false \
-           | grep -o 'surface:[0-9]*')
-fi
-[ -n "$SURF" ] || { echo "no surface came back; not sending anything" >&2; exit 1; }
-```
+Then, **in this order**:
 
-**A denial is not a failure — reissue the call.** `cmux new-split` was denied by
-the auto-mode classifier twice in a row and succeeded on the third *identical*
-attempt (measured 2026-08-09). The guard above cannot tell the two apart: a denied
-call never reaches the shell, so `$SURF` is empty exactly as it would be for a real
-failure, and the run gives up on a command that would have worked. When a placement
-or launch call comes back denied, **issue the same `Bash` call again**, up to about
-three times, before believing it.
-
-Note *where* that retry has to happen. The classifier rejects the whole tool call
-before the shell starts, so wrapping the command in a shell `for` loop retries
-nothing — the loop is inside the thing that was refused. Only re-calling the tool
-retries.
-
-Now write the ledger row, **before the worker is launched**:
+1. **Place the slot** — the host file's placement section. It hands back the two
+   locators the ledger row needs.
+2. **Write the ledger row, before the worker is launched.**
+3. **Arm the watcher** (see "Watch" below), with that row on disk and *before* the
+   task is sent.
+4. **Launch** `claude -n $NAME` in `$REPO` — the host file's launch section.
+5. **Wait for it to become addressable.**
+6. **Send the task** by `SendMessage`.
 
 ```bash
-# name, surface uuid, pane uuid, state
-SU=$(python3 "$S" "$SURF" id)
-PU=$(python3 "$S" "$SURF" pane_id)
-[ -n "$SU" ] && [ -n "$PU" ] || { echo "could not resolve surface $SURF; not launching" >&2; exit 1; }
-printf '%s\t%s\t%s\t%s\n' "$NAME" "$SU" "$PU" spawned >> "$LEDGER"
+# 2. Resolve, guard, then write -- never inline the resolution into the printf.
+L1="<host locator 1>"
+L2="<host locator 2>"
+[ -n "$L1" ] && [ -n "$L2" ] || { echo "could not resolve the new slot; not launching" >&2; exit 1; }
+printf '%s\t%s\t%s\t%s\n' "$NAME" "$L1" "$L2" spawned >> "$LEDGER"
 ```
 
-**Resolve, guard, then write — never inline the resolution into the `printf`.**
-`surface.py` prints nothing and exits 1 when a surface will not resolve, and command
-substitution throws that status away, so the inline form writes the row anyway with
-two empty fields. It is worse than a blank-looking row: tab is IFS whitespace, so the
-cleanup loop's `IFS=$'\t' read -r name su pu state` collapses the adjacent tabs and
-shifts every column left — `su` receives the literal `spawned`, the row then fails
-`surface.py spawned ref`, and it is dropped as "already closed". A real open tab that
-can never be offered for closing. (Reproduced identically in bash; this is POSIX
-field splitting, not a zsh quirk.) A surface you cannot record is a surface you must
-not launch into — hence the `exit 1` rather than a warning.
-
-Only then launch:
-
-```bash
-cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME\n"
-```
-
-**The inner `\"` around `$REPO` is not decoration.** The outer quotes belong to the
-supervisor's shell and are consumed there; what reaches the worker's terminal is the
-expanded text. A repo path with a space arrives as `cd /Users/ns/my repo && …`, and
-in **zsh** — the shell the worker actually gets — two-argument `cd` is not an error
-about arguments at all, it is the *string-substitution* form (`cd old new` rewrites
-`$PWD`). So it fails like this:
-
-```
-$ zsh -c 'cd /path/to/my repo && echo REACHED'
-zsh:cd:1: string not in pwd: /path/to/my
-exit=1
-```
-
-`REACHED` never prints, the `&&` short-circuits, and **`claude` never starts at
-all**. Note what that message does *not* say: nothing in `string not in pwd` points
-at a space in the path, so a supervisor reading it in a worker's tab has to already
-know this to decode it — which is why the failure is worth documenting and not just
-fixing. `[ -d "$REPO/.git" ]` passes such a path happily, nothing else catches it,
-and the only symptom upstream is the readiness loop below burning its full 60
-seconds. Quote *inside* the payload, and with escaped double quotes rather than
-single ones — single quotes break on an apostrophe in the path, which on macOS is
-likelier than a `$`.
-
-**`cd` is not optional, and it is easy to drop** — it sits mid-string inside a
-longer `cmux send` line rather than standing on its own, so it goes missing without
-anything looking wrong. It is also self-concealing: a split off your own surface
-inherits *your* cwd, so if you happen to be in the right repo the omission passes
-silently and only misbehaves when you aren't. A supervisor reading this exact
-warning still dropped it on the very next line it wrote (2026-08-09) and got away
-with it for precisely that reason — so do not treat having read the warning as
-having complied with it. That is now the **third** recorded occurrence of this one
-drop, which is the measurement that matters here: a warning is demonstrably not a
-control. **Verify instead of trusting:**
-
-```bash
-python3 "$P" "$NAME" cwd        # must print $REPO
-```
-
-**And the verification is self-concealing in the same way the bug is.** It has power
-only when `$REPO` differs from the caller's own cwd. On the third occurrence it
-*passed* — the worker really was in `$REPO`, because a new split inherits the
-caller's cwd and the caller was already there. When the two are the same, this check
-cannot fail, so it proves nothing; read the launch string itself, before you send it,
-and confirm the `cd` is in it.
-
-To spawn a worker in a specific permission class — which the "Permission classes"
-section below says you must — put the flag on the same launch line:
-
-```bash
-cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --permission-mode manual\n"
-```
-
-`--permission-mode` takes `acceptEdits`, `auto`, `bypassPermissions`, `manual`,
-`dontAsk` or `plan`. All but `bypassPermissions` are the prompting class.
-
-A new terminal inherits the cwd of the pane it came from, not the workspace's
-directory — split off the caller and you get the caller's cwd; split off something
-else and you get *its* cwd (a probe launched from one repo came up in an unrelated
-scratch directory that way). Never rely on either.
-
-`new-surface` takes `--working-directory "$REPO"` and it works (verified
-2026-08-09: a surface opened that way came up in the named directory). Pass it as
-a second layer where you can — but **it does not retire the `cd`**, because
-`new-split` has no such flag, so the first agent of every run is placed by the one
-command that cannot be told where to land.
+**Resolve, guard, then write.** A host resolver prints nothing and exits non-zero
+when a slot will not resolve, and command substitution throws that status away, so
+the inline form writes the row anyway with two empty fields. It is worse than a
+blank-looking row: tab is IFS whitespace, so the cleanup loop's
+`IFS=$'\t' read -r name l1 l2 state` collapses the adjacent tabs and shifts every
+column left — `l1` receives the literal `spawned`, the row then fails to resolve,
+and it is dropped as "already closed". A real open slot that can never be offered
+for closing. (Reproduced identically in bash; this is POSIX field splitting, not a
+zsh quirk.) A slot you cannot record is a slot you must not launch into — hence the
+`exit 1` rather than a warning.
 
 That row goes down **before** the launch on purpose: cleanup reads nothing else,
-and a surface you failed to record is one you must never touch again. Launch
-first and the window between the two is a live worker no ledger knows about — if
-the turn dies in that window, its tab is orphaned and unattributable forever.
+and a slot you failed to record is one you must never touch again. Launch first and
+the window between the two is a live worker no ledger knows about — if the turn dies
+in that window, its slot is orphaned and unattributable forever.
 
-The ordering does not close the window entirely, and it is not meant to: both paths
-here create the surface *before* they write the row, so there is always an interval
-in which an unrecorded surface is open. What the ordering buys is what is inside it —
-an empty terminal rather than a running agent. Both leak a tab; only one leaks a tab
-that is doing work you can no longer see, address or stop.
+The ordering does not close the window entirely, and it is not meant to: the slot is
+created *before* the row is written, so there is always an interval in which an
+unrecorded slot is open. What the ordering buys is what is inside it — an empty
+terminal rather than a running agent. Both leak a slot; only one leaks a slot that
+is doing work you can no longer see, address or stop.
 
-**Column 1 must be the name and must come first** — the watcher reads exactly
-that field, and column 4 is what survives you. Push notifications can be missed —
-a Monitor times out, a turn's context gets summarized — so flip a row to
-`reported` only once you have actually told the user that worker's outcome. Then
-`awk -F'\t' '$4!="reported"' "$LEDGER"` is the answer to "what am I still owed?",
-and it is answerable at the start of any turn without remembering anything.
-
-**Arm the watcher now** — with that row on disk, and *before* the task is sent.
-It is the `Monitor` in "Watch" below, one per run; that section has the exact
-command. Arming it here rather than once you start wondering how the worker is
+Arming the watcher at step 3 rather than once you start wondering how the worker is
 doing is the difference between a watcher and a post-mortem.
 
-Then **wait for it to become addressable** — that is the readiness signal, and it
-is stricter than "the process started": it means registered *and* holding an inbox
-socket, which is exactly the precondition for the `SendMessage` that follows.
+### Readiness is registration, not "the process started"
 
 ```bash
 n=0
@@ -403,23 +373,30 @@ until python3 "$P" "$NAME" >/dev/null; do
 done
 ```
 
+That is the readiness signal, and it is stricter than "the process started": it
+means registered *and* holding an inbox socket, which is exactly the precondition
+for the `SendMessage` that follows.
+
 **This loop asks for the default address field on purpose — do not "unify" it with
 the collision check above.** Readiness is "registered *and* holding a socket";
 collision is "the name exists at all". Two opposite predicates that happen to share
 one script, and a check written to answer both would be wrong in one of them.
 
-**Bound that loop.** Unbounded, a launch line that never started `claude` — a
-typo, or a `cd` into a directory whose profile lacks it — does not fail, it spins
-until the harness SIGKILLs the whole call (`exit 143`), with the ledger row
-already written and the task never sent. Afterwards that is indistinguishable
-from a worker that sat there and did nothing.
+**Bound that loop.** Unbounded, a launch that never started `claude` does not fail,
+it spins until the harness SIGKILLs the whole call (`exit 143`), with the ledger row
+already written and the task never sent. Afterwards that is indistinguishable from a
+worker that sat there and did nothing.
+
+**Run this loop even when the host told you the worker is ready, and especially
+then.** One host does claim it: herdr's `agent start` returns
+`interactive_ready: true`, exit 0, in about three seconds — and it returns that
+while the worker is parked on a pre-registration gate and has not registered at all
+(measured 2026-08-12, reproduced twice). The registry is the only authority on
+addressability. See `hosts/herdr.md`, which documents the failure and the two
+signals that tell the cases apart.
 
 **On the timeout branch, read the screen before you conclude anything** — it is not
-optional and it is not a last resort:
-
-```bash
-cmux read-screen --workspace "$WS" --surface "$SURF"
-```
+optional and it is not a last resort. The host file has the command.
 
 Every other signal in this file is blind to this state: `peer.py` exits 1, and `ASK`,
 `ATTN` and `GONE` are all polled from a registry file that does not exist yet, so **no
@@ -430,20 +407,24 @@ like from the registry. It confirms the watcher is watching nobody; it cannot sa
 The screen is the only place the reason is written.
 
 **And you cannot infer the reason, because unrelated causes share one signature.** At
-least two produce an identical run — loop spins its whole bound, registry never gains
-a record, not one worker signal from the watcher (and the same lone `WARN` from it):
+least three produce an identical run — loop spins its whole bound, registry never gains
+a record, not one worker signal from the watcher:
 
-- the launch line never ran `claude`, e.g. an unquoted `$REPO` containing a space
-  (above), which dies at `cd` before `claude` is ever reached;
-- the worker started fine and is **parked on a gate** — the folder-trust prompt or the
-  bypass acceptance prompt, both at the end of "Permission classes" below.
+- the launch never ran `claude` at all (a host-specific quoting or argument fault —
+  the host file names its own);
+- the worker started fine and is **parked on a gate** — the folder-trust prompt or
+  the bypass acceptance prompt, both under "Permission classes" below;
+- the worker was launched into the wrong directory and is gated on *that* directory
+  instead of the one you intended.
 
-One is a bug in the string you sent; the other is a dialog waiting for a keystroke,
-and the fix for one does nothing for the other. `cmux read-screen` is what separates
-them, and it separates them instantly — a shell prompt with an error above it versus
-an open dialog. That is what you are looking for when you read the tab.
+The first is a bug in what you sent; the others are dialogs waiting for a keystroke,
+and the fix for one does nothing for the others. Reading the screen separates them
+instantly — a shell prompt with an error above it versus an open dialog, and the
+dialog names the directory it is asking about.
 
-Only now send the task, as a `SendMessage` to the address `python3 "$P" "$NAME"` printed:
+### Send the task
+
+Only now, as a `SendMessage` to the address `python3 "$P" "$NAME"` printed:
 
 ```
 {"to": "uds:/tmp/cc-socks/30580.sock",
@@ -469,8 +450,8 @@ sends to.
 
 **The ref wall is not one-sided.** It applies to a worker addressing you exactly as it
 applies to you addressing a worker, and it lands on the one message that carries the
-results. Measured live: **3 of 3 workers had their first reply refused**, each burning
-a round trip —
+results. Measured: **3 of 3 workers had their first reply refused** when told to reply
+by name, each burning a round trip —
 
 ```
 'agent-toolkit-14' is not an agent in this conversation. Re-send with the ref to confirm you mean:
@@ -480,13 +461,10 @@ a round trip —
 What *is* one-sided is the **recovery**. A worker holds something you do not on first
 contact: the `from=` address on the message it received, which works every time and
 costs nothing. That is the asymmetry — not the wall, the way out of it. And it only
-helps if the worker was told to use it: none of the three did. All three recovered via
+helps if the worker was told to use it: none of the three was. All three recovered via
 the ref in the refusal, and one burned an extra `ListAgents` call fetching a ref the
-error had already printed to it (see "Address workers by `uds:`" above — the refusal
-hands over the ref inline, so reading your own error is always cheaper than listing).
-
-So a worker given only a name does not fail; it pays. Expect a refusal, a retry and a
-round trip on every first report, which is exactly the message you least want delayed.
+error had already printed to it. Told to use the `from` address, 5 of 5 got through on
+the first attempt; measured again 2026-08-12 under herdr, first attempt, no refusal.
 
 Your own name is still the one thing the worker cannot look up about you:
 
@@ -517,66 +495,32 @@ the instruction and this string is only a label.
 
 ## Spawn several at once
 
-One tab per worker in **the same agents pane** — a fan-out is not a reason for a
-second split, and reusing the pane is what keeps a five-agent run the same size
-as a one-agent run:
+One slot per worker, placed by the host file's fan-out rule — which exists because
+the hosts differ on what a fan-out costs the user, and getting it wrong shrinks
+what they are already reading once per worker.
 
-```bash
-# Re-assign everything this block uses: five variables, none of which survived the
-# Bash call that set them. Without these lines the block cannot be run as written.
-WS="$CMUX_WORKSPACE_ID"
-REPO="<the repo you were asked to work in>"
-# Same guard as the single-agent path, and it matters more here: this loop
-# misplaces every worker in the fan-out, not one.
-[ -d "$REPO/.git" ] || { echo "REPO is not a git checkout: '$REPO'; not spawning" >&2; exit 1; }
-LEDGER="${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
-P="${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/peer.py"
-S="${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/surface.py"
+The core obligations do not change, and they are easy to get backwards in a loop
+because the bookkeeping reads like it follows the interesting line:
 
-for NAME in audit-api audit-web audit-jobs; do
-  python3 "$P" "$NAME" name >/dev/null && { echo "name taken: $NAME" >&2; continue; }
-  # Same live-pane scan as above: first candidate that still exists wins.
-  PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
-import json,sys
-live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
-print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
-    $(awk -F'\t' 'NF>=3 && $3!=""{a[++n]=$3} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
-  if [ -n "$PANE" ]; then
-    SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
-             | grep -o 'surface:[0-9]*')
-  else
-    SURF=$(cmux new-split right --workspace "$WS" --surface "$CMUX_SURFACE_ID" --focus false \
-             | grep -o 'surface:[0-9]*')
-  fi
-  [ -n "$SURF" ] || { echo "no surface for $NAME" >&2; continue; }
-  # Row first, then launch -- same order and same guard as the single-agent path.
-  SU=$(python3 "$S" "$SURF" id)
-  PU=$(python3 "$S" "$SURF" pane_id)
-  [ -n "$SU" ] && [ -n "$PU" ] || { echo "could not resolve surface $SURF; not launching $NAME" >&2; continue; }
-  printf '%s\t%s\t%s\t%s\n' "$NAME" "$SU" "$PU" spawned >> "$LEDGER"
-  cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME\n"
-done
-```
+- the **per-name collision check**, once per worker;
+- the **ledger row before the launch**, once per worker — instrumented with the two
+  orders swapped, the gap was real and observable: a launch dispatched while the
+  ledger still held exactly one row naming only the first worker. Every worker after
+  the first spends that window as an unrecorded live agent;
+- **resolve and guard both locators** before writing the row.
 
-**The fan-out obeys the same launch-last rule as the single-agent path**, and it is
-easier to get backwards here because the `printf` reads like bookkeeping that follows
-the interesting line. Instrumented with the two orders swapped, the gap was real and
-observable: a launch dispatched to `surface:145` while the ledger still held exactly
-one row, naming only `alpha`. Every worker after the first spends that window as an
-unrecorded live agent.
-
-Then send each one its task with its own `SendMessage`, once `python3 "$P" "$NAME"` answers.
+Then send each one its task with its own `SendMessage`, once `python3 "$P" "$NAME"`
+answers for it.
 
 **Do not collect the names in a space-joined string** — `for n in $NAMES` iterates
 once in zsh, not once per worker, and you will drive one agent while believing you
 drove four. The ledger is the list: re-read it with
-`while IFS=$'\t' read -r name su pu state`.
+`while IFS=$'\t' read -r name l1 l2 state`.
 
-A new surface also lands **after the selected tab**, not at the end, so never
-infer which worker is which from tab order. The tab title is the name
-(`⠂ audit-api`), which is the only thing that distinguishes four identical
-terminals — so name them for the tab bar, because that is how the user reads a
-fan-out.
+Never infer which worker is which from tab or pane order; the hosts order new slots
+differently and one of them does not append. The name is the title, which is the
+only thing that distinguishes four identical terminals — so name them for the tab
+bar, because that is how the user reads a fan-out.
 
 Don't wait on a fan-out one worker at a time. Each worker's own reply lands as it
 finishes, so a slow agent never blocks reporting a fast one.
@@ -602,8 +546,8 @@ dead cannot send it.** Which is what the watcher is for.
 ### The watcher — one Monitor, five worker signals
 
 ```bash
-python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/cmux-spawn-agent/watch-workers.py" \
-    "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"
+python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/watch-workers.py" \
+    "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 ```
 
 Arm **one** of these right after the first spawn — always, including for a run of
@@ -627,14 +571,19 @@ filtered out as unknown. You get a watcher that runs happily and reports nothing
 about any worker — for the first 30 s, indistinguishable from a run where nothing
 has finished yet. Then it says so: `WARN ledger unreadable, watching nothing:`
 with nothing after the colon, which is the empty path telling you exactly this.
-Treat an empty path in that line as the diagnosis, not as a puzzle. `TMPDIR` and
-`CMUX_SURFACE_ID` *are* in that shell's environment, which is why the expanded
-form is safe where the variable is not.
+Treat an empty path in that line as the diagnosis, not as a puzzle.
 
-**Write `${TMPDIR:-/tmp}/cmux-spawn-agent/…` here and in the `LEDGER=` assignment
+**`$CALLER_SLOT` is the one exception, and it must be exported for this to hold.**
+`TMPDIR` is already in that shell's environment; `CALLER_SLOT` is a name this skill
+invents, so unless the host file's binding line exported it, the `Monitor` shell has
+never heard of it and you are back to the empty-path failure. Either `export
+CALLER_SLOT=…` when you bind it, or write the expanded value into the `Monitor`
+command literally. The host file's binding line exports it.
+
+**Write `${TMPDIR:-/tmp}/spawn-agent/…` here and in the `LEDGER=` assignment
 character for character, and do not tidy either one.** `TMPDIR` on macOS ends in a
 slash, so both render a doubled one — measured here as
-`/var/folders/…/T//cmux-spawn-agent/…`. It is pure cosmetics: the doubled and single
+`/var/folders/…/T//spawn-agent/…`. It is pure cosmetics: the doubled and single
 forms are `os.path.samefile`, so nothing is broken and there is nothing to fix. The
 trap is the fixing. These two paths agree only because they are the *same*
 expression, so the tempting cleanups both break the pairing — and the worst is
@@ -643,11 +592,6 @@ substituting the literal `/tmp` you can see in the default, because on macOS
 directory while the spawn side writes rows somewhere else: one `WARN` at 30 s, and
 every signal in the run lost. If the doubled slash bothers you when you paste it,
 leave it bothering you.
-
-That `${CLAUDE_PLUGIN_ROOT}` path is substituted when this skill loads, so by the
-time you read it it is already an absolute path to this plugin's own copy — run it
-as written rather than searching for the file. It is **not** an environment
-variable at that point: `echo "$CLAUDE_PLUGIN_ROOT"` from a shell prints nothing.
 
 Each output line becomes a chat notification that re-invokes you. **Five of them
 are worker signals** — one named worker, one state change:
@@ -672,11 +616,10 @@ are worker signals** — one named worker, one state change:
   (measured 2026-08-09). So a quiet run is not evidence the watcher is deaf.
   **And there is no reliable one-liner for provoking one.** Writing is not enough:
   three deliberate probes under `defaultMode: auto` with an empty
-  `permissions.allow` raised no prompt at all — the `Write` tool into a
-  freshly-trusted repo, `Write` into a shared scratch root, and `touch` followed by
-  `rm -f` through `Bash` with the worker forbidden to route around a prompt. The
-  auto classifier simply passes those. To *see* a worker parked for a human, use
-  the two pre-registration gates below or a `manual`-mode worker, not a write.
+  `permissions.allow` raised no prompt at all. To *see* a worker parked for a
+  human, use a `manual`-mode worker and give it a command outside its allow list
+  (`ls /usr/share/dict` did it on 2026-08-12), or use the pre-registration gates
+  below.
 - `CLEAR <name>` — it stopped being blocked **without a turn running**, so there
   is nothing to collect. This exists to keep `DONE` honest. A terminal UI overlay
   opened over an already-idle worker produces a real `ATTN` and then a return to
@@ -697,12 +640,14 @@ same run produced. So five are defined and four have been caught in the wild —
 needs a worker to stop being blocked without taking a turn.
 
 **`GONE` is the signal an event bus cannot give you.** A worker that dies outright
-— `SIGKILL`, a host crash, a surface torn down under it — never runs a hook, so
+— `SIGKILL`, a host crash, a slot torn down under it — never runs a hook, so
 nothing is ever published about it. Measured 2026-08-07: a worker `SIGKILL`ed
 while parked on an `AskUserQuestion` produced no bus event whatsoever, and the run
 looked exactly like a worker still sitting on its question. Polling the registry
 for pid liveness is what closes that hole, and it is why this watcher is built on
-process state rather than on events.
+process state rather than on events. It is also why the watcher is not retired by a
+host that publishes its own lifecycle states — see the note at the end of this
+section.
 
 **A sixth line exists, and it is not a worker signal.** That distinction is the
 whole of how to read it: `WARN` names no worker and says nothing about any
@@ -716,10 +661,9 @@ worker's state. It is the watcher reporting on *itself*.
   30 s in — late on purpose, because the ledger row is written *before* its
   worker is launched, so "no match yet" is the normal state while a `claude`
   boots. Check two things when it lands: that the ledger path expanded (a
-  `$LEDGER` that came out empty is the usual cause — see the paragraph on
-  spelling the path out above), and that the rows are the current four-column
-  format, since an older, differently shaped ledger puts a session uuid in
-  column 1 where the watcher reads a name.
+  `$CALLER_SLOT` that came out empty in the `Monitor`'s own shell is the usual
+  cause), and that the rows are the current four-column format, since an older,
+  differently shaped ledger puts something that is not a name in column 1.
 
 It is emitted **at most once per run** and never at all once anything has
 matched, so silence after the first half-minute is the positive signal that the
@@ -743,14 +687,14 @@ output file ever written — and a dead watcher is indistinguishable from a heal
 one that has nothing to report yet:
 
 ```bash
-pgrep -f "watch-workers.py.*${CMUX_SURFACE_ID}" >/dev/null \
+pgrep -f "watch-workers.py.*${CALLER_SLOT}" >/dev/null \
   || echo "watcher is not running -- re-arm it before sending the task"
 ```
 
-**Keep the surface id in that pattern — a bare `pgrep -f watch-workers.py` answers
+**Keep the slot id in that pattern — a bare `pgrep -f watch-workers.py` answers
 one too many.** Measured 2026-08-09: a bare `pgrep -f watch-workers.py | wc -l`
-answered `2` for a session that had exactly one watcher, and the author of this
-paragraph read that as proof a second agent had armed its own. It had not.
+answered `2` for a session that had exactly one watcher, and the author of that
+check read it as proof a second agent had armed its own. It had not.
 
 The extra process is **not** the shell running the check — that was tested three ways,
 and a unique token planted in the checking shell's own argv was never matched by
@@ -760,32 +704,44 @@ line contains the whole `python3 -u …watch-workers.py …` string as well. One
 two matching processes.
 
 That is also the scoped form's blind spot, and worth knowing before you lean on it.
-The host shell's argv holds the **unexpanded** `${CMUX_SURFACE_ID}` — the expansion
-happens inside it — so the scoped pattern can never match that shell. It answers
-yes-or-no about your python watcher and says nothing at all about an orphaned host
-shell.
+The host shell's argv holds the **unexpanded** variable — the expansion happens inside
+it — so the scoped pattern can never match that shell. It answers yes-or-no about your
+python watcher and says nothing at all about an orphaned host shell.
+
+### A host that publishes its own agent states does not replace this
+
+herdr classifies the agent in each pane as `idle` / `working` / `blocked` / `done` /
+`unknown`, and offers a **blocking wait** on those states — which is genuinely
+better than polling for the blocked case, and `hosts/herdr.md` tells you to use it.
+It does not retire the watcher, for three reasons:
+
+- **It cannot report a death.** A killed worker leaves a pane herdr classifies as
+  `unknown`, which its own documentation says "does not prove completion" — and
+  does not prove death either. `GONE` comes from the pid check and nothing else.
+- **It is a screen classifier, not the session's own state.** The registry is
+  written by the session about itself.
+- **It covers only what the host hosts.** The registry covers every profile and
+  every worker, including ones spawned by a stage running somewhere else.
+
+Where both are available, use the host's wait to *block* on a specific worker and
+the watcher to be *pushed* about all of them. They agreed exactly on 2026-08-12:
+herdr `blocked` ↔ registry `waiting` / `permission prompt`, on the same worker at
+the same moment.
 
 ## Answer a blocked worker
 
 `ASK` and `ATTN` both mean *a human is being waited on, and the run is stopped
-until one shows up*. Neither line says what was asked. Read the screen, then
-answer with keys:
+until one shows up*. Neither line says what was asked. **Read the screen first**,
+then answer with keys — both commands are in the host file.
 
-```bash
-cmux read-screen --workspace "$WS" --surface "$(python3 "$S" "$su" ref)"
-cmux send-key --workspace "$WS" --surface "$(python3 "$S" "$su" ref)" down    # only if the row you want is not already selected
-cmux send-key --workspace "$WS" --surface "$(python3 "$S" "$su" ref)" enter   # choose it
-```
-
-**Those two keys are not a recipe — the `down` is conditional on what the screen
-showed.** Which keys are right depends entirely on which row is already
-highlighted (`❯`), and dialogs in this product routinely open with the safe or
-affirmative option pre-selected, so a reflexive `down` moves *away* from it. Count
-the highlighted row in the `read-screen` output and send only the keys that get
-you from there to the row you want; on a dialog that opens where you already want
-to be, that is `enter` alone. This is why the screen read is the first line of the
-block and not an optional diagnostic — see the pre-registration gates below, where
-the wrong extra `down` selects "No, exit" and kills the worker outright.
+**Reading first is not a diagnostic nicety, it is the whole procedure.** Which keys
+are right depends entirely on which row is already highlighted (`❯`), and dialogs in
+this product routinely open with the safe or affirmative option pre-selected, so a
+reflexive `down` moves *away* from it. Count the highlighted row in the screen output
+and send only the keys that get you from there to the row you want; on a dialog that
+opens where you already want to be, that is `enter` alone. The pre-registration gates
+below are where this costs the most: the wrong extra `down` selects "No, exit" and
+kills the worker outright.
 
 **`SendMessage` cannot clear a block, and it does not fail loudly when you try.**
 Measured 2026-08-09: a message sent to a worker parked on an `AskUserQuestion`
@@ -795,13 +751,13 @@ key — at which point it arrived appended to the tool result. So `success` mean
 *handed to the session*, never *read by Claude*. A supervisor that answers `ASK`
 with a message will sit forever watching a worker that has already been told.
 
-Send `send-key` calls **one per `Bash` call**, not bundled into a script. Observed
+Send keystroke calls **one per `Bash` call**, not bundled into a script. Observed
 repeatedly on 2026-08-09: the auto-mode classifier denies the compound form and
 sometimes the single form too. The single form succeeds on retry; a denied
 keystroke leaves the worker blocked and looks exactly like a worker that ignored
 you.
 
-**A worker's input box may show text nobody typed.** `read-screen` renders
+**A worker's input box may show text nobody typed.** A screen read renders
 suggested-follow-up ghost text in the prompt exactly like real input, and a queued
 peer message sits there too. Neither is pending user input, and pressing `enter`
 on either submits it. Judge from the dialog, not from the prompt line.
@@ -810,26 +766,22 @@ on either submits it. Judge from the dialog, not from the prompt line.
 
 Same session, next task — context carries over, so use this when the next stage
 needs what the previous one found. Prose goes by message; **a slash command must
-go by keys**:
-
-```bash
-cmux send --workspace "$WS" --surface "$SURF" "/spec-write <what to write up>"
-cmux send-key --workspace "$WS" --surface "$SURF" enter
-```
+go by keys**, using the host file's keystroke channel.
 
 **Slash commands do not execute over cross-session messaging.** Verified
 2026-08-09 by sending `/context` to a worker: it arrived as literal text inside
 the message wrapper, no expansion, nothing run. Expansion happens in the CLI on
-input the user types; a message is injected past that path. The nuance that makes
-this a trap rather than a clean failure: a worker that reads "run /foo" may still
-*choose* to invoke `foo` through its `Skill` tool, so a plugin skill can appear to
-work by persuasion while a built-in like `/context` or `/compact` can never run at
-all. Do not let one lucky stage convince you the channel expands commands.
+input the user types; a message is injected past that path. Verified from the other
+side on 2026-08-12: the same `/context` delivered through a host's keystroke channel
+rendered the real context breakdown. The nuance that makes this a trap rather than a
+clean failure: a worker that reads "run /foo" may still *choose* to invoke `foo`
+through its `Skill` tool, so a plugin skill can appear to work by persuasion while a
+built-in like `/context` or `/compact` can never run at all. Do not let one lucky
+stage convince you the channel expands commands.
 
-Fresh session for a stage that should start clean: another surface in the same
-agents pane, exactly as above — a new stage is never a reason for a new split. It
-shares no context, so **pass the handoff explicitly** — name the file the previous
-stage wrote, rather than referring to "the findings."
+Fresh session for a stage that should start clean: another slot, placed exactly as
+the first one was. It shares no context, so **pass the handoff explicitly** — name
+the file the previous stage wrote, rather than referring to "the findings."
 
 ## Permission classes decide whether messaging works at all
 
@@ -864,7 +816,8 @@ it entirely:
 - **Spawn workers in your own permission class.** If you prompt, they prompt.
   Then every message flows automatically, which is the whole design.
 - If the user insists on a bypass worker, **drive it with keys, not messages** —
-  `cmux send` is unaffected by any of this — and keep the watcher for its state.
+  the keystroke channel is unaffected by any of this — and keep the watcher for its
+  state.
 - The product's own held-message dialog names the escape hatch,
   `crossSessionInbound: "accept"`, settable per worker via
   `--settings '{"crossSessionInbound":"accept"}'`. **Untested here** — the launch
@@ -872,22 +825,28 @@ it entirely:
   half, since the reply direction is governed by the *supervisor's* setting, which
   is the user's to change and not yours.
 
+To spawn a worker in a specific permission class, put the flag on the launch line
+the host file shows. `--permission-mode` takes `acceptEdits`, `auto`,
+`bypassPermissions`, `manual`, `dontAsk` or `plan`. All but `bypassPermissions` are
+the prompting class.
+
 Note also that **the registry does not record a session's permission mode**, so
 you cannot tell a bypass worker from its JSON. What you can read is the
 `from-mode` attribute on a message that arrives from it.
 
-**Two gates can hold a worker before it ever registers, and no signal in this file
-can see either one.** With the session not yet started there is no registry entry and
-no socket, so `peer.py` exits 1, the watcher polls a file that does not exist, and the
-readiness loop above simply times out. `cmux read-screen` is the only thing that says
-which gate it is — which is why reading the screen on that timeout is mandatory and
-not a last resort.
+### Two gates can hold a worker before it ever registers
+
+No signal in this file can see either one. With the session not yet started there is
+no registry entry and no socket, so `peer.py` exits 1, the watcher polls a file that
+does not exist, and the readiness loop simply times out. **Reading the screen is the
+only thing that says which gate it is** — which is why reading it on that timeout is
+mandatory and not a last resort.
 
 The first is the **bypass acceptance gate**: `--dangerously-skip-permissions` opens a
 "Yes, I accept" confirmation before the session starts.
 
 The second is the **folder-trust gate**, and it is the one that surprises, because
-nothing about the launch line hints at it:
+nothing about the launch hints at it:
 
 ```
  Quick safety check: Is this a project you created or one you trust?
@@ -907,39 +866,39 @@ permissions in .claude/settings.json` line appears **only** when the target has 
    2. No, continue without these permissions
 ```
 
-Both are real; the plain one is what a checkout without a settings file renders, and it
-is what was measured on this machine. Option 2 is "continue with fewer permissions" in
-one and **"exit"** in the other, so the same keystroke either degrades the worker or
-destroys it.
+Both are real; the plain one is what a checkout without a settings file renders, and
+it is what was measured on this machine, twice, most recently 2026-08-12. Option 2 is
+"continue with fewer permissions" in one and **"exit"** in the other, so the same
+keystroke either degrades the worker or destroys it.
 
 It fires for any `$REPO` that profile has not opened before. **Being a valid git
 checkout does not exempt it, and it happens under default permissions** — measured on
 a clean checkout with no flags at all: the worker parked here, never registered, the
 readiness loop exhausted every one of its 60 iterations, and across the whole 63 s not
-one *worker* signal fired — no `ASK`, no `ATTN`, no `GONE`. Not blanket silence,
-though: the ledger row matches nothing the whole time, so the watcher raises its single
-`WARN` about 30 s in, which reports its own blindness and says nothing about the gate.
-Both of this skill's "a human is needed" signals are blind to it by construction, since
-both are polled from a registry the worker has not written to yet.
+one *worker* signal fired.
 
-Clear either gate with keys — the tab is reachable when the session is not. **Both
-gates open with option 1 already selected, so both are answered by `enter` alone:**
+Three ways out, and the third is the one worth knowing:
 
-```bash
-cmux read-screen --workspace "$WS" --surface "$SURF"          # confirm which row is ❯
-cmux send-key --workspace "$WS" --surface "$SURF" enter        # option 1, already selected
-```
+- **`enter` alone** answers option 1 on both gates, which are pre-selected there.
+  Read the screen and count the `❯` row first anyway.
+- **Do not replay a `down`-then-`enter` sequence here.** On the trust gate that extra
+  `down` moves the selection to option 2, which in the plain variant is **"No, exit"**
+  — so the keystroke meant to rescue a parked worker terminates it instead, leaving a
+  ledger row on disk and a slot holding a dead shell. A recoverable gate becomes an
+  unrecoverable one. Caught in a live run on 2026-08-09.
+- **`esc` cancels the gate and exits `claude` cleanly, without trusting anything.**
+  Measured 2026-08-12. That is the right answer when the directory named in the dialog
+  is *not* the one you meant to launch into — pressing `enter` there would grant read,
+  edit and execute in a folder the user never approved, and the dialog names the
+  directory precisely so you can check.
 
-**Do not replay the `down`-then-`enter` sequence from "Answer a blocked worker"
-here.** On the trust gate that extra `down` moves the selection to option 2, which in
-the plain variant above is **"No, exit"** — so the keystroke meant to rescue a parked
-worker terminates it instead, leaving a ledger row on disk and a tab holding a dead
-shell. A recoverable gate becomes an unrecoverable one. Caught in a live run on
-2026-08-09, by reading the screen first and pressing `enter` alone.
-
-Read the screen and count the `❯` row every time rather than trusting either
-sequence. A gate is exactly the case where the safe answer is pre-selected, which is
-what makes a blind `down` cost the most here and nothing anywhere else.
+**Never let a keystroke channel answer a gate by accident.** On a host whose launch
+command reports success while the worker is still gated, a task sent as keystrokes
+lands *on the dialog*: measured 2026-08-12, the prompt's trailing Enter selected
+"Yes, I trust this folder", the task text was swallowed, and the worker sat idle with
+no transcript file at all — zero turns. Three failures in one call, and the call
+returned success. This is exactly what the registry-based readiness loop prevents, and
+why it is not optional on any host.
 
 ## Read a worker's output
 
@@ -958,7 +917,9 @@ are `{"type": "assistant", "message": {...}}` in the Anthropic message shape.
 
 **The file does not exist until the session takes its first turn**, and a worker
 that has already exited has no registry file to resolve it from — so if a stage
-may need forensics, read the `sessionId` while it is still alive.
+may need forensics, read the `sessionId` while it is still alive. Its absence is
+also positive evidence in its own right: a registered worker with no transcript has
+taken no turn, which is how the swallowed-task failure above was proved.
 
 ## Several config profiles — check before spawning
 
@@ -984,104 +945,87 @@ profile (`claude plugin list`, or `enabledPlugins` in that profile's
 
 ## Offer to close what the run opened
 
-When the last stage is reported, the ledger rows are spent surfaces. Resolve each
+When the last stage is reported, the ledger rows are spent slots. Resolve each
 one, then **offer** — cleanup is a proposal, never a side effect of finishing:
 
 ```bash
-while IFS=$'\t' read -r name su pu state; do
-  ref=$(python3 "$S" "$su" ref)
-  [ -n "$ref" ] || continue               # the user already closed it; drop the row
+while IFS=$'\t' read -r name l1 l2 state; do
+  # resolving l1 is the host file's job; empty means the user already closed it
   reg=$(python3 "$P" "$name" status)      # empty = no live session by that name
   sid=$(python3 "$P" "$name" sessionId)   # capture NOW; unreadable once it exits
-  echo "$ref  $name  ledger=$state  registry=${reg:-gone}  resume=${sid:-none}"
+  echo "$name  ledger=$state  registry=${reg:-gone}  resume=${sid:-none}"
 done < "$LEDGER"
 ```
 
 Show that list with what each worker did, and close only the ones the user
-confirms:
+confirms, with the host file's close command.
 
-```bash
-cmux close-surface --workspace "$WS" --surface "$ref"
-```
-
-- The pane disappears on its own when its last surface closes. There is no
-  `close-pane`, and nothing is left to tidy once the tabs are gone.
-- **The `OK surface:N` it prints back is not the surface you closed.** The number is
-  an allocation counter that has nothing to do with any live surface: measured across
-  three closes it climbed 147, 148, 149, while the survivors — re-resolved from their
-  UUIDs — stayed exactly where they were at `surface:145` and `surface:146`. Refs are
-  *not* re-enumerated by a close. Nothing went wrong and no other tab was touched, but
-  read literally the echo looks like you just closed a stranger's tab. Confirm by
-  resolving the UUID (`python3 "$S" "$su" ref` returns empty once it is gone), never
-  by reading that ref.
-- Closing a tab with siblings left re-selects the previously visible one and
-  moves no focus. Closing the **last** one collapses the pane, and focus lands on
-  the pane it was split off from — yours. Harmless, but say so when you offer, in
-  case the user is reading a third pane at the time.
-- The scrollback dies with the surface; the session does not.
-  `claude --resume <sessionId>` brings it back — that id is the second field the
-  loop above prints, and it is unreadable once the process is gone, so capture it
-  before you close anything.
+- The scrollback dies with the slot; the session does not.
+  `claude --resume <sessionId>` brings it back — that id is unreadable once the
+  process is gone, so capture it before you close anything.
 - `busy` or `waiting` means not done. A `waiting` worker is stopped on a prompt and
   will sit there forever — closing it discards whatever it was about to do. Leave
   those open, and say which ones you left and why.
 - `registry=gone` on a row you never reported is a worker that died mid-stage.
   Lead with those.
+- **Confirm every close by re-resolving the locator, never by reading what the close
+  command echoed back.** One host prints an allocation counter that has nothing to do
+  with the slot you just closed; the host file says which.
 - Prune closed rows from the ledger so the next offer is not a list of ghosts. Match
-  on the surface uuid, and rewrite through a temp file — `sed -i` is the improvised
+  on locator 1, and rewrite through a temp file — `sed -i` is the improvised
   answer here and it is not portable to the BSD `sed` on this machine:
-  `[ -n "$su" ] && { grep -v -F "$su" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }`
+  `[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }`
   **Both halves of that line are load-bearing, and they fail in opposite directions —
   learn only one and you will write the other bug.**
   - **Join the `grep` and the `mv` with `;`, never with `&&`.** `grep` exits 1 when it
     selects no lines, so the `&&` form skips the `mv` exactly when the result is empty
     — the last row of any ledger, which on a single-worker run is the only prune the
     run ever does. The ghost row survives and a stray `.tmp` is left beside it.
-  - **Guard `$su` first.** That is not defensive padding; it is what stops the same
+  - **Guard `$l1` first.** That is not defensive padding; it is what stops the same
     one-liner shredding the ledger. `grep -v -F ""` selects *nothing*, and with the
-    `mv` now unconditional that nothing is installed over the whole file. Empty `$su`
-    is reachable by following this file rather than by ignoring it: `$su` comes from
-    the loop above, the prune reads as a standalone command, and variables do not
-    survive to the next `Bash` call — so a supervisor that prunes in a fresh call has
-    `su` unset and destroys the record of every surface the run owns. Measured both
-    ways: unguarded, a three-row ledger goes to **0 rows and 0 bytes while exiting
-    0** — the destruction reports success, so nothing upstream can notice it, and the
-    `&&` form's exit 1 was the only tripwire there ever was; guarded, it is untouched.
+    `mv` now unconditional that nothing is installed over the whole file. Empty `$l1`
+    is reachable by following this file rather than by ignoring it: it comes from the
+    loop above, the prune reads as a standalone command, and variables do not survive
+    to the next `Bash` call — so a supervisor that prunes in a fresh call has it unset
+    and destroys the record of every slot the run owns. Measured both ways: unguarded,
+    a three-row ledger goes to **0 rows and 0 bytes while exiting 0** — the destruction
+    reports success, so nothing upstream can notice it, and the `&&` form's exit 1 was
+    the only tripwire there ever was; guarded, it is untouched.
 
   That asymmetry is the whole point. The `&&` bug leaves one ghost row and the next
-  cleanup offers a tab that is already closed. The unguarded bug erases which surfaces
-  the run owns at all, and "only ever propose surfaces from this run's ledger" then
-  makes every one of those tabs unofferable forever. One is noise; the other is the
+  cleanup offers a slot that is already closed. The unguarded bug erases which slots
+  the run owns at all, and "only ever propose slots from this run's ledger" then
+  makes every one of those slots unofferable forever. One is noise; the other is the
   exact failure the ledger exists to prevent.
 - A dead worker leaves its `<pid>.json` behind. It is not yours to delete, and
   `peer` and the watcher both ignore it on the pid check.
 
-Only ever propose surfaces from this run's ledger. A tab you did not spawn is the
+Only ever propose slots from this run's ledger. A tab you did not spawn is the
 user's, however idle it looks — leave it alone even when it is obviously a dead
 agent from an earlier session.
 
 ### Finish the run — four steps, in this order
 
-Closing the surfaces is not the end. The watcher is a *process*, and a `Monitor`
+Closing the slots is not the end. The watcher is a *process*, and a `Monitor`
 armed with `persistent: true` runs until `TaskStop` or the end of the session that
 armed it — and **if you are yourself a spawned agent, your session ending does not
-reap it.** Observed: an agent finished, its surface was closed, and its watcher was
+reap it.** Observed: an agent finished, its slot was closed, and its watcher was
 still polling.
 
 **Stop it first, before you close anything.** Once every worker has been reported the
-watcher has nothing left to tell you, while each surface you close under a live one is
+watcher has nothing left to tell you, while each slot you close under a live one is
 a worker dying on purpose — which it correctly reports as `GONE`. Measured: three
 closes with watcher and ledger both still live produced exactly three `GONE` lines,
 all naming workers already reported and deliberately closed. Nothing is wrong when
-that happens; it is one "a worker died" notification per tab, arriving exactly as you
+that happens; it is one "a worker died" notification per slot, arriving exactly as you
 tell the user the run finished cleanly. Close first if you prefer — but then expect
-one `GONE` per surface and read it as benign rather than chasing it.
+one `GONE` per slot and read it as benign rather than chasing it.
 
 1. **`TaskStop` the monitor** by the task id you were given when you armed it.
-2. **Close each surface** you spawned, as above — resolving by UUID, never by the
-   `OK surface:N` echo.
+2. **Close each slot** you spawned, as above — resolving by locator, never by the
+   close command's echo.
 3. **Delete the ledger file**, not just its rows:
-   `rm -f "${TMPDIR:-/tmp}/cmux-spawn-agent/${CMUX_SURFACE_ID}.tsv"`. This is the
+   `rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"`. This is the
    belt-and-braces step, and what it buys is *bounded noise*, not silence. A watcher
    that somehow survives the `TaskStop` finds no ledger, so it matches no name — and
    every worker it had seen alive is then two missed polls from `GONE`. Reproduced by
@@ -1089,10 +1033,10 @@ one `GONE` per surface and read it as benign rather than chasing it.
    run, all at once, and after that it has nothing left to say ever again. Expect that
    burst if step 1 did not take. It names workers you have already reported, it is as
    long as the run was wide, and it does not repeat.
-4. **Confirm nothing of yours is left**, scoped to your own surface:
+4. **Confirm nothing of yours is left**, scoped to your own slot:
 
 ```bash
-pgrep -fl "watch-workers.py.*${CMUX_SURFACE_ID}"
+pgrep -fl "watch-workers.py.*${CALLER_SLOT}"
 ```
 
 **Scope that `pgrep` — do not run it bare.** `pgrep -fl watch-workers.py` lists every
@@ -1100,12 +1044,12 @@ watcher on the machine, including live ones belonging to other sessions and othe
 projects, wrapped in 400-character zsh preambles you then have to read. That is not a
 check, it is an invitation to kill someone else's run: an agent doing exactly this
 reported two healthy watchers as orphans — one of them its own supervisor's. Scoped to
-`$CMUX_SURFACE_ID` the answer is yes-or-no and cannot implicate anyone else.
+`$CALLER_SLOT` the answer is yes-or-no and cannot implicate anyone else.
 
 If a line does come back after `TaskStop`, it is yours and it is stuck:
 
 ```bash
-pkill -f "watch-workers.py.*${CMUX_SURFACE_ID}"
+pkill -f "watch-workers.py.*${CALLER_SLOT}"
 ```
 
 **Never reap a watcher you cannot prove is dead.** A watcher is a true orphan only if
@@ -1116,25 +1060,33 @@ which is the one failure this whole section exists to prevent.
 
 ## Rules
 
-- **"Spawn" means a visible surface, not a subagent.** Once the user has used that
+- **"Spawn" means a visible session, not a subagent.** Once the user has used that
   word, an invisible subagent is not a cheaper version of this — it is a different
   thing, one they cannot watch, click into, or take over. Reaching for `Agent`
   because the tasks look small is the one substitution to refuse: small tasks are
   exactly what a showcase is made of.
+- **Decide the host by precedence, before anything else.** `HERDR_ENV=1` wins over
+  a present `CMUX_SURFACE_ID`, because inside herdr that variable is live, valid,
+  wrong, and identical for every pane on the machine.
 - **The name is the key.** `claude -n <name>` at launch, unique among live
-  sessions, and every lookup afterwards goes through it.
+  sessions, `[a-z][a-z0-9_-]{0,31}` so it works on every host, and every lookup
+  afterwards goes through it.
 - **Address by `uds:`.** A bare name is refused on first contact and costs a round
   trip to recover the ref from; the socket path is derivable from disk and always
   works.
-- Anchor placement on `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID`, never on what
-  is focused — the user may be looking elsewhere. Pass `--focus false`.
-- One split per run, at most. Every agent after the first is a tab.
+- Anchor placement on your own slot, never on what is focused — the user may be
+  looking elsewhere, and both hosts have a command that quietly targets the focused
+  thing when you leave the target off.
+- **Readiness is the registry, never the host's word for it.** One host returns
+  "ready", exit 0, for a worker parked on a gate that has not started a session at
+  all.
 - **Arm the watcher at the first spawn, before sending any task** — one `Monitor`
   running `watch-workers.py` against the ledger, for one worker or for ten. The
   `Monitor` **tool**: the same command backgrounded with `Bash` streams into a file
   nobody reads and notifies you only if it exits, which it never does. The worker's
   own reply is not a substitute, because a worker that is blocked or dead is
-  precisely the worker that cannot send one.
+  precisely the worker that cannot send one. A host that publishes its own agent
+  states does not replace it either — nothing but the pid check reports a death.
 - **Ask every worker to report its findings by message**, replying to the `from`
   address on the message you sent it — by name it is refused on first contact, three
   times out of three. That reply is the only signal that carries content.
@@ -1145,20 +1097,16 @@ which is the one failure this whole section exists to prevent.
   both, one `Bash` call per keystroke.
 - **Keep workers in your own permission class**, or messaging silently stops in
   both directions.
-- **The ledger is on disk**, at
-  `${TMPDIR:-/tmp}/cmux-spawn-agent/<caller surface id>.tsv` — keyed by the
-  caller's surface, so it is exactly this run's spawns and nothing else. That is
-  what lets a turn which remembers nothing still answer what it owes and what it
-  may close.
+- **The ledger is on disk**, at `${TMPDIR:-/tmp}/spawn-agent/<caller slot>.tsv` —
+  keyed by the caller's slot, so it is exactly this run's spawns and nothing else.
+  That is what lets a turn which remembers nothing still answer what it owes and
+  what it may close.
 - Report each stage's outcome as it lands; don't go silent for a long pipeline.
   Mark the ledger row `reported` when you do.
-- Never close a surface you did not spawn, and never close one without asking —
+- Never close a slot you did not spawn, and never close one without asking —
   not even your own.
-- **A run ends when its watcher is stopped, not when its last tab closes.**
+- **A run ends when its watcher is stopped, not when its last slot closes.**
 - Before a destructive or long-running task, say which repo and which profile it
   will run in and get confirmation.
 - Workers inherit the user's global `~/.claude/CLAUDE.md`. If you plan to parse a
   worker's reply, expect whatever that file makes every session emit.
-- `cmux new-surface --type agent-session --provider claude` also opens a Claude
-  surface, but it takes no `-n`, so the worker comes up under a derived name you
-  did not choose — which is the join key here. Spawn terminals.

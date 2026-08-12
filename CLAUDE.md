@@ -12,26 +12,73 @@ The marketplace is deliberately named for agents, not for any one terminal. `cmu
 
 ```
 .claude-plugin/marketplace.json          → Marketplace catalog
-plugins/agent-toolkit/                   → The plugin
+plugins/agent-toolkit/                   → The plugin (the only thing that ships)
 ├── .claude-plugin/plugin.json           → Plugin manifest
 └── skills/
-    ├── cmux-spawn-agent/                → /agent-toolkit:cmux-spawn-agent
-    │   ├── SKILL.md
-    │   ├── peer.py                      → worker name → socket address / status / cwd / sessionId
-    │   ├── surface.py                   → cmux surface ref ↔ uuid, pane, tty
-    │   └── watch-workers.py             → polls the peer registry → one line per worker state change
-    └── cmux-spawn-agent-smoke/          → /agent-toolkit:cmux-spawn-agent-smoke
-        └── SKILL.md                     → ten checks that prove the above works on this machine
-.claude/skills/release/                  → /release — this repo's own release ceremony
+    └── spawn-agent/                     → /agent-toolkit:spawn-agent
+        ├── SKILL.md                     → the host-agnostic core; contains NO terminal commands
+        ├── lib/                         → host-agnostic, used by every host
+        │   ├── peer.py                  → worker name → socket address / status / cwd / sessionId
+        │   └── watch-workers.py         → polls the peer registry → one line per worker state change
+        └── hosts/                       → one file per terminal; you read exactly one
+            ├── cmux.md                  → placement, launch, keys, close — cmux
+            ├── cmux-surface.py          → cmux surface ref ↔ uuid, pane, tty
+            └── herdr.md                 → the same, for herdr (needs no resolver script)
+.claude/skills/                          → this repo's own skills; NOT shipped
+├── release/                             → /release — the release ceremony
+└── spawn-agent-smoke/                   → /spawn-agent-smoke — eleven checks against the working tree
 ```
 
 ## Conventions
 
-- **Skill naming** — a skill bound to a specific terminal host is prefixed with that host (`cmux-`). Host-agnostic skills take a bare name.
-- **Bundled scripts** — a skill references its own files through `${CLAUDE_PLUGIN_ROOT}/skills/<skill>/<file>`, never through a relative path or the base directory printed at load. The token is substituted **into the skill text at load time**, so the reading model sees an absolute path; it is *not* exported to the shell, and `echo "$CLAUDE_PLUGIN_ROOT"` from a Bash call prints nothing. Prose next to such a path must therefore still read correctly once the token has been replaced by a directory.
+- **One skill per capability, one file per host.** A skill that needs a terminal keeps a
+  bare, host-free name and ships `hosts/<host>.md`; its `SKILL.md` names no terminal
+  command at all, and the host file is the only place a command appears. This replaced an
+  earlier convention of host-prefixed skill names (`cmux-spawn-agent`), which does not
+  survive a second host: both descriptions match "spawn an agent", so the model has to
+  guess the host at trigger time — before it has run anything that could tell it — and
+  the ~60% of the text that is host-agnostic gets duplicated into two files that drift.
+  A bare name keeps one trigger, and the host file is chosen *after* detection, from
+  evidence.
+- **Host detection is a precedence table, not a pair of checks** — `HERDR_ENV=1` beats a
+  set `CMUX_SURFACE_ID`. Both can be set at once and the loser's variables stay valid:
+  herdr panes inherit the environment of whatever started the herdr *server*, so
+  `$CMUX_SURFACE_ID` inside herdr names the surface displaying the herdr window, is
+  shared by every herdr pane on the machine, and makes every cmux command succeed at the
+  wrong target. Measured 2026-08-12. Anything that adds a third host adds a row above,
+  never a second `if`.
+- **Bundled scripts** — a skill references its own files through `${CLAUDE_PLUGIN_ROOT}/skills/<skill>/<file>`, never through a relative path or the base directory printed at load. Host-agnostic scripts go in that skill's `lib/`, host-specific ones in its `hosts/`.
+- **The smoke test does not ship.** It lives in `.claude/skills/spawn-agent-smoke/` and gets
+  no `${CLAUDE_PLUGIN_ROOT}` — that token is substituted only inside a plugin. It resolves
+  the plugin root itself from `git rev-parse --show-toplevel`, then *proves* the resolution
+  by reading each profile's `plugins/known_marketplaces.json` and requiring a `directory`
+  source whose `installLocation` is this tree. A `github` source there means the profile
+  serves a version-keyed cache and the smoke test would be measuring bytes no session
+  reads — which is a FAIL, not a footnote. The token is substituted **into the skill text at load time**, so the reading model sees an absolute path; it is *not* exported to the shell, and `echo "$CLAUDE_PLUGIN_ROOT"` from a Bash call prints nothing. Prose next to such a path must therefore still read correctly once the token has been replaced by a directory.
 - **One plugin, many skills** — new agent skills go into `plugins/agent-toolkit/skills/`. A second plugin is warranted only when a bundle needs its own version line.
 - **JSON formatting** — 2-space indent, trailing newline. `/release` rewrites these files in place; anything else makes a release diff rewrite whole files.
 - **Skill frontmatter is a plain YAML scalar** — so a `description` may not contain `": "` (colon followed by a space). YAML reads it as a nested mapping and the whole block fails to parse, and the failure is *silent at runtime*: the skill loads with empty metadata, every field dropped, so it simply never triggers again. Nothing in the skill's own text looks wrong. Use an em dash where the sentence wants a colon, and run `claude plugin validate ./plugins/agent-toolkit` — the marketplace-level `claude plugin validate .` does **not** read skill frontmatter and passes happily while the skill is broken.
+- **Never write a bare `$` followed by a digit in skill markdown.** When a skill is
+  invoked *with arguments*, every `$0`, `$1`, … in its text is replaced by those
+  arguments — **zero-indexed**, so `$0` is the first word — before the model reads a
+  byte of it. Measured 2026-08-12 with a probe skill invoked as
+  `/probe ZULU YANKEE XRAY WHISKEY VICTOR`\:
+
+  | in the file | served as |
+  | --- | --- |
+  | `$0` `$1` `$2` `$4` | `ZULU` `YANKEE` `XRAY` `VICTOR` |
+  | `awk -F'\t' '$4!="reported"'` | `awk -F'\t' 'VICTOR!="reported"'` |
+  | `$$`, `${TMPDIR:-/tmp}`, `$LEDGER` | untouched |
+
+  Only `$` + digit and `$ARGUMENTS` are rewritten; `$` + letter is safe. This is the
+  same shape of failure as the frontmatter trap above — it produces *valid* awk that
+  queries the wrong column, with no error anywhere — and it is worse in one way: it
+  only fires when someone passes arguments, so a skill triggered by description match
+  behaves perfectly right up until the day a user types the slash command with a
+  sentence after it. Two of these were shipped in this repo before the probe found
+  them. Write `awk -v c=4 '$c…'` and iterate with `$i`; if you genuinely need to show a
+  literal `$1` in prose, say so in words rather than typing it.
+  `grep -rn --include='*.md' -E '\$[0-9]' plugins .claude/skills` is the check.
 
 ## Releasing
 
@@ -134,7 +181,7 @@ This repo follows [Conventional Commits v1.0.0](https://www.conventionalcommits.
 **Subject** — `<type>(<scope>): <description>`, ≤ 72 characters.
 
 - **Type** — one of `feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert`.
-- **Scope** — the primary touched area (e.g., `skills/cmux-spawn-agent`, `marketplace`, `docs`).
+- **Scope** — the primary touched area (e.g., `skills/spawn-agent`, `skills/spawn-agent/herdr`, `marketplace`, `docs`).
 - **Breaking change** — append `!`, or use a `BREAKING CHANGE:` body footer.
 
 These types drive the bump `/release` proposes. The mapping lives in that skill's step 2 and is **not** duplicated here — two copies drifted apart once already (this file said `!` → major with no pre-1.0 clause while the skill said minor below 1.0.0, so the two documents proposed different versions for the same commits).
