@@ -54,7 +54,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.6.1 — "Carve"** (three instructions that were too broad to obey — a task that forbids tools gets printed instead of sent, an exported CALLER_SLOT never reaches the next shell, and "reply to the from address" went 0 of 2)
+Latest: **v0.6.2 — "Plumb"** (two readings that came back clean and wrong — a reply address resolved from the wrong pid named a real, unrelated live session, and a screen read that cannot see past the viewport reported refusals=0 over a refusal that was right there)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
