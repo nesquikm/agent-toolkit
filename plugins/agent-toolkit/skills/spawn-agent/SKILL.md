@@ -530,28 +530,92 @@ Your name and your address are both things the worker cannot look up about you, 
 both from the same record and put both in the task:
 
 ```bash
-ME=$(python3 -c "
-import json,os,sys
+ME=$(python3 - $$ <<'PY'
+import json, os, subprocess, sys
+
+def ps(fmt, pid):
+    r = subprocess.run(["ps", "-o", fmt, "-p", str(pid)], capture_output=True, text=True)
+    return r.stdout.strip()
+
+pid = int(sys.argv[1])                     # walk up to the claude hosting this shell
+for _ in range(8):
+    argv0 = (ps("command=", pid).split() or [""])[0]
+    if os.path.basename(argv0).startswith("claude"):
+        break
+    parent = ps("ppid=", pid)
+    if not parent or int(parent) <= 1:
+        sys.exit("no claude ancestor above pid %s" % sys.argv[1])
+    pid = int(parent)
+else:
+    sys.exit("no claude ancestor within 8 levels of pid %s" % sys.argv[1])
+
 roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [os.path.expanduser('~/.claude')]
 for root in roots:
     try:
-        r = json.load(open(os.path.join(root,'sessions','%s.json' % sys.argv[1])))
+        r = json.load(open(os.path.join(root, 'sessions', '%d.json' % pid)))
     except (OSError, ValueError):
         continue
-    print(r.get('name',''), 'uds:' + (r.get('messagingSocketPath') or ''))
-    break" "$(ps -o ppid= -p $$ | tr -d ' ')")
+    if not r.get('messagingSocketPath'):
+        sys.exit("session %d is registered without a messaging socket" % pid)
+    print(r.get('name', ''), 'uds:' + r['messagingSocketPath'])
+    break
+else:
+    sys.exit("no session record for claude pid %d under %s" % (pid, ':'.join(roots)))
+PY
+)
+[ -n "$ME" ] || { echo "cannot resolve my own address -- do not send a task that asks for a reply" >&2; exit 1; }
 ```
+
+**It walks the process tree; it does not take the parent of the shell.** That is the
+same walk as the smoke test's staleness gate, and it is here for the same reason: the
+naive `ps -o ppid= -p` form is right only when `claude` is the *immediate* parent of
+the shell your `Bash` call got. Put any wrapper in between and it names the wrapper.
+Measured 2026-08-12 in a cmux surface, session `fixer-b2`, claude pid 27957:
+
+```
+direct              parent of the shell is 27957 -> …/claude    ME=[fixer-b2 uds:/tmp/cc-socks/27957.sock]
+through one zsh -c  parent of the shell is 36470 -> /bin/zsh    ME=[]
+the walk, wrapped   resolved claude pid 27957                   ME=[fixer-b2 uds:/tmp/cc-socks/27957.sock]
+```
+
+The walk returned that same answer at zero, one and two extra shell levels.
+
+**An empty answer here is no longer a missing label — it is a missing address.** This
+snippet used to return only the human-readable name, so a blank one cost a nicety. It
+now carries the `uds:` string the whole reply instruction above is built on, and a
+supervisor holding no address falls back to the only other identifier it has: the
+worker's name. That is precisely the ref wall the literal address exists to prevent, so
+the failure reintroduces the bug two sections up rather than degrading gracefully.
+
+**And empty is the good failure.** `sessions/<pid>.json` is keyed by pid, and pids are
+recycled into exactly the range wrapper shells are born in — so a wrapper whose pid
+happens to match some *other* live session's record resolves to that session, in full.
+Measured 2026-08-12: the old form handed pid 19143 printed
+`bin-09 uds:/tmp/cc-socks/19143.sock` — a complete, plausible, wrong answer naming a
+live session belonging to somebody else's run. A worker given it sends its findings to
+a stranger and nothing anywhere reports a fault. The walk cannot produce that, because
+it only ever reads the record of a pid it has confirmed is a `claude`.
+
+So **every branch exits non-zero with a message on stderr** rather than printing an
+empty string, and the `[ -n "$ME" ]` line is what turns that into a stop instead of a
+task sent with an empty address in it. The doubled `$` in `python3 - $$` is the shell's
+own pid and is invariant inside command substitution, so the walk starts where you think
+it does; do not replace it with a captured parent.
 
 It honours `CLAUDE_CONFIG_DIR` rather than hardcoding `~/.claude` — **every
 colon-separated segment of it, in order, exactly as `peer.py` and the watcher do**, so
 all three agree on where a session may live. See "Several config profiles" below, and
 note that a second profile really does exist on this machine, so the hardcoded form
 returns an empty name for every session in it, and reading only the first segment
-returns an empty name whenever the caller's own profile is the second one. It also
-resolves the **hosting CLI session**: run from inside a subagent it prints the *host's*
-name, not the subagent's, so nested orchestration that asks workers to reply by this
-name routes their findings to the wrong session. One more reason the `from` address is
-the instruction and this string is only a label.
+returns an empty name whenever the caller's own profile is the second one. It refuses a
+session registered without a `messagingSocketPath` for the same reason the collision
+check does — that record cannot be replied to at all (see the registry section above).
+
+It resolves the **hosting CLI session** by construction, since that is what the walk
+looks for: run from inside a subagent it prints the *host's* name, not the subagent's,
+so nested orchestration that asks workers to reply by this name routes their findings to
+the wrong session. One more reason the `from` address is the fallback sentence and this
+name is only a label — the address beside it is the part that must be right.
 
 ## Spawn several at once
 
