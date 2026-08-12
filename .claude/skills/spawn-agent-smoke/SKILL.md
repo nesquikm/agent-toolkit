@@ -317,7 +317,8 @@ no longer writes. The watcher reads column 1 as a name; on a five-column ledger 
 watches session uuids and matches nothing.
 
 ```bash
-D="${TMPDIR:-/tmp}/spawn-agent-smoke"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 mkdir -p "$D"
 : > "$D/empty.tsv"
 printf 'a\tb\tc\td\n' > "$D/ok4.tsv"
@@ -325,7 +326,8 @@ printf 'a\tb\tc\td\te\n' > "$D/legacy5.tsv"
 ```
 
 ```bash
-D="${TMPDIR:-/tmp}/spawn-agent-smoke"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 for f in empty ok4 legacy5; do
   awk -F'\t' 'NF && NF!=4 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$D/$f.tsv"
   echo "$f -> exit=$?"
@@ -348,14 +350,16 @@ that is **in use but unreachable** — registered under a live pid, with no mess
 socket. Build that session rather than hunting the machine for one:
 
 ```bash
-D="${TMPDIR:-/tmp}/spawn-agent-smoke/fixture-profile"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/fixture-profile"
 mkdir -p "$D/sessions"
 printf '{"pid":1,"name":"smoke-victim-probe","cwd":"/","sessionId":"fixture-only"}\n' > "$D/sessions/1.json"
 ```
 
 ```bash
 P="<plugin root>/skills/spawn-agent/lib/peer.py"
-D="${TMPDIR:-/tmp}/spawn-agent-smoke/fixture-profile"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/fixture-profile"
 CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe name; echo "  name    exit=$?"
 CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe;      echo "  address exit=$?"
 CLAUDE_CONFIG_DIR="$D" python3 "$P" no-such-session-xyz name; echo "  absent  exit=$?"
@@ -398,7 +402,9 @@ pid that the guard accepts and the kernel will answer for, which is why it uses 
 one.
 
 Cleanup is already covered — the fixture sits under `${TMPDIR:-/tmp}/spawn-agent-smoke/`,
-which check 11 step 4 removes wholesale. There is no extra teardown step.
+which check 11 step 4 removes along with the rest of this run's scratch. There is no
+extra teardown step, and because that directory is keyed by `$CLPID` it is this run's
+alone — a concurrent smoke run on the same machine has its own.
 
 **Why a fixture and not the live registry.** Until 2026-08-12 this check hunted the
 machine's own sessions for a named-but-socketless one. That shape is a pre-v2.1.224
@@ -444,7 +450,8 @@ Both halves of the documented one-liner are load-bearing and they fail in **oppo
 directions, so a run that only ever exercises one of them proves nothing.
 
 ```bash
-D="${TMPDIR:-/tmp}/spawn-agent-smoke"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 LEDGER="$D/prune.tsv"
 printf 'w1\tSU-AAA\tPU-AAA\treported\n' > "$LEDGER"
 l1=SU-AAA
@@ -458,7 +465,8 @@ only prune the run ever does — joined with `&&` instead of `;` the `mv` is ski
 is left behind. `tmp=1` is that bug.
 
 ```bash
-D="${TMPDIR:-/tmp}/spawn-agent-smoke"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 LEDGER="$D/prune.tsv"
 printf 'w1\tSU-AAA\tPU-AAA\treported\nw2\tSU-BBB\tPU-BBB\treported\n' > "$LEDGER"
 unset l1
@@ -487,7 +495,8 @@ Create its ledger first, with one row naming nobody:
 ```bash
 CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
 [ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot"; exit 1; }
-D="${TMPDIR:-/tmp}/spawn-agent-smoke"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 mkdir -p "$D"
 printf 'smoke-warn-nobody\tL1-X\tL2-X\tspawned\n' > "$D/warn-${CALLER_SLOT}.tsv"
 ls "$D"/warn-*.tsv
@@ -506,7 +515,7 @@ your assignments:
 
 ```bash
 python3 -u "<plugin root>/skills/spawn-agent/lib/watch-workers.py" \
-    "${TMPDIR:-/tmp}/spawn-agent-smoke/warn-<CALLER_SLOT>.tsv" 1
+    "${TMPDIR:-/tmp}/spawn-agent-smoke/<CLPID>/warn-<CALLER_SLOT>.tsv" 1
 ```
 
 PASS on exactly one line, about 30 seconds in:
@@ -554,15 +563,15 @@ is that the shipped procedure works; a hand-rolled launch tests your typing. Two
 
 ```bash
 CLPID="<the session pid check 0b printed>"
-REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/smoke repo $CLPID"
+REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/smoke repo"
 mkdir -p "$REPO"
 git -C "$REPO" init -q
 [ -d "$REPO/.git" ] && echo "PASS scratch repo: $REPO"
 ```
 
-**The pid suffix is what keeps the folder-trust gate reachable, and without it this
-procedure quietly stops testing the thing it claims to.** Trust is recorded per path in
-the profile's `~/.claude.json` as `hasTrustDialogAccepted`, and it **outlives the
+**The `$CLPID` in that path is what keeps the folder-trust gate reachable, and without
+it this procedure quietly stops testing the thing it claims to.** Trust is recorded per
+path in the profile's `~/.claude.json` as `hasTrustDialogAccepted`, and it **outlives the
 directory** — teardown's `rm -rf` deletes the folder while the trust record stays. So a
 fixed scratch path is gated on a machine's *first* run and silently pre-trusted on every
 run after that, which retires the gate-clearing half of 7d and 7e and all of 7d's
@@ -573,6 +582,20 @@ pre-rename `…/cmux-spawn-agent-smoke/smoke repo`.
 A fresh pid per run means a fresh path, so the gate fires every time. It also means the
 profile accumulates one trust record per smoke run; they are inert, and clearing them is
 optional housekeeping, not part of this procedure.
+
+**The pid sits on the run directory rather than on the repo name, and that is doing a
+second job.** Every scratch artifact this procedure writes — the check 2 and 4 ledger
+fixtures, check 3's `fixture-profile/`, check 5's deaf ledger, this repo — lives under
+`…/spawn-agent-smoke/$CLPID/`, so two smoke runs on one machine cannot touch each
+other's files and teardown removes only its own subtree. That is not hypothetical:
+measured 2026-08-12, a cmux run and a herdr run were started minutes apart, the
+fixture names were fixed (`empty.tsv`, `ok4.tsv`, `prune.tsv`, `fixture-profile/`), and
+the first to finish `rm -rf`'d the shared directory out from under the second — taking
+its fixtures, its deaf-watcher ledger and its scratch repo. Nothing broke that time
+because the second run had already closed its workers, but the ordering was luck: fired
+a minute earlier it would have deleted a live worker's cwd while that worker sat in it.
+Check 4 is the one that could have been corrupted invisibly, since its two halves write
+different content to the same `prune.tsv`.
 
 Record the baseline before you place anything — *host*:
 
@@ -781,7 +804,7 @@ Then re-run the readiness loop, and verify where it landed. Compare the two as
 ```bash
 P="<plugin root>/skills/spawn-agent/lib/peer.py"
 CLPID="<the session pid check 0b printed>"
-REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/smoke repo $CLPID"
+REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/smoke repo"
 python3 -c '
 import os, sys
 want, got = sys.argv[1], sys.argv[2]
@@ -812,15 +835,29 @@ the reply instruction spelled the way the measurements say it must be:
 ```
 {"to": "uds:/tmp/cc-socks/<pid>.sock",
  "summary": "smoke worker - confirm the round trip",
- "message": "Your only job is to send one reply message. Do not read files, do not run shell commands, do not investigate anything — but you MUST deliver the reply with the SendMessage tool, and loading that tool first if it is deferred in your environment is part of the job, not a violation of it. Printing the text as output does not count as replying.\n\nThe reply body must be exactly one line and nothing else: SMOKE-OK <the name you were launched with>\n\nSend it to the session that sent you this message, using the `from` address on this message. (That session is named `<your own name>`.)"}
+ "message": "Your only job is to send one reply message. Do not read files, do not run shell commands, do not investigate anything — but you MUST deliver the reply with the SendMessage tool, and loading that tool first if it is deferred in your environment is part of the job, not a violation of it. Printing the text as output does not count as replying.\n\nThe reply body must be exactly one line and nothing else: SMOKE-OK <the name you launched it with>\n\nSend it to uds:/tmp/cc-socks/<your own pid>.sock — that is the session that sent you this message, and the same address is on this message as its `from`. It is named `<your own name>`; that is a label, not an address, so do not send to the name."}
 ```
 
-**Two of those placeholders are yours to fill and one is deliberately not.** Substitute
-`<pid>` (from the address `peer.py` printed) and `<your own name>` before sending. Leave
-`<the name you were launched with>` **exactly as written** — it is an instruction to the
-worker, which knows the name it was launched under and resolves it in its own reply, and
-that substitution is what joins a reply to a worker when more than one is running. A
-supervisor who "helpfully" fills it in has replaced the join key with a constant.
+**Every placeholder in that block is yours to fill.** `<pid>` is the worker's, from the
+address `peer.py` printed. `<your own pid>` and `<your own name>` are this session's —
+check 0b printed the pid, and the address is `python3 "$P" "<your own name>"` or the
+`messagingSocketPath` in your own registry record. `<the name you launched it with>` is
+the `-n` name you gave the worker.
+
+**That last one used to say "the name you were launched with", addressed to the worker,
+and it was fiction.** Measured 2026-08-12, 2 of 2 across both hosts: a worker has no read
+on its own launch name. Both said so unprompted and both guessed — one inferred a name
+from the supervisor's socket path and the scratch repo (`smoke-34709`, when it was
+launched `smoke-w9pe-a`), the other took a `ListAgents` row and landed on **a different
+concurrent run's session**. So the placeholder did not join a reply to a worker; it
+invited a cross-run misattribution, and with two workers in flight it joined nothing. The
+supervisor writes the name because the supervisor is the only party that knows it.
+
+**Join on the transport, not on the body, when the two disagree.** An incoming
+`<cross-session-message>` carries a `from-name` attribute, which is authoritative. The
+name in the body is a payload the worker could have got wrong; `from-name` is the
+channel it actually arrived on. Record both when they differ — that divergence is a
+finding.
 
 Otherwise send that wording rather than a paraphrase, and **in particular do not
 compress the prohibition back into "do not read files, run commands, or investigate
@@ -844,9 +881,15 @@ Each clause of the replacement does one job:
 - **"the reply *body*"** scopes "one line" to the message rather than to the worker's
   whole turn, which is what made printing look compliant.
 
-The `from`-address sentence is unchanged and must stay: it is the measured fix for the
-ref wall (told to reply by name, 0 of 3 workers got through first try; told to use
-`from`, 5 of 5 did, and 1 of 1 again under herdr).
+**The reply target is a literal `uds:` string, and "use the `from` address" is only the
+sentence beside it.** That is a change from earlier versions, and it is the one the
+measurements forced. Told to reply by *name*, 0 of 3 workers got through first try. Told
+to use `from`, 5 of 5 did, then 1 of 1 under herdr — and then, on 2026-08-12, **0 of 2
+across both hosts**, each addressing the supervisor by name anyway and recovering via the
+ref in the refusal. A worker holds several plausible ways to address you, and
+`SendMessage`'s own guidance leans toward names; a literal address leaves nothing to
+choose. Keep the `from` sentence — it is a correct fallback and it costs one clause —
+but do not rely on it alone.
 
 Three separate PASS conditions here:
 
@@ -862,25 +905,46 @@ Three separate PASS conditions here:
   two of them are a FAIL of anything; work the ordered diagnosis at the end of this
   check rather than guessing between them.
 - **The reply was accepted on the worker's first attempt.** This is the reply-address
-  contract, and it is the check with the sharpest measurement behind it — told to reply
-  to the supervisor's *name*, 0 of 3 workers got through on the first try; told to use
-  the `from` address on the message they received, 5 of 5 did, and again 1 of 1 under
-  herdr on 2026-08-12. A refusal costs a round trip on the one message that carries the
-  results, so it is silent unless you look — *host*:
+  contract. A refusal costs a round trip on the one message that carries the results, so
+  it is silent unless you look.
+
+**Prove the detector can fire before you trust a zero from it.** This is not ceremony —
+the previous pattern here *could not match* and returned a clean `0` while the refusal
+was on screen, which is how a run reports a green it did not earn:
+
+```bash
+printf '%s\n' "'w' is not an agent in this" "conversation. Re-send with the ref" \
+  | tr '\n' ' ' | tr -s ' ' | grep -o "is not an agent in this conversation" | wc -l | tr -d ' '
+```
+
+Must print `1`. **Claude Code hard-wraps that tool result**, so the phrase is split
+across rendered lines and no line-oriented `grep` can ever see it whole. `--source
+recent-unwrapped` does not help: it joins *soft* wraps, and this is a hard one. Measured
+2026-08-12 against a worker that had genuinely been refused — the old
+`grep -c "is not an agent in this conversation"` returned `0`, the form above returned
+`1`. Any run that recorded `0` from the old pattern proved nothing, and that includes the
+runs behind the 5-of-5 figure quoted above.
+
+Then the real read — *host*:
 
 ```bash
 cmux read-screen --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" --scrollback --lines 200 \
-  | grep -c "is not an agent in this conversation"
+  | tr '\n' ' ' | tr -s ' ' | grep -o "is not an agent in this conversation" | wc -l | tr -d ' '
 ```
 
 ```bash
 # herdr: only once the worker is idle -- see below
 herdr agent read "<NAME>" --source recent-unwrapped --lines 200 \
-  | grep -c "is not an agent in this conversation"
+  | tr '\n' ' ' | tr -s ' ' | grep -o "is not an agent in this conversation" | wc -l | tr -d ' '
 ```
 
-PASS on `0`. Any non-zero count means the worker addressed you by name, retried, and
-paid for it — record it, because that is the regression, not a hiccup.
+PASS on `0` **from the wrap-tolerant form, and only after the control above printed 1**.
+Any non-zero count means the worker addressed you by name, retried, and paid for it —
+record it, because that is the regression, not a hiccup.
+
+`tr -s ' '` matters as much as the join: the wrap inserts indentation, so the joined text
+reads `…in this   conversation…` with runs of spaces that a fixed pattern will not match.
+Squeeze first, then search.
 
 **On herdr this read has two failure modes and only one of them is loud.**
 
@@ -1007,18 +1071,26 @@ herdr pane get "<l1>"; echo "exit=$?  (want: pane_not_found, exit=1)"
 
 ```bash
 CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+CLPID="<the session pid check 0b printed>"
 [ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot -- the real ledger would survive this"; exit 1; }
+[ -n "$CLPID" ] || { echo "FAIL empty CLPID -- this would rm -rf every run's scratch"; exit 1; }
 rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
-rm -rf "${TMPDIR:-/tmp}/spawn-agent-smoke"
+rm -rf "${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 ls "${TMPDIR:-/tmp}/spawn-agent/" 2>/dev/null; echo "  (your slot's .tsv must be gone)"
 ```
 
-   The second line removes only this smoke test's own scratch directory — the throwaway
-   repo, the ledger fixtures, the deaf watcher's ledger, and check 3's
+   The second line removes **this run's** scratch directory and nothing else — the
+   throwaway repo, the ledger fixtures, the deaf watcher's ledger, and check 3's
    `fixture-profile/`. Confirm that last one specifically: it is a synthetic
    `CLAUDE_CONFIG_DIR` holding a session record for a session that never existed, and it
-   is the single artifact here that another tool could misread as real. It never touches
-   the real ledger directory, which is the line above it.
+   is the single artifact here that another tool could misread as real.
+
+   **Both guards are load-bearing and they protect different strangers.** An empty
+   `CALLER_SLOT` makes the first line delete `…/spawn-agent/.tsv` and quietly leave the
+   real ledger; an empty `$CLPID` makes the second line `rm -rf` the whole
+   `spawn-agent-smoke/` tree, which is a *concurrent* run's live scratch — including a
+   worker's cwd while that worker is sitting in it. Neither line touches the real ledger
+   directory, and neither should ever touch another run.
 
 5. **No watcher survived**, scoped to your own slot:
 
