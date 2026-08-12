@@ -103,9 +103,15 @@ process.** A session that started before the plugin changed is running the old t
 and will smoke-test bytes nobody ships. Subagents inherit their parent's snapshot, so
 re-running this inside a `Task` refreshes nothing.
 
-Only `SKILL.md` and the host files are snapshotted. `peer.py` and `watch-workers.py`
-are read from disk on every invocation, so their mtimes are deliberately excluded —
-including them would fail sessions that are perfectly current.
+**Only `SKILL.md` is snapshotted.** Everything else the skill ships — `lib/*.py`,
+`hosts/*.md`, `hosts/*.py` — is opened at use time, by `Read` or by `python3`, so it is
+always the current bytes on disk. Their mtimes are deliberately excluded below;
+including them would fail sessions that are perfectly current, and the gate would then
+be wrong in the *safe* direction, which is still wrong.
+
+That split is worth holding onto when you are iterating: an edit to a **host file**
+takes effect in the session you are already in, while an edit to **`SKILL.md`** needs a
+new `claude`.
 
 ```bash
 python3 - "<the plugin root check 0a printed>" $$ <<'PY'
@@ -129,7 +135,7 @@ else:
     sys.exit("no claude ancestor within 8 levels of pid %s" % sys.argv[2])
 
 texts = [os.path.join(d, f) for d, _, fs in os.walk(os.path.join(root, "skills"))
-         for f in fs if f.endswith(".md")]
+         for f in fs if f == "SKILL.md"]
 newest, newest_path = max((os.path.getmtime(p), p) for p in texts)
 started = time.mktime(time.strptime(ps("lstart=", pid)))
 print("newest text  :", time.ctime(newest), "->", os.path.relpath(newest_path, root))
@@ -732,6 +738,7 @@ cmux read-screen --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" --scrollbac
 ```
 
 ```bash
+# herdr: only once the worker is idle -- see below
 herdr agent read "<NAME>" --source recent-unwrapped --lines 200 \
   | grep -c "is not an agent in this conversation"
 ```
@@ -739,11 +746,21 @@ herdr agent read "<NAME>" --source recent-unwrapped --lines 200 \
 PASS on `0`. Any non-zero count means the worker addressed you by name, retried, and
 paid for it — record it, because that is the regression, not a hiccup.
 
-**On herdr, `--source recent-unwrapped` is not interchangeable with `visible`.**
-Measured against a worker that had emitted 120 marked lines, `visible` returned 46
-matches at `--lines 200` and 46 again at `--lines 600` — it saturates at the viewport
-and says nothing about it, so this grep would return a clean `0` having never looked at
-the line in question. `recent-unwrapped` returned all of them.
+**On herdr this read has two failure modes and only one of them is loud.**
+
+- **Too early is loud.** `recent`/`recent-unwrapped` refuse outright while the agent is
+  working — `{"error":{"code":"agent_not_idle",…"its alternate-screen history can only
+  be captured by scrolling while idle"}}` — because Claude Code runs on the alternate
+  screen and herdr has to scroll it to capture history. Wait for idle and retry; that
+  error is not a FAIL of anything.
+- **The wrong source is silent.** Substituting `--source visible` because it works
+  while busy returns a clean `0` having never looked at the line in question. Measured
+  against a worker that had emitted 120 marked lines, `visible` returned 46 matches at
+  `--lines 200` and 46 again at `--lines 600` — it saturates at the viewport and says
+  nothing about it, while `recent-unwrapped` returned all of them.
+
+So the order matters: wait for idle, *then* read with `recent-unwrapped`. Recording a
+`0` obtained from `visible` is recording nothing.
 
 If the reply never arrives at all, check the watcher's lines before concluding
 anything: `ATTN` means the message is being **held** for approval, which is what a

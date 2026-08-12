@@ -157,6 +157,17 @@ herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --permission-
 - The pane must be at an interactive shell prompt with nothing in the foreground.
   A tab you just created is.
 
+**Verify where it landed rather than trusting `--cwd`**, for the same reason cmux
+verifies its `cd` — the flag is easy to omit and nothing else catches it:
+
+```bash
+python3 "$P" "$NAME" cwd        # must be $REPO
+```
+
+Compare as paths, not strings: on macOS `$TMPDIR` carries a trailing slash and `/var`
+is a symlink to `/private/var`, so a healthy run prints two visibly different strings.
+`os.path.samefile` is the comparison.
+
 ### `agent start` says "ready" when the worker has not started at all
 
 This is the sharpest trap on this host. Measured twice on 2026-08-12, in two
@@ -238,8 +249,11 @@ wraps, `recent-unwrapped` joins soft wraps (prefer it for logs and transcripts),
 `detection` is the plain-text snapshot herdr's own agent classifier reads. Add
 `--format ansi` only when colour is the evidence.
 
-**`visible` silently saturates; `recent-unwrapped` does not.** Measured against a
-worker that had emitted 120 marked lines:
+**`visible` silently saturates; `recent-unwrapped` does not — but it is only
+available while the worker is idle.** Both halves were measured against a worker that
+had emitted 120 marked lines.
+
+Idle:
 
 | source | `--lines 40` | `--lines 200` | `--lines 600` |
 | --- | --- | --- | --- |
@@ -248,13 +262,30 @@ worker that had emitted 120 marked lines:
 
 `visible` stops at the viewport however large `--lines` is, and it stops *without
 saying so* — which is exactly how a check for "did this worker's first reply get
-refused" returns a clean answer having never looked at the line in question. Use
-`recent-unwrapped` with a generous `--lines` for any question about history.
+refused" returns a clean `0` having never looked at the line in question.
 
-herdr warns that rows which leave the *alternate* screen never enter its scrollback,
-so a bigger `--lines` cannot recover them. That did not bite here — Claude Code
-renders to the normal buffer, and all 120 lines came back. If a read ever does
-saturate, the documented fallback is to ask the worker to write its answer to a file
+Working:
+
+```
+{"error":{"code":"agent_not_idle","message":"cannot read 60 lines while e2e-smoke is
+ working: its alternate-screen history can only be captured by scrolling while idle.
+ Wait and retry, or use --source visible"}}
+```
+
+Claude Code runs on the **alternate screen**, and herdr recovers its history by
+scrolling that screen — which it can only do when the agent is not actively drawing to
+it. So the two sources are not interchangeable and neither is a superset:
+
+- **while working** — only `visible` answers. It is the live viewport and it is how you
+  watch a run in progress or identify an open dialog.
+- **while idle** — `recent-unwrapped` with a generous `--lines` is the only thing that
+  answers a question about *history*, and it is a hard error, never a short answer, if
+  you ask too early. That error is a good citizen: it names the condition and the
+  workaround rather than silently truncating.
+
+Anything that greps a worker's transcript — did its first reply get refused, what did
+it print before it stalled — must therefore wait for idle. If a read still saturates
+once idle, the documented fallback is to ask the worker to write its answer to a file
 and read the file.
 
 ## 7. Keystrokes
@@ -297,9 +328,19 @@ worker that is a per-worker status line for free.
 
 ## 9. Close what the run opened
 
+The ledger stores the worker's **pane** id, so derive its tab at teardown rather than
+carrying a fifth column:
+
+```bash
+TAB=$(herdr pane get "$l1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["tab_id"])')
+```
+
+That command is also the liveness check — it exits 1 with `pane_not_found` if the user
+already closed the worker, in which case drop the row and close nothing.
+
 ```bash
 herdr tab close  "$TAB"     # the whole worker tab -- the tidy default here
-herdr pane close "$L1"      # when the worker was a split inside a shared tab
+herdr pane close "$l1"      # when the worker was a split inside a shared tab
 ```
 
 Both return `{"type":"ok"}` on success. **There is no misleading echo to misread** —
