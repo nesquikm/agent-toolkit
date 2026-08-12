@@ -208,8 +208,9 @@ def main():
     # A watcher that matches nothing *would* print nothing forever, which is
     # exactly what a healthy watcher with busy workers looks like — that is the
     # problem this clock exists to solve, not the behaviour still in effect. It
-    # is reachable today: the ledger path is keyed by the cmux surface, which
-    # outlives any one `claude`, so a restarted session inherits the old rows.
+    # is reachable today: the ledger path is keyed by the caller's slot (a cmux
+    # surface, a herdr pane), which outlives any one `claude`, so a restarted
+    # session inherits the old rows.
     # Say it once. None once anything has matched, which also makes the warning
     # one-shot without a second flag.
     deaf_since = time.monotonic()
