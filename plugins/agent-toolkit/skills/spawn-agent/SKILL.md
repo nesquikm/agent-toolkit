@@ -437,8 +437,12 @@ Only now, as a `SendMessage` to the address `python3 "$P" "$NAME"` printed:
 ```
 {"to": "uds:/tmp/cc-socks/30580.sock",
  "summary": "review-api: audit the auth middleware",
- "message": "<the whole spec — goal, constraints, what done means>\n\nWhen you are finished, SendMessage your findings back to the session that sent you this message, using the `from` address on it. (That session is named `<your own name>`.)"}
+ "message": "<the whole spec — goal, constraints, what done means>\n\nWhen you are finished, SendMessage your findings to uds:/tmp/cc-socks/<your own pid>.sock. That is the session that sent you this message, and the same address is on this message as its `from`. It is named `<your own name>` — that is a label, not an address; do not send to the name."}
 ```
+
+The `uds:` string in that reply instruction is **your own** address, not the worker's.
+Read it — and the name beside it — out of `$ME`, further down this section; the two
+paragraphs after that explain why the `from` sentence alone is not enough to put there.
 
 Put the **whole** spec in that message — goal, constraints, and what "done" means,
 plus the instruction to report back. These are one-shot kickoffs; a worker cannot
@@ -689,11 +693,19 @@ is a file:
 | the worker's **screen** (the host file's read command) | a `SendMessage` call with `⎿ … → uds:/tmp/cc-socks/<pid>.sock` under it |
 | the worker's **transcript** (see "Read a worker's output") | a `tool_use` block named `SendMessage` — the `⎿` glyph is terminal rendering and is never in the file |
 
+**Prefer the transcript, and on one host it is the only option.** Those rows are not
+equal: a send that has scrolled off is still in the file and is no longer on the screen,
+and Claude Code draws on the alternate screen, whose history a host may not be able to
+reach at all. cmux cannot — every scrollback flag it has returns the current viewport,
+so a grep comes back clean over a refusal sitting just above it. herdr can, but only
+while the worker is idle. Both host files give the measurement and the exact command;
+read yours before you conclude anything from a screen.
+
 Read it by the tool call, not by the address. **No `SendMessage` call at all** means the
 task's own wording talked the worker out of the tool — see "Send the task" above. A
 `SendMessage` call whose result says `is not an agent in this conversation` is the
-opposite fault, the ref wall, and its fix is the `from`-address instruction rather than
-any change to the prohibitions.
+opposite fault, the ref wall, and its fix is the literal `uds:` address in the task
+text rather than any change to the prohibitions.
 
 ### The watcher — one Monitor, five worker signals
 
@@ -1291,9 +1303,11 @@ which is the one failure this whole section exists to prevent.
   own reply is not a substitute, because a worker that is blocked or dead is
   precisely the worker that cannot send one. A host that publishes its own agent
   states does not replace it either — nothing but the pid check reports a death.
-- **Ask every worker to report its findings by message**, replying to the `from`
-  address on the message you sent it — by name it is refused on first contact, three
-  times out of three. That reply is the only signal that carries content.
+- **Ask every worker to report its findings by message**, writing your own literal
+  `uds:` address into the task text. "Use the `from` address on this message" is the
+  fallback sentence, not the instruction: told only that, 2 of 2 workers addressed the
+  supervisor by name anyway and were refused, exactly as 3 of 3 were when told the name
+  outright. That reply is the only signal that carries content.
 - **`DONE` means a turn ended, not that the work is done** — and the worker's
   reply usually arrives *before* it. Collect findings from the reply; treat `DONE`
   as the backstop for a worker that finished without reporting.
