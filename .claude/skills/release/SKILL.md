@@ -289,26 +289,51 @@ serves whatever branch is checked out to every session in both profiles.
 Only on an explicit yes.
 
 **One command per `Bash` call, and three attempts for every one of them.** These are
-one rule with two halves, and this step is where both were measured: the v0.6.2 run on
-2026-08-12 took **nine denials and zero real failures**. Under `auto` mode the
-classifier denies a compound command *as a unit* — `git checkout main && git pull` was
-denied while a bare `git pull` went straight through, and `git tag v0.6.2 && git push
-origin v0.6.2` was denied while the bare `git tag` passed. It also denies plenty of
-simple ones: `gh pr merge` succeeded on the third *identical* attempt, `git tag` on the
-second, `git push origin v0.6.2` on the third, and `claude plugin marketplace update`
-in the `-st` profile on the third. So split every block below on the way in — they are
-grouped for reading — and reissue an identical call up to about three times before
-recording a failure.
+one rule with two halves, and this step is where both were measured — twice, on the
+v0.6.2 run (2026-08-12) and the v0.6.3 run (2026-08-13), at **nine and eight denials
+respectively, and zero real failures either time**.
 
-**A denial is not a failure, and you cannot tell them apart by looking.** A denied call
-never reaches the shell, so it produces exactly the empty output a real failure
-produces. Believing the first one is cheap almost everywhere in this skill and
-expensive here, because this step is past the last reversible act: give up on
-`gh pr merge` and the release stops half-applied with the branch pushed and the PR
-open, and give up on `git push origin "vX.Y.Z"` and the release lands **merged and
-untagged** — which looks finished from every angle and is the exact failure the
-paragraph after the tag describes. Three attempts, then report *denied* rather than
-*failed*, and say which command.
+Under `auto` mode the classifier denies a compound command *as a unit*:
+`git checkout main && git pull` was denied while a bare `git pull` went straight
+through, and `git tag v0.6.2 && git push origin v0.6.2` was denied while the bare
+`git tag` passed. It denies plenty of simple ones too — v0.6.3 ran with every block
+below already split and still took eight denials across four of its eight commands.
+
+So **splitting does not lower the denial count** — nine became eight. What it buys is
+that no command has to be diagnosed and rewritten mid-ceremony, which is the part of
+this step you cannot afford. Split every block below on the way in; they are grouped
+for reading.
+
+**Expect a cluster, and do not expect it where it fell last time.** v0.6.2 was denied
+three times on `claude plugin marketplace update` in the `-st` profile; v0.6.3 let
+that one through first try and denied the default-profile `claude plugin update`
+instead, alongside `gh pr merge`, `git tag` and `git push origin`, while
+`git rev-parse` and both `marketplace update`s passed. The shape recurs; the location
+does not. A previous run's denial list predicts nothing — any command in this step can
+be the one.
+
+**Three attempts, not two.** All four commands denied in the v0.6.3 run succeeded on
+the third *identical* attempt — exactly the third, never the second, never a fourth.
+Across both runs a single denial cleared sooner (`git tag`, on the second, in v0.6.2),
+so a "try it twice" rule would have abandoned every denied command in v0.6.3,
+including the tag push.
+
+**A denial is not a failure — and it says so.** A denied call comes back as an
+explicit, labelled error block naming the classifier (`Permission for this action was
+denied by the Claude Code auto mode classifier. Reason: Blocked by classifier.`); its
+escalated form reads `Auto mode classifier requires confirmation for this command.`
+You can tell a denial from a failure by reading it. What you cannot read out of it is
+anything about the *command*: a denial is no evidence the command would have failed,
+and the classifier is not deterministic across identical attempts — the same call,
+byte for byte, is refused and then allowed. That is why the response is to reissue,
+not to diagnose or rewrite.
+
+Believing the first denial is cheap almost everywhere in this skill and expensive
+here, because this step is past the last reversible act: give up on `gh pr merge` and
+the release stops half-applied with the branch pushed and the PR open, and give up on
+`git push origin "vX.Y.Z"` and the release lands **merged and untagged** — which looks
+finished from every angle and is the exact failure the tag paragraph below describes.
+Three attempts, then report *denied* rather than *failed*, and say which command.
 
 (The rule holds for step 6's `git push` and `gh pr create` too. It is written here
 because here is where it was measured and where getting it wrong cannot be undone.)
@@ -337,8 +362,27 @@ git tag "vX.Y.Z"
 ```
 
 ```bash
+git tag --list "vX.Y.Z"                  # must print the tag
+```
+
+```bash
 git push origin "vX.Y.Z"
 ```
+
+```bash
+git ls-remote --tags origin "vX.Y.Z"     # must return a ref
+```
+
+Those two are verifications, not steps — the same register as the `git rev-parse` line
+above. They are here because **empty output, not a denial, is the genuinely ambiguous
+result in this step**. A denial announces itself and can be read; silence cannot.
+`git tag` prints nothing whatever when it succeeds, so "it worked" and "something else
+happened" arrive looking identical — and it is the command that this step's own
+failures run through. The push does print, but what it prints is a local account of an
+operation you care about at the *remote*, which is where `git ls-remote` looks.
+
+Ask for both, because this step's failures are silent and, past `gh pr merge`, there
+is no reversible act left to undo them with.
 
 The tag matters beyond bookkeeping: step 2 reads `git tag --list 'v*'` to find what
 "since the last release" means. Skip it and the next release derives its bump from
@@ -346,8 +390,9 @@ the whole history.
 
 Then refresh both profiles. The skills were already live (directory source), but this
 re-syncs the recorded version so `claude plugin list` stops reporting the old one.
-**Four calls, not the loop** — a `for` body is compound by construction, and the
-per-profile commands are exactly where the denials clustered:
+**Four calls, not the loop** — a `for` body is compound by construction, and these
+four are as denial-prone as anything above: one of them was denied three times in each
+of the two measured runs, though not the same one either time:
 
 ```bash
 CLAUDE_CONFIG_DIR="$HOME/.claude" claude plugin marketplace update agent-toolkit

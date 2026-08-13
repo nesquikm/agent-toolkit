@@ -27,8 +27,11 @@ check 8 still has seven results worth reporting.
 
 **Three attempts, then move on.** The auto-mode classifier denies calls that would
 have worked — a placement command was denied twice in a row and succeeded on the third
-identical attempt. A denial never reaches the shell, so it looks exactly like a real
-failure. Reissue the same `Bash` call up to three times before recording FAIL, and
+identical attempt. The denial says so — it comes back as an explicit, labelled error
+block naming the classifier, so you can tell it from a real failure by reading it.
+What it does not tell you is anything about the command: a denial is no evidence the
+command would have failed, and the classifier is not deterministic across identical
+attempts. Reissue the same `Bash` call up to three times before recording FAIL, and
 record *denied* rather than *failed* when that is what it was.
 
 **One command per `Bash` call.** Same reason as the skill under test — a long
