@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.7.0] — 2026-08-13 — "Deed"
+
+A run could drive any live session on the machine. Workers were resolved by **name**, and a name identifies a session only among the live ones at a single instant: it is freed when its session exits, reclaimable by anyone afterwards, and auto-assigned as `<dirname>-<2 hex>` to every hand-started session. `ListAgents` returns every live session with its ref already resolved, and `peer.py` turned any of those names straight into a `uds:` socket — one command from a listing to a live send into a session the user was typing in. The skill said "never close a slot you did not spawn" five times over and had no equivalent rule for messages, keystrokes or screen reads. **This is a breaking change:** the ledger is now six columns with an `.owner` sidecar, and four-column ledgers are refused, because a row with no minted id cannot prove ownership of anything.
+
+### Added
+
+- **Ownership is minted, not looked up.** The supervisor generates a uuid and launches `claude -n <name> --session-id <uuid>`. A human never passes that flag, so a minted id can never select a hand-started session. The row goes on disk *before* the launch, which is what makes it a claim rather than an observation.
+- **`lib/owned.py` — resolve a worker through the ledger, never through a name.** Distinct exit codes carry the part that matters: `0` ours, `1` no live session, `3` a live session holds this name and is not ours, `4` more than one answers. Only `1` improves by waiting; treating `3` as "not ready yet" is how a stop signal becomes a send to a stranger.
+- **`lib/occupant.py` — a slot is not a session.** Every command that writes to a terminal takes a slot, consults no registry, and cannot say who is sitting in it. On the most ordinary sequence there is — worker exits, user starts their own `claude` in the tab — every locator still resolves, and the cleanup path reads `registry=gone` as "died mid-stage" and offers to close what is now the user's session. The join is the controlling terminal: the host names the tty, `ps` names the process.
+- **`lib/me.py`** — this session's own name, `uds:` address and session id, replacing a 30-line heredoc. The third field is what the `.owner` sidecar records, and it is what lets a worker's reply be recognised as a reply rather than as a send to a stranger.
+
+### Changed
+
+- **`peer.py` keeps one job and loses the dangerous one.** It answers "is this name taken" for the pre-launch collision check and now **refuses to return an address at all** — a socket resolved from a name could belong to whatever session holds that name. It also sweeps every profile, because discovery is profile-scoped while the namespace and `SendMessage` are not: 15 live sessions across two profiles here, 9 visible from the default one.
+- **cmux — an empty `--surface` is the caller's own surface.** `cmux read-screen --surface ""` printed the calling session's screen, and the resolver prints empty *exactly* when a worker's tab is gone, so the inline form delivered `down`+`enter` into the supervisor. `send`, `send-key`, `read-screen` and `close-surface` are now assign-and-guard, with an occupant check on each.
+- **herdr — a second namespace the collision check could not see.** `herdr agent` spans 21 kinds and only `claude` ones reach the Claude registry, so a hand-started `codex` named `review-api` was invisible to the pre-launch check while every later `herdr agent …"$NAME"` resolved to that pane. It gets its own `herdr agent get` check, and a duplicate-name refusal is exit 1 — a hard stop, never one of the three classifier reissues.
+- **The smoke test proves ownership.** New check 3b covers the `0/3/3/2` matrix and the enforcement hook; check 2's refused fixture is now the four-column one, since that is the format every earlier run wrote.
+
+### Fixed
+
+- **`/clear` no longer disowns a live worker.** It rotates the session id in place — same pid, name and socket, fresh id within 400 ms — so a pin on the id alone reported a healthy worker as dead the moment a user cleared its tab. The minted id establishes the binding; the pid, captured at readiness, holds it.
+- **More than one match is refused rather than resolved.** `--session-id` reserves nothing: two live sessions were started with the same minted uuid and both registered, neither erroring. `peer.py` returned the first glob match, which is the shape that silently picks a stranger.
+- **An empty `--session-id` is caught before the launch.** It exits 0 with a *random* uuid where a malformed one fails loudly, so a blank `uuidgen` produced a row naming an id no session would ever carry.
+- **Teardown removes the `.owner` sidecar, not just the ledger.** Found by a live smoke run that had to delete it by hand.
+
 ## [0.6.3] — 2026-08-13 — "Holdout"
 
 The same bug twice: a release measures something failing, fixes it in one place, and leaves the copies beside it teaching what it just disproved. v0.6.1 established that a worker must be handed the supervisor's literal `uds:` address — and the `SendMessage` template forty lines above that section, which is the copy-paste artifact a supervisor actually reaches for, went on saying "using the `from` address on it", as did the Rules summary and the ref-wall diagnosis. v0.6.2 proved that no cmux screen read reaches a Claude Code worker's history — and `hosts/cmux.md` §5 went on advertising its scrollback line as the way "for checking whether a worker's first reply was refused", the one question those 55 viewport lines answer cleanly and wrongly. Neither is a new defect. Both are the old one still standing exactly where a reader is likeliest to meet it, because a fix was filed as done when the section that explains it was written rather than when every copy of the superseded instruction was gone.

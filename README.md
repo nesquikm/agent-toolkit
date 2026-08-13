@@ -91,7 +91,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.6.3 — "Holdout"** (the same bug twice — a correction that landed in one place while the copy-paste template, the rules summary and the host file beside it went on teaching what it had just superseded)
+Latest: **v0.7.0 — "Deed"** (a run could drive any live session on the machine, because a worker was found by name and a name is not an identity — ownership is now a uuid the supervisor mints, and a slot is checked for who is actually sitting in it before anything is typed into it)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
