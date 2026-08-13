@@ -334,33 +334,42 @@ CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 mkdir -p "$D"
 : > "$D/empty.tsv"
-printf 'a\tb\tc\td\n' > "$D/ok4.tsv"
-printf 'a\tb\tc\td\te\n' > "$D/legacy5.tsv"
+printf 'a\tb\tc\td\te\tf\n' > "$D/ok6.tsv"
+printf 'a\tb\tc\td\n' > "$D/legacy4.tsv"
 ```
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
-for f in empty ok4 legacy5; do
-  awk -F'\t' 'NF && NF!=4 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$D/$f.tsv"
+for f in empty ok6 legacy4; do
+  awk -F'\t' 'NF && NF!=6 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$D/$f.tsv"
   echo "$f -> exit=$?"
 done
 ```
 
-PASS on exactly `empty -> exit=0`, `ok4 -> exit=0`, and `legacy5 -> exit=1` preceded
-by a `columns=5` line naming the file. Measured in that form on 2026-08-09.
+PASS on exactly `empty -> exit=0`, `ok6 -> exit=0`, and `legacy4 -> exit=1` preceded
+by a `columns=4` line naming the file.
+
+**The refused fixture is now the FOUR-column one, and that inversion is the point.**
+Four columns was this skill's own format until ownership landed, so the row that must
+now be rejected is the one every earlier run wrote. It has to be rejected because a
+four-column row carries no minted session id, which means it cannot prove the worker
+is ours — and `owned.py` exits 3 on exactly that. A run that inherited such a ledger
+and trusted it would be resolving workers by name again, which is the whole bug.
 
 **Fixtures, never the real ledger.** An empty file must pass — the setup block
-`touch`es one before the first row exists — and a five-column file must be refused
-loudly, because the alternative is a watcher that runs happily and reports nothing for
-the whole run.
+`touch`es one before the first row exists.
 
-## 3. The name-collision guard — it must ask for `name`, not for the address — *core*
+## 3. The collision guard, and the address `peer.py` must refuse to mint — *core*
 
-A name collision mis-delivers a task: `peer.py` hands back the wrong socket and the
-watcher reports the wrong worker. The guard is only worth anything if it sees a name
-that is **in use but unreachable** — registered under a live pid, with no messaging
-socket. Build that session rather than hunting the machine for one:
+A name collision mis-delivers a task, and the deeper failure is that a name resolved
+to a socket at all. `peer.py` now answers one question — *is this name taken* — and
+**refuses to hand out an address for any of them**, because a name it resolved could
+belong to any session holding that name, including one the user started by hand.
+
+The guard is still only worth anything if it sees a name that is **in use but
+unreachable** — registered under a live pid, with no messaging socket. Build that
+session rather than hunting the machine for one:
 
 ```bash
 CLPID="<the session pid check 0b printed>"
@@ -373,9 +382,9 @@ printf '{"pid":1,"name":"smoke-victim-probe","cwd":"/","sessionId":"fixture-only
 P="<plugin root>/skills/spawn-agent/lib/peer.py"
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/fixture-profile"
-CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe name; echo "  name    exit=$?"
-CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe;      echo "  address exit=$?"
-CLAUDE_CONFIG_DIR="$D" python3 "$P" no-such-session-xyz name; echo "  absent  exit=$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe name;    echo "  name    exit=$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$P" smoke-victim-probe address; echo "  address exit=$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$P" no-such-session-xyz name;   echo "  absent  exit=$?"
 ```
 
 PASS on exactly:
@@ -387,20 +396,24 @@ smoke-victim-probe
   absent  exit=1
 ```
 
-Measured in that form on 2026-08-12 against this `peer.py`. **The address form refusing
-a name the name form has just handed back is the whole check** — reversed, `peer.py`
-declares a name that is very much in use to be free, and the collision check in the
-spawn procedure waves a duplicate through.
+with the `address` line preceded by a refusal on stderr naming `owned.py`. **That
+refusal is the whole check.** It must fail for the *categorical* reason — this script
+does not serve addresses — and not merely because this fixture happens to lack a
+socket. Reversed, one `peer.py <name>` turns any name off `ListAgents` into a live
+`uds:` target, which is the reported incident in a single command.
 
-Two properties of `peer.py` make that fixture hermetic, and both are load-bearing:
-
-- **`find()` reads `CLAUDE_CONFIG_DIR` and falls back to `~/.claude` only when it is
-  unset.** Pointing it at the fixture directory means the real registry is never
-  searched, so `smoke-victim-probe` cannot collide with a real session name or be
-  confused for one by a later run.
+One property of `peer.py` makes that fixture work, and it is load-bearing:
 - **`alive()` returns `True` on `PermissionError` from `os.kill(pid, 0)`**, and a
   non-root user signalling **pid 1** (launchd on macOS) raises exactly that. So pid 1
   is permanently "alive" with no race against a real process and no cleanup dependency.
+
+**`CLAUDE_CONFIG_DIR` no longer makes this hermetic, and you should not expect it to.**
+`roots()` puts that variable first and then appends `~/.claude` and every `~/.claude-*`,
+because the name namespace is machine-wide while discovery is not — measured 2026-08-13,
+15 live sessions across two profiles of which the default profile could see 9, so a
+single-profile check calls a name free that another profile is holding. The fixture
+still works because nothing real is called `smoke-victim-probe`; it is isolated by its
+name, not by its profile.
 
 **A sentinel pid will not do here, and it fails in the direction you would not guess.**
 `alive()` rejects non-positive pids *before* it signals anything — `pid <= 0` returns
@@ -456,6 +469,83 @@ for d in roots:
         sock += bool(r.get("messagingSocketPath"))
 print("%d live sessions, %d with a socket, %d without" % (live, sock, live - sock))'
 ```
+
+## 3b. Ownership — `owned.py` must refuse a session it did not mint — *core*
+
+Checks 2 and 3 prove a name can be seen. This one proves a name is **not enough**, which
+is the guarantee the whole skill now rests on. Hermetic: one fixture profile, one fixture
+ledger, nothing spawned.
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+mkdir -p "$D/sessions"
+# pid 1 is permanently "alive" for the reason check 3 gives. Two records, same name,
+# to make the ambiguous case reachable without racing anything real.
+printf '{"pid":1,"name":"smoke-own-probe","cwd":"/","sessionId":"11111111-1111-1111-1111-111111111111","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/1.json"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/led-ok.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t99999999-9999-9999-9999-999999999999\t\n'   > "$D/led-foreign.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t\t\n'                                       > "$D/led-legacy.tsv"
+```
+
+```bash
+O="<plugin root>/skills/spawn-agent/lib/owned.py"
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+for f in ok foreign legacy; do
+  CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
+  echo "  $f -> exit=$?"
+done
+CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/led-ok.tsv" no-row-for-this >/dev/null 2>&1; echo "  norow -> exit=$?"
+```
+
+PASS on exactly:
+
+```
+  ok      -> exit=0
+  foreign -> exit=3
+  legacy  -> exit=3
+  norow   -> exit=2
+```
+
+**`foreign` is the reported incident, reduced to one line.** The name matches a live
+session; the minted id does not. Exit 0 there would mean the ledger trusts a name, and
+the run would drive a session it never started.
+
+**`legacy` must fail the same way, not more softly.** That row is the four-column format
+every earlier version of this skill wrote, widened with empty fields — no minted id, so
+nothing to check, so no ownership. A silent pass there re-opens the bug for every ledger
+already on disk.
+
+**And the `ok` row is the regression that matters most.** It must exit 0 *and* print a
+`uds:` address, because the reply path depends on it: if ownership is too strict, every
+worker becomes unaddressable and the skill stops working rather than stops hijacking.
+
+### The enforcement layer, if this machine has one
+
+A `PreToolUse` hook on `SendMessage` may be gating sends independently of the skill.
+It is not part of the plugin and its absence is not a FAIL — but when it is present it
+must fire, or the run is trusting prose alone:
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+[ -x ~/.claude/hooks/spawn-agent-guard.py ] || echo "  (no guard installed -- skip, not a FAIL)"
+printf '{"session_id":"00000000-0000-0000-0000-000000000000","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
+  | CLAUDE_CONFIG_DIR="$D" python3 ~/.claude/hooks/spawn-agent-guard.py; echo "  hook exit=$?"
+```
+
+PASS when it prints a `permissionDecision` of `ask`. A hook that prints `allow` is a
+FAIL — it would wave through exactly the send the guard exists to catch.
+
+**`CLAUDE_CONFIG_DIR` is mandatory on that line, and leaving it off passes for the wrong
+reason.** The guard only interposes on targets it can resolve to a *live registry
+record*; everything else it deliberately lets by, because an unresolvable `to` is an
+in-process subagent or a teammate and gating those would put a prompt in front of
+ordinary work. Without the fixture profile on the path, pid 1 resolves to nothing, the
+guard passes through, and the check prints an empty line that reads exactly like "no
+hook installed". Verified 2026-08-13 in both forms: silent without the variable, `ask`
+with it.
 
 ## 4. The prune, in both directions — *core*
 
@@ -705,20 +795,22 @@ dollar-plus-digit is substituted.
 
 ```bash
 P="<plugin root>/skills/spawn-agent/lib/peer.py"
-python3 "$P" "<NAME>" name; echo "registry exit=$?"
+python3 "$P" "<NAME>" name; echo "registry exit=$?"  # name form only -- peer.py serves no address
 ```
 
-PASS when the ledger holds exactly one four-column row naming your worker **and** the
-registry lookup exits 1. That pair is the whole ordering guarantee: a recorded slot
+PASS when the ledger holds exactly one **six-column** row naming your worker — with a
+minted uuid in column 5 and column 6 still empty — **and** the registry lookup exits 1. That pair is the whole ordering guarantee: a recorded slot
 that is not yet running anything. Reversed, the window between the two holds a live
 agent no ledger knows about, and a turn that dies inside it orphans the slot forever.
 
 `awk: can't open file …` means no row was written at all — the launch happened without
 a ledger, or the path is not the one the setup block built. Either is a FAIL here.
 
-Two blank-looking fields in that row is a FAIL, not cosmetics — tab is IFS whitespace,
-so the cleanup loop's `read` shifts every column left and the row can never be offered
-for closing.
+Two blank-looking fields in **columns 2 and 3** is a FAIL, not cosmetics — tab is IFS
+whitespace, so the cleanup loop's `read` shifts every column left and the row can never
+be offered for closing. Column 6 *is* legitimately empty at this point: the pid is
+pinned at readiness, in 7d. Column 5 must **not** be empty — an absent minted id is a
+row that can never prove ownership, and `owned.py` exits 3 on it forever.
 
 Check what columns 2 and 3 hold for your host: cmux writes a surface uuid and a pane
 uuid; herdr writes a pane id (`w9:p3`) and a terminal id (`term_…`).
@@ -748,15 +840,23 @@ Run the skill's readiness loop, but bound it at 20 rather than 60 — you are ex
 a gate here, not hoping to avoid one:
 
 ```bash
-P="<plugin root>/skills/spawn-agent/lib/peer.py"
+O="<plugin root>/skills/spawn-agent/lib/owned.py"
+L="<the ledger path the setup block built>"
 n=0
-until python3 "$P" "<NAME>" >/dev/null; do
+until python3 "$O" "$L" "<NAME>" >/dev/null; do
+  s=$?
+  [ "$s" -ge 3 ] && { echo "STOP exit=$s -- that name is not our worker"; break; }
   sleep 1
   n=$((n+1))
   [ "$n" -gt 20 ] && { echo "not addressable after ${n}s"; break; }
 done
 echo "loop ended at n=$n"
 ```
+
+**Exit 3 or 4 here is a FAIL of the run, not of the check.** They mean a live session
+answers to your worker's name and is not the session you minted (3), or that more than
+one answers (4). Both mean the ledger row and the machine disagree about who your
+worker is, and neither improves by waiting.
 
 A worker that never registers costs 21.8 s of wall clock there, measured — so the
 bound is the difference between a check and a stall.
@@ -826,7 +926,8 @@ Then re-run the readiness loop, and verify where it landed. Compare the two as
 **paths, not as strings**:
 
 ```bash
-P="<plugin root>/skills/spawn-agent/lib/peer.py"
+O="<plugin root>/skills/spawn-agent/lib/owned.py"
+L="<the ledger path the setup block built>"
 CLPID="<the session pid check 0b printed>"
 REPO="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/smoke repo"
 python3 -c '
@@ -835,9 +936,9 @@ want, got = sys.argv[1], sys.argv[2]
 print("want:", want)
 print("got :", got or "(nothing)")
 if not got:
-    sys.exit("FAIL peer.py printed no cwd -- the worker is not registered")
+    sys.exit("FAIL owned.py printed no cwd -- not registered, or not ours")
 print("PASS" if os.path.exists(got) and os.path.samefile(want, got) else "FAIL")
-' "$REPO" "$(python3 "$P" "<NAME>" cwd)"
+' "$REPO" "$(python3 "$O" "$L" "<NAME>" cwd)"
 ```
 
 **Do not assert the two strings are equal.** On macOS a perfectly healthy run prints
@@ -863,9 +964,10 @@ the reply instruction spelled the way the measurements say it must be:
 ```
 
 **Every placeholder in that block is yours to fill.** `<pid>` is the worker's, from the
-address `peer.py` printed. `<your own pid>` and `<your own name>` are this session's —
-check 0b printed the pid, and the address is `python3 "$P" "<your own name>"` or the
-`messagingSocketPath` in your own registry record. `<the name you launched it with>` is
+address `owned.py` printed. `<your own pid>` and `<your own name>` are this session's —
+`python3 <plugin root>/skills/spawn-agent/lib/me.py` prints your name, your `uds:`
+address and your session id in one line, which is exactly the three things a worker
+cannot look up about you. `<the name you launched it with>` is
 the `-n` name you gave the worker.
 
 **That last one used to say "the name you were launched with", addressed to the worker,
@@ -1297,9 +1399,10 @@ Corroborate from the registry rather than trusting the line alone — this pair 
 decides whether `ATTN` means what the skill claims:
 
 ```bash
-P="<plugin root>/skills/spawn-agent/lib/peer.py"
-python3 "$P" "<NAME2>" status
-python3 "$P" "<NAME2>" waitingFor
+O="<plugin root>/skills/spawn-agent/lib/owned.py"
+L="<the ledger path the setup block built>"
+python3 "$O" "$L" "<NAME2>" status
+python3 "$O" "$L" "<NAME2>" waitingFor
 ```
 
 PASS on `waiting`, and a `waitingFor` that does **not** contain the word `input`. That
@@ -1310,7 +1413,7 @@ the wrong branch all along.
 
 **Read `status` first, and interpret `waitingFor` only against a `status` that exited
 0.** `waitingFor` is absent from the record whenever the worker is not blocked, and
-`peer.py` exits 1 on an absent field — but it also exits 1 for a worker that does not
+`owned.py` exits 1 on an absent field — but it also exits 1 for a worker that does not
 exist, and the two are **byte-identical**. Measured 2026-08-12:
 
 | | `status` | `waitingFor` |
@@ -1484,14 +1587,15 @@ herdr pane get "<l1>"; echo "exit=$?  (want: pane_not_found, exit=1)"
    three closes measured. On herdr `tab close` returns a bare `{"type":"ok"}` with no
    id to misread, which is a smaller trap but the same discipline.
 
-4. **Delete the ledger file**, not just its rows, and the scratch fixtures:
+4. **Delete the ledger file and its `.owner` sidecar**, not just the rows, and the scratch fixtures. The sidecar is the one a teardown misses — it is not the ledger, so it survives a cleanup that looks complete:
 
 ```bash
 CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
 CLPID="<the session pid check 0b printed>"
 [ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot -- the real ledger would survive this"; exit 1; }
 [ -n "$CLPID" ] || { echo "FAIL empty CLPID -- this would rm -rf every run's scratch"; exit 1; }
-rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
+      "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"
 rm -rf "${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 ls "${TMPDIR:-/tmp}/spawn-agent/" 2>/dev/null; echo "  (your slot's .tsv must be gone)"
 ```

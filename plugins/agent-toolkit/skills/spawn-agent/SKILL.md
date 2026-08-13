@@ -8,9 +8,16 @@ description: Spawn Claude Code agents into visible terminal surfaces — cmux su
 Run work in separate Claude Code sessions that live in visible places the user can
 watch and take over by clicking.
 
-**The join key is the name you give at launch** (`claude -n <name>`). One string is
-the tab title, the peer-registry key and the message address at once. Nothing has
-to be pre-assigned — no `--session-id`, no `uuidgen`.
+**The name you give at launch** (`claude -n <name>`) is the tab title and the thing
+a human reads. **It is not the join key, and treating it as one is how a run ends
+up driving a session it never started** — names are freed when a session exits,
+re-usable by anyone, auto-assigned to hand-started sessions, and unique only among
+the live ones at a single instant.
+
+**The join key is a session id you mint yourself** and pass as
+`claude --session-id <uuid>`. A human never passes that flag, so the id cannot
+select a session you did not start. The name rides along for the humans; the uuid
+is what every lookup actually resolves through.
 
 **This file contains no terminal commands, and that is deliberate.** Everything
 below is true of Claude Code regardless of which terminal you are in. The commands
@@ -102,8 +109,8 @@ substrate — readable from `Bash`, no event bus, **no dependency on any termina
 ```
 
 Verified 2026-08-12 that this is genuinely host-independent — the same unmodified
-`peer.py` resolved a worker's address, status, cwd and sessionId for a worker
-running in a herdr pane exactly as it does for one in a cmux surface.
+lookup resolved a worker's address, status, cwd and sessionId for a worker running
+in a herdr pane exactly as it does for one in a cmux surface.
 
 Three properties of it are load-bearing:
 
@@ -125,20 +132,35 @@ Three properties of it are load-bearing:
   v2.1.224 register without one; they show up in `claude agents --json` and can
   never be sent to. Measured: 8 sessions in the registry, 1 reachable.
 
-Look a worker up by name with this plugin's own `peer.py`. It prints one field of
-the live session with that name, or nothing at all (exit 1) when there is no live
-session by that name — which is the same answer for "never started", "already
-exited" and "killed":
+Look a worker up with this plugin's own `owned.py`. It reads the same registry, but
+it resolves through **your ledger row** rather than through the name, so it can only
+ever hand you a session this run started:
 
 ```bash
-P="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/peer.py"
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
 
-python3 "$P" review-api              # uds:/tmp/cc-socks/30580.sock  — the SendMessage `to`
-python3 "$P" review-api status       # idle | busy | waiting | shell | …
-python3 "$P" review-api waitingFor   # input needed | permission prompt
-python3 "$P" review-api sessionId    # for `claude --resume`, unreadable once it exits
-python3 "$P" review-api cwd          # what the worker actually got, not what you intended
+python3 "$O" "$LEDGER" review-api              # uds:/tmp/cc-socks/30580.sock — the SendMessage `to`
+python3 "$O" "$LEDGER" review-api status       # idle | busy | waiting | shell | …
+python3 "$O" "$LEDGER" review-api waitingFor   # input needed | permission prompt
+python3 "$O" "$LEDGER" review-api sessionId    # for `claude --resume`, unreadable once it exits
+python3 "$O" "$LEDGER" review-api cwd          # what the worker actually got, not what you intended
 ```
+
+**Its exit codes carry the part that matters, so read them:**
+
+| exit | meaning | what to do |
+| --- | --- | --- |
+| 0 | ours, field printed | proceed |
+| 1 | no live session for this row — never started, exited, or killed | the usual absence; retry or report `GONE` |
+| 3 | a live session holds this name and **it is not ours** | **stop.** Never send, key, read or close it |
+| 4 | more than one live session answers | **stop.** Nothing can say which is meant |
+
+Exit 1 is the only one that improves by waiting. Treating 3 or 4 as "not ready yet"
+turns a stop signal into a spin, and then into a send to a stranger.
+
+`peer.py` still exists and still takes a bare name, but it now answers only the
+pre-launch question — "is this name already taken" — and it sweeps every profile to
+do it.
 
 **It is a file, not a shell function, and that is the point.** Every `Bash` call
 runs in a **fresh shell**: a function defined in one call does not exist in the
@@ -166,8 +188,91 @@ send never whitelists the bare name**:
 So a run that mixes the two forms hits the ref wall at an arbitrary moment.
 Address by `uds:` every time and the question never arises.
 
-`ListAgents` is still the right tool for *discovering* sessions this run did not
-spawn. It is the wrong tool for talking to ones it did.
+`ListAgents` enumerates sessions, and **enumerating one is not permission to touch
+it** — see the next section, which is the rule that governs every channel in this
+file.
+
+## Only ever touch what this run minted
+
+**A session this run did not start is the user's, whatever it looks like.** Not a
+resource to reuse, not an idle worker to re-task, not a tab to tidy up. This
+applies to *every* channel, not just the closing one: no `SendMessage`, no
+keystrokes, no screen read, no close.
+
+That has to be said because the opposite is so easy and so quiet. `ListAgents`
+returns every live session on the machine **with its ref already resolved**:
+
+```
+finding-a-job-88 [44991b]  ·  interactive  ·  busy  ·  started 2m ago
+```
+
+One `SendMessage` away, and nothing about that row says a human is typing in it.
+The ref wall described above is not a safety barrier — it is a first-contact
+speed bump that `ListAgents` walks straight around. This section is the barrier.
+
+**And a name is not an identity.** It identifies a session only among the live
+ones at a single instant, and not at all over time:
+
+- A name is **freed when its session exits** and can then be taken by anyone.
+- A hand-started session **auto-names itself** `<basename-of-cwd>-<2 hex>` — a
+  256-wide space per directory, and `stock-check-app-3e` / `stock-check-app-e7`
+  were both live here at once.
+- **Discovery is profile-scoped; the namespace and `SendMessage` are not.**
+  Measured 2026-08-13: 15 live sessions across two profiles, of which the default
+  profile could see 9. A name checked in one profile can be in use in the other,
+  and a `uds:` send crosses profiles fine.
+
+So ownership is a thing you **mint**, not a thing you look up:
+
+| | how |
+| --- | --- |
+| establish it | `claude --session-id <uuid you generated>` at launch |
+| record it | the ledger row, **before** the launch |
+| hold it | the pid, captured at readiness, in the same row |
+| check it | `owned.py`, never `peer.py`, for every post-launch lookup |
+
+A human never passes `--session-id`, so a minted uuid can never select a
+hand-started session. That is the whole guarantee, and it is why the mint is not
+optional.
+
+### A slot is not a session — check the occupant before you write to a slot
+
+`owned.py` answers a question about a **session**. Every command that writes to a
+terminal — the host's `send`, its keystroke channel, its screen read, its close —
+takes a **slot**, consults no registry, and cannot tell you who is sitting in it.
+
+Those come apart on the most ordinary sequence there is, because a slot is durable
+*by design*:
+
+1. the run spawns `review-api` into slot **U**, and records U in the row;
+2. the worker exits — the slot survives, now a bare shell;
+3. **the user types `claude` in that tab**;
+4. U still resolves, so every locator-addressed command still "works".
+
+At step 4 `owned.py` correctly reports our worker gone — and that is what makes it
+dangerous. The cleanup section reads `registry=gone` as *"died mid-stage, lead with
+those"*, offers the slot, and the close **kills the session the user just started**.
+The same stale locator drives the keystrokes that answer a blocked worker.
+
+So before any `send`, keystroke, screen read or close, ask who is in the slot. The
+join is the controlling terminal — the host names the tty, `ps` names the process:
+
+```bash
+OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+python3 "$OC" "<the slot's tty>" "$LEDGER" "$NAME" || exit 1   # exit 3 = a stranger is in there
+```
+
+Exit 0 means the slot holds your worker **or holds no `claude` at all** — an empty
+slot is still yours to tidy up. Exit 3 means a `claude` you did not start is living
+there, and every one of those four commands must stop.
+
+**A `PreToolUse` hook may be enforcing this independently of you.** If a
+`SendMessage` comes back needing confirmation with a reason like *"'X' is a live
+Claude Code session started by hand"*, that is the guard, and it is telling you
+the address is not yours. **Do not answer it by re-sending, by trying the bare
+name, or by asking the user to approve it** — resolve the address through
+`owned.py` and find out why your row does not match. Confirm only when the user
+named that specific session in this turn.
 
 ## Anchor on yourself
 
@@ -244,15 +349,39 @@ mkdir -p "$(dirname "$LEDGER")"
 touch "$LEDGER"   # so the first run's awk/wc don't print "no such file" to stderr
 
 # Refuse a ledger that is not this format. touch neither truncates nor inspects.
-awk -F'\t' 'NF && NF!=4 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$LEDGER" \
+awk -F'\t' 'NF && NF!=6 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$LEDGER" \
   || { echo "stale/foreign ledger at $LEDGER -- rm it or move it aside before spawning" >&2; exit 1; }
 
-# The lookup helper this file uses. It is a script, not a function, because a
-# function does not survive to the next Bash call (see peer.py above).
-# REPEAT THIS LINE at the top of every later call that uses $P -- variables die
-# with the shell exactly like functions do.
-P="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/peer.py"
+# Claim the ledger -- but never by overwriting somebody else's claim. A slot
+# outlives any one claude, so the next session to start here inherits the rows,
+# and rewriting .owner over them would hand this session every worker the
+# PREVIOUS one spawned. Refuse instead, and say which file is in the way.
+MINE=$(python3 "${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/me.py" sessionId) \
+  || { echo "cannot identify myself; not spawning" >&2; exit 1; }
+OWNER_FILE="${LEDGER%.tsv}.owner"
+if [ -s "$OWNER_FILE" ] && [ "$(cat "$OWNER_FILE")" != "$MINE" ]; then
+  if [ -s "$LEDGER" ]; then
+    echo "ledger $LEDGER belongs to another run ($(cat "$OWNER_FILE")); move it aside" >&2
+    exit 1
+  fi
+  : > "$LEDGER"          # no rows to inherit, so the claim is free to take
+fi
+printf '%s' "$MINE" > "$OWNER_FILE"
+
+# The two lookup helpers. Scripts, not functions, because a function does not
+# survive to the next Bash call (see peer.py above). REPEAT THESE LINES at the top
+# of every later call that uses them -- variables die with the shell exactly like
+# functions do.
+P="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/peer.py"    # name taken? (pre-launch only)
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"   # is it OURS? (everything after)
 ```
+
+**`$P` before the launch, `$O` for the entire rest of the run.** They answer
+different questions and only one of them is safe to act on: `peer.py` asks "is any
+live session using this name", which is the right question exactly once, before you
+take a name; `owned.py` asks "is the live session behind this ledger row the one we
+started", which is the only question worth asking afterwards. Reaching for `$P`
+after launch is how a run ends up driving a session it does not own.
 
 `$P` is used as shorthand throughout the rest of this file, and **it is not set for
 you** — a `Bash` call that uses it without assigning it first runs `python3 ""` and
@@ -263,10 +392,10 @@ out in full instead.
 
 ### The ledger
 
-Four tab-separated columns, and the core only ever interprets two of them:
+Six tab-separated columns, plus a one-line `.owner` sidecar beside it:
 
 ```
-name <tab> loc1 <tab> loc2 <tab> state
+name <tab> loc1 <tab> loc2 <tab> state <tab> session_id <tab> pid
 ```
 
 - **column 1 is the name** — the watcher reads exactly this field.
@@ -290,8 +419,36 @@ name <tab> loc1 <tab> loc2 <tab> state
   why `$c`, `$i` and `$LEDGER` are all safe. This is why you will not see a bare
   dollar-digit anywhere in this skill, including in prose warning you about it.
 
-The ledger is keyed by the caller's slot, so it is exactly "the agents this run
-spawned" — the only slots you are ever allowed to close.
+- **column 5 is the minted session id** — the uuid *you generated* and passed to
+  `claude --session-id`, written **before** the launch. It is what makes a row a
+  claim of ownership rather than a note about a name.
+- **column 6 is the pid**, captured at readiness once that id has identified the
+  session, and it is what the row is joined on from then on.
+
+**Two identifiers, because each covers the other's failure, and both failures were
+measured 2026-08-13.** `--session-id` *reserves* nothing: two live interactive
+sessions were started with the same minted uuid and **both registered, neither
+errored**. And `/clear` **rotates the session id in place** — same pid, same name,
+same socket, a fresh id within 400 ms. Since this whole skill exists to put workers
+in visible slots a human can click into, a user typing `/clear` in a worker tab is
+ordinary use, and a pin on the id alone would report that live worker as dead
+forever. So the id establishes the binding and the pid holds it. `owned.py`
+implements exactly that and refuses when more than one live session answers.
+
+Two more properties of the mint, same measurements:
+
+- **`--session-id ""` exits 0 and starts with a random uuid.** A *malformed* id
+  fails loudly (`Invalid session ID`, exit 1); an empty one does not. So an empty
+  `uuidgen` silently produces a row naming a uuid no session will ever carry, and
+  every later lookup reports the worker dead. Guard the value before you use it.
+- **Any 8-4-4-4-12 hex string is accepted and its case is preserved**, so compare
+  ids case-insensitively.
+
+The `.owner` sidecar holds **your own** session id. Without it the ledger says
+which workers exist but not whose they are — and a slot outlives any one `claude`,
+so the next session to start in this slot inherits the rows. The sidecar is what
+stops it inheriting the authority too, and it is what lets a worker's reply be
+recognised as a reply rather than as a send to a stranger.
 
 **That same key is why the format check is not paranoia.** A slot id outlives any
 one `claude` process, so quitting and relaunching in the same place reopens the
@@ -314,42 +471,63 @@ NAME=review-api                      # also the tab title the user reads
 python3 "$P" "$NAME" name >/dev/null && { echo "a live session is already named $NAME" >&2; exit 1; }
 ```
 
-**Ask for `name`, not for the default address field.** `peer.py` exits 1 both for
-"no session by that name" and for "that session has no `messagingSocketPath`", and
-the second case is the common one: measured on this machine, 7 live sessions, all 7
-named, **6 with no socket** (all on a CLI older than v2.1.224). Checked by address,
-the guard calls 6 of the 7 names in use free — and hands the collision it was built
-to catch straight through. `name` is present for every registered session.
+**Ask for `name`, and note that `peer.py` will not sell you anything else.** It
+refuses `address` outright — a socket resolved from a name could belong to whatever
+session holds that name, including the user's, and handing one back is the reported
+incident in a single command. The refusal also closes an older bug in this very
+check: asking for the address made the guard exit 1 for a session that merely had no
+`messagingSocketPath`, and measured on this machine that was **6 of 7 live sessions**
+(all on a CLI older than v2.1.224), so it called 6 names in use free and waved the
+collision straight through. `name` is present for every registered session.
+
+It sweeps **every profile**, which matters because the namespace is machine-wide
+while discovery is not: 15 live sessions across two profiles here, 9 visible from the
+default one. A single-profile check calls a name free that another profile holds, and
+then two live sessions share it.
 
 Keep the name within `[a-z][a-z0-9_-]{0,31}`. That is herdr's constraint on agent
-names, not Claude Code's, but a name that satisfies it works on every host and can
-be used unchanged as both the herdr agent name and the `claude -n` name — which is
-what keeps one string as the single join key.
+names, not Claude Code's, but a name that satisfies it works on every host — and on
+herdr you must **also** check herdr's own agent namespace, which `peer.py` cannot
+see; `hosts/herdr.md` §4 has that check.
 
 Then, **in this order**:
 
 1. **Place the slot** — the host file's placement section. It hands back the two
    locators the ledger row needs.
-2. **Write the ledger row, before the worker is launched.**
+2. **Mint a session id, then write the ledger row — both before the launch.**
 3. **Arm the watcher** (see "Watch" below), with that row on disk and *before* the
    task is sent.
-4. **Launch** `claude -n $NAME` in `$REPO` — the host file's launch section.
-5. **Wait for it to become addressable.**
+4. **Launch** `claude -n $NAME --session-id $SID` in `$REPO` — the host file's
+   launch section.
+5. **Wait for it to become addressable, then pin its pid into the row.**
 6. **Send the task** by `SendMessage`.
 
 ```bash
-# 2. Resolve, guard, then write -- never inline the resolution into the printf.
+# 2. Mint first, and guard it: an EMPTY --session-id exits 0 with a random uuid,
+# so a blank here is not a loud failure, it is a worker you can never resolve.
+SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+case "$SID" in
+  [0-9a-f]*-*-*-*-*) ;;
+  *) echo "uuidgen produced '$SID'; not launching" >&2; exit 1 ;;
+esac
+
+# Resolve, guard, then write -- never inline the resolution into the printf.
 L1="<host locator 1>"
 L2="<host locator 2>"
 [ -n "$L1" ] && [ -n "$L2" ] || { echo "could not resolve the new slot; not launching" >&2; exit 1; }
-printf '%s\t%s\t%s\t%s\n' "$NAME" "$L1" "$L2" spawned >> "$LEDGER"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$NAME" "$L1" "$L2" spawned "$SID" "" >> "$LEDGER"
 ```
+
+**The minted id goes down before the launch, not after it.** That ordering is what
+makes the row a claim rather than an observation: written afterwards, it would
+record whatever session happened to be answering by then, which is precisely the
+thing this skill must not trust.
 
 **Resolve, guard, then write.** A host resolver prints nothing and exits non-zero
 when a slot will not resolve, and command substitution throws that status away, so
 the inline form writes the row anyway with two empty fields. It is worse than a
 blank-looking row: tab is IFS whitespace, so the cleanup loop's
-`IFS=$'\t' read -r name l1 l2 state` collapses the adjacent tabs and shifts every
+`IFS=$'\t' read -r name l1 l2 state sid pid` collapses the adjacent tabs and shifts every
 column left — `l1` receives the literal `spawned`, the row then fails to resolve,
 and it is dropped as "already closed". A real open slot that can never be offered
 for closing. (Reproduced identically in bash; this is POSIX field splitting, not a
@@ -373,22 +551,43 @@ doing is the difference between a watcher and a post-mortem.
 ### Readiness is registration, not "the process started"
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
 n=0
-until python3 "$P" "$NAME" >/dev/null; do
+until python3 "$O" "$LEDGER" "$NAME" >/dev/null; do
+  s=$?
+  [ "$s" -ge 3 ] && { echo "$NAME resolves to a session this run did not spawn -- stopping" >&2; exit 1; }
   sleep 1
   n=$((n+1))
   [ "$n" -gt 60 ] && { echo "$NAME never became addressable -- read its screen" >&2; break; }
 done
+
+# Pin the pid into the row: from here on the row is held by the process, not by
+# the id, so a user typing /clear in the worker's tab does not disown it.
+PID=$(python3 "$O" "$LEDGER" "$NAME" pid)
+[ -n "$PID" ] && python3 - "$LEDGER" "$NAME" "$PID" <<'PY'
+import sys
+led, name, pid = sys.argv[1:4]
+rows = [l.rstrip("\n").split("\t") for l in open(led)]
+for r in rows:
+    if r and r[0] == name and len(r) >= 6:
+        r[5] = pid
+open(led, "w").write("".join("\t".join(r) + "\n" for r in rows if r != [""]))
+PY
 ```
 
 That is the readiness signal, and it is stricter than "the process started": it
-means registered *and* holding an inbox socket, which is exactly the precondition
-for the `SendMessage` that follows.
+means registered, holding an inbox socket, **and carrying the id we minted** —
+exactly the precondition for the `SendMessage` that follows.
 
-**This loop asks for the default address field on purpose — do not "unify" it with
-the collision check above.** Readiness is "registered *and* holding a socket";
-collision is "the name exists at all". Two opposite predicates that happen to share
-one script, and a check written to answer both would be wrong in one of them.
+**Exit 3 or 4 is a stop, not a slower yes.** They mean a live session answers to
+this name and it is not ours (3), or that more than one does (4). Neither improves
+by waiting, and both are cases where continuing means driving somebody else's
+session — so the loop breaks out rather than spinning down its timeout.
+
+**Do not "unify" this with the collision check above.** That one asks whether the
+name is taken, in order to *avoid* a session; this one asks whether the session is
+ours, in order to *use* it. Opposite predicates, different scripts, and a check
+written to answer both would be wrong in one of them.
 
 **Bound that loop.** Unbounded, a launch that never started `claude` does not fail,
 it spins until the harness SIGKILLs the whole call (`exit 143`), with the ledger row
@@ -432,7 +631,7 @@ dialog names the directory it is asking about.
 
 ### Send the task
 
-Only now, as a `SendMessage` to the address `python3 "$P" "$NAME"` printed:
+Only now, as a `SendMessage` to the address `python3 "$O" "$LEDGER" "$NAME"` printed:
 
 ```
 {"to": "uds:/tmp/cc-socks/30580.sock",
@@ -534,86 +733,29 @@ Your name and your address are both things the worker cannot look up about you, 
 both from the same record and put both in the task:
 
 ```bash
-ME=$(python3 - $$ <<'PY'
-import json, os, subprocess, sys
-
-def ps(fmt, pid):
-    r = subprocess.run(["ps", "-o", fmt, "-p", str(pid)], capture_output=True, text=True)
-    return r.stdout.strip()
-
-pid = int(sys.argv[1])                     # walk up to the claude hosting this shell
-for _ in range(8):
-    argv0 = (ps("command=", pid).split() or [""])[0]
-    if os.path.basename(argv0).startswith("claude"):
-        break
-    parent = ps("ppid=", pid)
-    if not parent or int(parent) <= 1:
-        sys.exit("no claude ancestor above pid %s" % sys.argv[1])
-    pid = int(parent)
-else:
-    sys.exit("no claude ancestor within 8 levels of pid %s" % sys.argv[1])
-
-roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [os.path.expanduser('~/.claude')]
-for root in roots:
-    try:
-        r = json.load(open(os.path.join(root, 'sessions', '%d.json' % pid)))
-    except (OSError, ValueError):
-        continue
-    if not r.get('messagingSocketPath'):
-        sys.exit("session %d is registered without a messaging socket" % pid)
-    print(r.get('name', ''), 'uds:' + r['messagingSocketPath'])
-    break
-else:
-    sys.exit("no session record for claude pid %d under %s" % (pid, ':'.join(roots)))
-PY
-)
+ME=$(python3 "${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/me.py")
 [ -n "$ME" ] || { echo "cannot resolve my own address -- do not send a task that asks for a reply" >&2; exit 1; }
+# tab-separated: <name> <uds:address> <sessionId>
 ```
 
-**It walks the process tree; it does not take the parent of the shell.** That is the
-same walk as the smoke test's staleness gate, and it is here for the same reason: the
-naive `ps -o ppid= -p` form is right only when `claude` is the *immediate* parent of
-the shell your `Bash` call got. Put any wrapper in between and it names the wrapper.
-Measured 2026-08-12 in a cmux surface, session `fixer-b2`, claude pid 27957:
+**Why a script rather than three lines of inline shell.** Everything that makes this
+correct is a measured failure it has to avoid, and all of it now lives in `me.py`'s own
+docstring: it walks the process tree instead of taking the parent of the shell (the
+naive `ps -o ppid=` form names the wrapper the moment there is one, measured at zero,
+one and two extra shell levels); it refuses rather than printing an empty string,
+because `sessions/<pid>.json` is keyed by pid and pids are recycled into exactly the
+range wrapper shells are born in — the old inline form handed pid 19143 printed
+`bin-09 uds:/tmp/cc-socks/19143.sock`, a complete, plausible, wrong answer naming a
+live session belonging to somebody else's run; and it honours every colon-separated
+segment of `CLAUDE_CONFIG_DIR`, since a second profile really does exist on this
+machine.
 
-```
-direct              parent of the shell is 27957 -> …/claude    ME=[fixer-b2 uds:/tmp/cc-socks/27957.sock]
-through one zsh -c  parent of the shell is 36470 -> /bin/zsh    ME=[]
-the walk, wrapped   resolved claude pid 27957                   ME=[fixer-b2 uds:/tmp/cc-socks/27957.sock]
-```
+**The `[ -n "$ME" ]` line is what turns a refusal into a stop** rather than a task sent
+with an empty address in it — which would send the worker back to addressing you by
+name, the exact ref wall the literal address exists to prevent.
 
-The walk returned that same answer at zero, one and two extra shell levels.
-
-**An empty answer here is no longer a missing label — it is a missing address.** This
-snippet used to return only the human-readable name, so a blank one cost a nicety. It
-now carries the `uds:` string the whole reply instruction above is built on, and a
-supervisor holding no address falls back to the only other identifier it has: the
-worker's name. That is precisely the ref wall the literal address exists to prevent, so
-the failure reintroduces the bug two sections up rather than degrading gracefully.
-
-**And empty is the good failure.** `sessions/<pid>.json` is keyed by pid, and pids are
-recycled into exactly the range wrapper shells are born in — so a wrapper whose pid
-happens to match some *other* live session's record resolves to that session, in full.
-Measured 2026-08-12: the old form handed pid 19143 printed
-`bin-09 uds:/tmp/cc-socks/19143.sock` — a complete, plausible, wrong answer naming a
-live session belonging to somebody else's run. A worker given it sends its findings to
-a stranger and nothing anywhere reports a fault. The walk cannot produce that, because
-it only ever reads the record of a pid it has confirmed is a `claude`.
-
-So **every branch exits non-zero with a message on stderr** rather than printing an
-empty string, and the `[ -n "$ME" ]` line is what turns that into a stop instead of a
-task sent with an empty address in it. The doubled `$` in `python3 - $$` is the shell's
-own pid and is invariant inside command substitution, so the walk starts where you think
-it does; do not replace it with a captured parent.
-
-It honours `CLAUDE_CONFIG_DIR` rather than hardcoding `~/.claude` — **every
-colon-separated segment of it, in order, exactly as `peer.py` and the watcher do**, so
-all three agree on where a session may live. See "Several config profiles" below, and
-note that a second profile really does exist on this machine, so the hardcoded form
-returns an empty name for every session in it, and reading only the first segment
-returns an empty name whenever the caller's own profile is the second one. It refuses a
-session registered without a `messagingSocketPath` for the same reason the collision
-check does — that record cannot be replied to at all (see the registry section above).
+**The third field is the one the ledger needs.** `me.py sessionId` is what the setup
+block wrote into `.owner`, and it is why a worker's reply is recognised as a reply.
 
 It resolves the **hosting CLI session** by construction, since that is what the walk
 looks for: run from inside a subagent it prints the *host's* name, not the subagent's,
@@ -637,13 +779,13 @@ because the bookkeeping reads like it follows the interesting line:
   the first spends that window as an unrecorded live agent;
 - **resolve and guard both locators** before writing the row.
 
-Then send each one its task with its own `SendMessage`, once `python3 "$P" "$NAME"`
+Then send each one its task with its own `SendMessage`, once `python3 "$O" "$LEDGER" "$NAME"`
 answers for it.
 
 **Do not collect the names in a space-joined string** — `for n in $NAMES` iterates
 once in zsh, not once per worker, and you will drive one agent while believing you
 drove four. The ledger is the list: re-read it with
-`while IFS=$'\t' read -r name l1 l2 state`.
+`while IFS=$'\t' read -r name l1 l2 state sid pid`.
 
 Never infer which worker is which from tab or pane order; the hosts order new slots
 differently and one of them does not append. The name is the title, which is the
@@ -682,7 +824,7 @@ reply and it has not come.** Before re-sending, ask whether the worker is idle a
 look at what it actually did:
 
 ```bash
-python3 "$P" "$NAME" status     # idle, with no reply in hand, is the signature
+python3 "$O" "$LEDGER" "$NAME" status     # idle, with no reply in hand, is the signature
 ```
 
 The evidence is spelled differently in the two places you can look, and only one of them
@@ -1138,10 +1280,10 @@ When the last stage is reported, the ledger rows are spent slots. Resolve each
 one, then **offer** — cleanup is a proposal, never a side effect of finishing:
 
 ```bash
-while IFS=$'\t' read -r name l1 l2 state; do
+while IFS=$'\t' read -r name l1 l2 state sid pid; do
   # resolving l1 is the host file's job; empty means the user already closed it
-  reg=$(python3 "$P" "$name" status)      # empty = no live session by that name
-  sid=$(python3 "$P" "$name" sessionId)   # capture NOW; unreadable once it exits
+  reg=$(python3 "$O" "$LEDGER" "$name" status)      # empty = not ours, or not live
+  sid=$(python3 "$O" "$LEDGER" "$name" sessionId)   # capture NOW; unreadable once it exits
   echo "$name  ledger=$state  registry=${reg:-gone}  resume=${sid:-none}"
 done < "$LEDGER"
 ```
@@ -1213,7 +1355,7 @@ one `GONE` per slot and read it as benign rather than chasing it.
 1. **`TaskStop` the monitor** by the task id you were given when you armed it.
 2. **Close each slot** you spawned, as above — resolving by locator, never by the
    close command's echo.
-3. **Delete the ledger file**, not just its rows — re-deriving the slot in that same
+3. **Delete the ledger file and its `.owner` sidecar**, not just the rows — re-deriving the slot in that same
    call, since an empty `$CALLER_SLOT` deletes `…/spawn-agent/.tsv`, reports success,
    and leaves the real ledger exactly where it was:
 
@@ -1221,8 +1363,16 @@ one `GONE` per slot and read it as benign rather than chasing it.
 CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
 CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
 [ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- the real ledger would survive this"; exit 1; }
-rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
+      "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"
 ```
+
+   **Both files, and the sidecar is the one that is easy to forget** — it is not the
+   ledger, so "delete the ledger" does not obviously cover it, and it survives a
+   teardown that looks complete. A stale `.owner` naming a dead session is not
+   dangerous (the setup block reclaims one whose ledger has no rows), but it leaves
+   the next run in this slot one file away from refusing to start. Caught by a live
+   smoke run on 2026-08-13, which had to remove it by hand.
 
    This is the
    belt-and-braces step, and what it buys is *bounded noise*, not silence. A watcher
@@ -1284,9 +1434,17 @@ which is the one failure this whole section exists to prevent.
 - **Decide the host by precedence, before anything else.** `HERDR_ENV=1` wins over
   a present `CMUX_SURFACE_ID`, because inside herdr that variable is live, valid,
   wrong, and identical for every pane on the machine.
-- **The name is the key.** `claude -n <name>` at launch, unique among live
-  sessions, `[a-z][a-z0-9_-]{0,31}` so it works on every host, and every lookup
-  afterwards goes through it.
+- **Only ever touch what this run minted.** No message, no keystroke, no screen
+  read, no close against a session that is not in your ledger under a session id
+  you generated. `ListAgents` enumerating one is not permission to use it; a
+  session you did not start is the user's, however idle it looks.
+- **The key is the minted session id, not the name.** `claude -n <name>
+  --session-id <uuid>` at launch: the name is the tab title, the uuid is the join
+  key, and every lookup after launch goes through `owned.py` and the ledger row.
+  Keep the name within `[a-z][a-z0-9_-]{0,31}` so it works on every host.
+- **`owned.py` exit 3 or 4 is a stop, never a retry.** A live session answering to
+  your worker's name that is not your worker is the failure this whole design
+  exists to catch — do not wait it out, and do not fall back to `peer.py`.
 - **Address by `uds:`.** A bare name is refused on first contact and costs a round
   trip to recover the ref from; the socket path is derivable from disk and always
   works.

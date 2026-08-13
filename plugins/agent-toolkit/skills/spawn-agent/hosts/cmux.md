@@ -134,13 +134,13 @@ the only thing that distinguishes four identical terminals.
 ## 4. Launch
 
 ```bash
-cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME\n"
+cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID\n"
 ```
 
 With a permission class, on the same line:
 
 ```bash
-cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --permission-mode manual\n"
+cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --permission-mode manual\n"
 ```
 
 **The inner `\"` around `$REPO` is not decoration.** The outer quotes belong to the
@@ -177,7 +177,7 @@ which is the measurement that matters here: a warning is demonstrably not a cont
 **Verify instead of trusting:**
 
 ```bash
-python3 "$P" "$NAME" cwd        # must print $REPO
+python3 "$O" "$LEDGER" "$NAME" cwd        # must print $REPO
 ```
 
 **And the verification is self-concealing in the same way the bug is.** It has power
@@ -205,8 +205,18 @@ not choose — which is the join key. Spawn terminals.
 ## 5. Read a worker's screen
 
 ```bash
-cmux read-screen --workspace "$WS" --surface "$SURF"
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+REF=$(python3 "$S" "$l1" ref)
+[ -n "$REF" ] || { echo "that surface is gone" >&2; exit 1; }
+cmux read-screen --workspace "$WS" --surface "$REF"
 ```
+
+**Resolve `$l1` here rather than reusing `$SURF`.** `$SURF` was assigned in the
+placement call, in a different `Bash` call, and shell state does not survive one —
+so by the time you read a screen it is empty, and an empty `--surface` is the
+caller's own (see §6). A read is the least destructive of the four, which is exactly
+why it is the easiest place to acquire the habit of reading your own screen back and
+believing it is the worker's.
 
 That is the live viewport, and on this host it is **all you can ever have**. Use it for
 what a viewport answers — is a dialog open, which row carries the `❯`, did the launch
@@ -233,10 +243,44 @@ output"): count `SendMessage` `tool_use` blocks and read refusals out of the mat
 
 ## 6. Keystrokes
 
+**Resolve into a variable and refuse an empty one. Never interpolate the resolver
+straight into `--surface`.**
+
 ```bash
-cmux send-key --workspace "$WS" --surface "$(python3 "$S" "$l1" ref)" down
-cmux send-key --workspace "$WS" --surface "$(python3 "$S" "$l1" ref)" enter
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+REF=$(python3 "$S" "$l1" ref)
+[ -n "$REF" ] || { echo "that worker's surface is gone; not sending keys" >&2; exit 1; }
+python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
+cmux send-key --workspace "$WS" --surface "$REF" down
 ```
+
+**The occupant line is not belt-and-braces on top of the empty check — it catches the
+opposite failure.** `[ -n "$REF" ]` fires when the surface is *gone*. The dangerous
+case is the surface that is very much alive and no longer yours: the worker exited,
+the tab stayed, and the user started their own `claude` in it. `$REF` resolves
+perfectly, the keys land, and they land on a human. `SKILL.md`'s "A slot is not a
+session" section has the sequence; `cmux-surface.py <uuid> tty` is what makes it
+checkable here.
+
+**An empty `--surface` is not a no-op — it is your own surface.** `cmux send-key
+--help` documents `--surface <id|ref|index>   Target surface (default:
+$CMUX_SURFACE_ID)`, and an empty value takes that default just as an absent one
+does. Confirmed on the identically-documented sibling: `cmux read-screen --surface
+""` exited 0 and printed **the calling session's own screen**, no error.
+
+And empty is the resolver's *documented normal output*: `cmux-surface.py` prints
+nothing and exits 1 once a surface is gone (§2 above). So the inline form
+`--surface "$(python3 "$S" "$l1" ref)"` types `down` and then `enter` **into the
+supervisor's own Claude Code session** the moment the worker's tab is closed or its
+ledger locator is stale — arrow-down and Enter onto whatever dialog the user is
+looking at. Command substitution discards the exit status, so nothing anywhere
+reports a fault.
+
+This is the same failure §3 already warns about for `new-surface`'s flags — "a
+shell variable which came out blank hands the command an empty value and lets it
+fall back to its own default" — reached through a different command. **Every
+`--surface` and `--pane` in this file needs the value assigned and checked first.**
 
 One `send-key` per `Bash` call — the auto-mode classifier denies the compound form
 and sometimes the single form too; the single form succeeds on retry.
@@ -244,9 +288,22 @@ and sometimes the single form too; the single form succeeds on retry.
 For a slash command, text then Enter, as two calls:
 
 ```bash
-cmux send --workspace "$WS" --surface "$SURF" "/spec-write <what to write up>"
-cmux send-key --workspace "$WS" --surface "$SURF" enter
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+REF=$(python3 "$S" "$l1" ref)
+[ -n "$REF" ] || { echo "that worker's surface is gone" >&2; exit 1; }
+python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
+cmux send --workspace "$WS" --surface "$REF" "/spec-write <what to write up>"
 ```
+```bash
+cmux send-key --workspace "$WS" --surface "$REF" enter
+```
+
+**`cmux send` delivers work, so it needs the same ownership check `SendMessage`
+gets — and it will not get one for free.** A `PreToolUse` hook on `SendMessage` does
+not see this: it is a `Bash` call. So this is the channel by which a stale locator
+types a whole task into a session the run never started, with nothing anywhere
+reporting a fault. Guard it here or it is unguarded.
 
 `cmux send` is unaffected by the permission-class hold that stops messaging between
 classes.
@@ -254,9 +311,21 @@ classes.
 ## 7. Close what the run opened
 
 ```bash
+ref=$(python3 "$S" "$l1" ref)
+[ -n "$ref" ] || { echo "already gone; closing nothing" >&2; exit 0; }
+[ "$(python3 "$S" "$l1" id)" != "$CMUX_SURFACE_ID" ] || { echo "that is MY surface" >&2; exit 1; }
+python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$name" || {
+  echo "somebody else is working in that tab now; leaving it open" >&2; exit 1; }
 cmux close-surface --workspace "$WS" --surface "$ref"
 ```
 
+- **The empty-value guard is not optional here, and this is where it costs most.**
+  `cmux close-surface --help`: `--surface <id|ref|index>    Surface to close
+  (default: $CMUX_SURFACE_ID)`, and its summary adds *"Defaults to the focused
+  surface if none specified"*. Either default is a tab this run did not spawn — your
+  own, or whatever the user is reading. An empty `$ref` is the *ordinary* state on
+  this path, because empty is exactly how §2's resolver says "the user already closed
+  it", so the unguarded form turns "nothing to do" into "close the supervisor".
 - The pane disappears on its own when its last surface closes. There is no
   `close-pane`, and nothing is left to tidy once the tabs are gone.
 - **The `OK surface:N` it prints back is not the surface you closed.** The number is
