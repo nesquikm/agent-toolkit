@@ -91,7 +91,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.6.2 — "Plumb"** (two readings that came back clean and wrong — a reply address resolved from the wrong pid named a real, unrelated live session, and a screen read that cannot see past the viewport reported refusals=0 over a refusal that was right there)
+Latest: **v0.6.3 — "Holdout"** (the same bug twice — a correction that landed in one place while the copy-paste template, the rules summary and the host file beside it went on teaching what it had just superseded)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
