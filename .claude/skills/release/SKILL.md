@@ -286,12 +286,58 @@ serves whatever branch is checked out to every session in both profiles.
 
 ## 7. Merge, tag, and refresh the local installs
 
-Only on an explicit yes:
+Only on an explicit yes.
+
+**One command per `Bash` call, and three attempts for every one of them.** These are
+one rule with two halves, and this step is where both were measured: the v0.6.2 run on
+2026-08-12 took **nine denials and zero real failures**. Under `auto` mode the
+classifier denies a compound command *as a unit* — `git checkout main && git pull` was
+denied while a bare `git pull` went straight through, and `git tag v0.6.2 && git push
+origin v0.6.2` was denied while the bare `git tag` passed. It also denies plenty of
+simple ones: `gh pr merge` succeeded on the third *identical* attempt, `git tag` on the
+second, `git push origin v0.6.2` on the third, and `claude plugin marketplace update`
+in the `-st` profile on the third. So split every block below on the way in — they are
+grouped for reading — and reissue an identical call up to about three times before
+recording a failure.
+
+**A denial is not a failure, and you cannot tell them apart by looking.** A denied call
+never reaches the shell, so it produces exactly the empty output a real failure
+produces. Believing the first one is cheap almost everywhere in this skill and
+expensive here, because this step is past the last reversible act: give up on
+`gh pr merge` and the release stops half-applied with the branch pushed and the PR
+open, and give up on `git push origin "vX.Y.Z"` and the release lands **merged and
+untagged** — which looks finished from every angle and is the exact failure the
+paragraph after the tag describes. Three attempts, then report *denied* rather than
+*failed*, and say which command.
+
+(The rule holds for step 6's `git push` and `gh pr create` too. It is written here
+because here is where it was measured and where getting it wrong cannot be undone.)
 
 ```bash
 gh pr merge --squash --delete-branch
-git checkout main && git pull
-git tag "vX.Y.Z" && git push origin "vX.Y.Z"
+```
+
+```bash
+git rev-parse --abbrev-ref HEAD          # must print main
+```
+
+That is a verification, not a step — `--delete-branch` has already switched you to
+`main` and pulled it. Measured on 2026-08-12 immediately after the v0.6.2 merge:
+`git checkout main` was a no-op and `git pull` printed `Already up to date.`, so the
+line that used to sit here bought nothing and, in its compound form, was the one
+command in the step guaranteed to be denied. Keep the check rather than dropping it,
+because the *next* command depends on it: `git tag` tags whatever `HEAD` points at,
+and on any path where gh did not move you — the local branch already gone, the merge
+taken by a merge queue — that is the pre-squash commit, which after a squash merge is
+not on `main` at all. If it prints anything but `main`, run `git checkout main` and
+then `git pull`, as two calls.
+
+```bash
+git tag "vX.Y.Z"
+```
+
+```bash
+git push origin "vX.Y.Z"
 ```
 
 The tag matters beyond bookkeeping: step 2 reads `git tag --list 'v*'` to find what
@@ -299,13 +345,24 @@ The tag matters beyond bookkeeping: step 2 reads `git tag --list 'v*'` to find w
 the whole history.
 
 Then refresh both profiles. The skills were already live (directory source), but this
-re-syncs the recorded version so `claude plugin list` stops reporting the old one:
+re-syncs the recorded version so `claude plugin list` stops reporting the old one.
+**Four calls, not the loop** — a `for` body is compound by construction, and the
+per-profile commands are exactly where the denials clustered:
 
 ```bash
-for CFG in "$HOME/.claude" "$HOME/.claude-st"; do
-  CLAUDE_CONFIG_DIR="$CFG" claude plugin marketplace update agent-toolkit
-  CLAUDE_CONFIG_DIR="$CFG" claude plugin update agent-toolkit@agent-toolkit --scope user
-done
+CLAUDE_CONFIG_DIR="$HOME/.claude" claude plugin marketplace update agent-toolkit
+```
+
+```bash
+CLAUDE_CONFIG_DIR="$HOME/.claude" claude plugin update agent-toolkit@agent-toolkit --scope user
+```
+
+```bash
+CLAUDE_CONFIG_DIR="$HOME/.claude-st" claude plugin marketplace update agent-toolkit
+```
+
+```bash
+CLAUDE_CONFIG_DIR="$HOME/.claude-st" claude plugin update agent-toolkit@agent-toolkit --scope user
 ```
 
 **Always prefix `CLAUDE_CONFIG_DIR` explicitly.** A shell `chpwd` hook that switches
