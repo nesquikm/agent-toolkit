@@ -693,6 +693,14 @@ is a file:
 | the worker's **screen** (the host file's read command) | a `SendMessage` call with `⎿ … → uds:/tmp/cc-socks/<pid>.sock` under it |
 | the worker's **transcript** (see "Read a worker's output") | a `tool_use` block named `SendMessage` — the `⎿` glyph is terminal rendering and is never in the file |
 
+**Prefer the transcript, and on one host it is the only option.** Those rows are not
+equal: a send that has scrolled off is still in the file and is no longer on the screen,
+and Claude Code draws on the alternate screen, whose history a host may not be able to
+reach at all. cmux cannot — every scrollback flag it has returns the current viewport,
+so a grep comes back clean over a refusal sitting just above it. herdr can, but only
+while the worker is idle. Both host files give the measurement and the exact command;
+read yours before you conclude anything from a screen.
+
 Read it by the tool call, not by the address. **No `SendMessage` call at all** means the
 task's own wording talked the worker out of the tool — see "Send the task" above. A
 `SendMessage` call whose result says `is not an agent in this conversation` is the

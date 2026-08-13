@@ -208,11 +208,28 @@ not choose — which is the join key. Spawn terminals.
 cmux read-screen --workspace "$WS" --surface "$SURF"
 ```
 
-With scrollback, for checking whether a worker's first reply was refused:
+That is the live viewport, and on this host it is **all you can ever have**. Use it for
+what a viewport answers — is a dialog open, which row carries the `❯`, did the launch
+leave a shell prompt with an error above it — and for nothing that asks about history.
 
-```bash
-cmux read-screen --workspace "$WS" --surface "$SURF" --scrollback --lines 200
-```
+**`--scrollback` and `--lines` do not reach a Claude Code worker's history, and they
+fail by returning the viewport rather than by erroring.** Measured 2026-08-12 against a
+worker with 120 uniquely marked lines and one real refusal behind it: plain,
+`--scrollback`, `--lines 40`, `--lines 200`, `--lines 600`, `--lines 2000` and
+`capture-pane` alike all returned **the same 55 viewport lines**, reaching 47 of the 120
+markers. `--lines` implies `--scrollback`; they are one control, not two. The flags are
+not broken — a control run in the same surface, after `/exit` dropped it to a plain
+shell, returned 128 lines and every one of the 120 markers on the first try. The cause
+is that Claude Code runs on the **alternate screen**, which has no scrollback for cmux
+to read. herdr recovers alt-screen history by scrolling it while the agent is idle;
+cmux exposes no command that does, so there is no flag and no retry that fixes this.
+
+So **never answer a history question from this host's screen** — "did its first reply
+get refused", "what did it print before it stalled". A grep of those 55 lines returns a
+clean zero over a refusal sitting just above them, which is a false green and not a
+short answer. Read the worker's transcript instead (`SKILL.md`, "Read a worker's
+output"): count `SendMessage` `tool_use` blocks and read refusals out of the matching
+`tool_result` blocks. That file has neither a viewport nor a host in it.
 
 ## 6. Keystrokes
 
