@@ -91,7 +91,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.7.0 — "Deed"** (a run could drive any live session on the machine, because a worker was found by name and a name is not an identity — ownership is now a uuid the supervisor mints, and a slot is checked for who is actually sitting in it before anything is typed into it)
+Latest: **v0.7.1 — "Notary"** (v0.7.0 made ownership something a run mints but never made the proof required, so a ledger with no `.owner` beside it resolved anyway and handed out live addresses for workers whose every message the guard was already refusing — an unprovable ledger is now a refusal that names the one command that repairs it)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
