@@ -1,6 +1,6 @@
 {
   "name": "agent-toolkit",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Spawn Claude Code agents into visible terminal surfaces — cmux surfaces or herdr panes — watch them by push event, and chain multi-stage pipelines across them. Also installs a PreToolUse hook on SendMessage that asks before a message lands in a live session the sending run cannot prove it spawned.",
   "author": {
     "name": "nesquikm",
