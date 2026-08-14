@@ -154,9 +154,13 @@ python3 "$O" "$LEDGER" review-api cwd          # what the worker actually got, n
 | 1 | no live session for this row — never started, exited, or killed | the usual absence; retry or report `GONE` |
 | 3 | a live session holds this name and **it is not ours** | **stop.** Never send, key, read or close it |
 | 4 | more than one live session answers | **stop.** Nothing can say which is meant |
+| 5 | no `.owner` beside the ledger — **nothing in it is provably yours** | **stop.** The stderr line names the sidecar and the one command that writes it |
 
-Exit 1 is the only one that improves by waiting. Treating 3 or 4 as "not ready yet"
-turns a stop signal into a spin, and then into a send to a stranger.
+Exit 1 is the only one that improves by waiting. Treating 3, 4 or 5 as "not ready
+yet" turns a stop signal into a spin, and then into a send to a stranger.
+
+**5 is a verdict on the ledger, not on the row**, so it answers every field the same
+way: a file with no sidecar proves nothing about anything in it.
 
 `peer.py` still exists and still takes a bare name, but it now answers only the
 pre-launch question — "is this name already taken" — and it sweeps every profile to
@@ -273,6 +277,21 @@ the address is not yours. **Do not answer it by re-sending, by trying the bare
 name, or by asking the user to approve it** — resolve the address through
 `owned.py` and find out why your row does not match. Confirm only when the user
 named that specific session in this turn.
+
+**And `owned.py` now says so rather than handing you an address.** A ledger with no
+`.owner` beside it exits 5 and names the sidecar; it used to resolve happily, which
+sent a blocked supervisor to a tool reporting nothing wrong. That state is not a
+stranger's session — it is what a supervisor **mid-upgrade** produces: skill text is
+snapshotted at session start while `lib/*.py` is read fresh on every call, so text
+from before the sidecar existed writes correct six-column rows and no sidecar at all.
+The workers really are yours, and ownership is still unprovable. Exit 5 prints the
+repair with the real paths filled in:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/me.py" sessionId > "${LEDGER%.tsv}.owner"
+```
+
+Run that only if those rows are yours. If they are not, move the ledger aside.
 
 ## Anchor on yourself
 
@@ -448,7 +467,9 @@ The `.owner` sidecar holds **your own** session id. Without it the ledger says
 which workers exist but not whose they are — and a slot outlives any one `claude`,
 so the next session to start in this slot inherits the rows. The sidecar is what
 stops it inheriting the authority too, and it is what lets a worker's reply be
-recognised as a reply rather than as a send to a stranger.
+recognised as a reply rather than as a send to a stranger. It is not optional
+bookkeeping: `owned.py` refuses a ledger that has none (exit 5), so a run that skips
+this line resolves nothing at all afterwards.
 
 **That same key is why the format check is not paranoia.** A slot id outlives any
 one `claude` process, so quitting and relaunching in the same place reopens the
@@ -579,10 +600,13 @@ That is the readiness signal, and it is stricter than "the process started": it
 means registered, holding an inbox socket, **and carrying the id we minted** —
 exactly the precondition for the `SendMessage` that follows.
 
-**Exit 3 or 4 is a stop, not a slower yes.** They mean a live session answers to
-this name and it is not ours (3), or that more than one does (4). Neither improves
-by waiting, and both are cases where continuing means driving somebody else's
-session — so the loop breaks out rather than spinning down its timeout.
+**Exit 3, 4 or 5 is a stop, not a slower yes.** They mean a live session answers to
+this name and it is not ours (3), that more than one does (4), or that the ledger
+carries no `.owner` and so proves nothing about any row in it (5). None improves by
+waiting, and each is a case where continuing means driving a session this run cannot
+show it started — so the loop breaks out rather than spinning down its timeout. The
+guard above is a threshold, `-ge 3`, and it catches 5 unchanged. Leave it a threshold
+rather than a list of codes: the next stop code is then caught for free.
 
 **Do not "unify" this with the collision check above.** That one asks whether the
 name is taken, in order to *avoid* a session; this one asks whether the session is
@@ -1442,9 +1466,11 @@ which is the one failure this whole section exists to prevent.
   --session-id <uuid>` at launch: the name is the tab title, the uuid is the join
   key, and every lookup after launch goes through `owned.py` and the ledger row.
   Keep the name within `[a-z][a-z0-9_-]{0,31}` so it works on every host.
-- **`owned.py` exit 3 or 4 is a stop, never a retry.** A live session answering to
+- **`owned.py` exit 3, 4 or 5 is a stop, never a retry.** A live session answering to
   your worker's name that is not your worker is the failure this whole design
-  exists to catch — do not wait it out, and do not fall back to `peer.py`.
+  exists to catch — do not wait it out, and do not fall back to `peer.py`. 5 is that
+  same stop reached from the other side: no `.owner` beside the ledger, so nothing in
+  it is provably yours until you write one, and the refusal names the command.
 - **Address by `uds:`.** A bare name is refused on first contact and costs a round
   trip to recover the ref from; the socket path is derivable from disk and always
   works.

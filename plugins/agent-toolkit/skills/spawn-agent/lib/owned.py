@@ -13,6 +13,7 @@ one this run started?**
   exit 1   no live session for this row — never started, exited, or killed
   exit 3   a live session holds this NAME but is not ours — HARD STOP, never retry
   exit 4   ambiguous: more than one live session answers — HARD STOP
+  exit 5   no `.owner` beside the ledger — ownership is unprovable, HARD STOP
   exit 2   usage / unreadable ledger
 
 Fields: address (default), pid, status, waitingFor, sessionId, cwd, name.
@@ -119,37 +120,56 @@ def main():
     # that started in this slot after another one -- or that skipped the setup
     # block entirely -- would otherwise be handed the previous run's workers by a
     # path it never wrote a byte of.
+    sidecar = os.path.splitext(ledger)[0] + ".owner"
+    me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "me.py")
     owner = ""
     try:
-        with open(os.path.splitext(ledger)[0] + ".owner") as fh:
+        with open(sidecar) as fh:
             owner = fh.read().strip()
     except OSError:
-        pass  # no sidecar: unverifiable here, and the setup block is what writes it
-    if owner:
-        me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "me.py")
-        try:
-            here = subprocess.run(
-                [sys.executable, me, "sessionId"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout.strip()
-        except Exception:
-            here = ""
-        # here == "" means me.py could not resolve this session, and the check
-        # falls through rather than blocking. That is deliberate but it is a real
-        # gap, so know when it opens: me.py reads CLAUDE_CONFIG_DIR, so pointing
-        # that at a fixture profile (as the smoke test does) makes it exit
-        # "no session record for claude pid N under <fixture>" and this check
-        # inert. Under a real profile it resolves, and the mismatch is caught.
-        # Blocking on an unresolvable self would make every fixture and every
-        # unusual profile layout unusable, which is a worse failure than the one
-        # the setup block already prevents by refusing to overwrite .owner.
-        if here and here.lower() != owner.lower():
-            print(
-                f"owned: {ledger} is owned by session {owner}, not by this one "
-                "-- those workers belong to another run",
-                file=sys.stderr,
-            )
-            return 3
+        pass  # absent reads the same as empty; both are refused below
+    if not owner:
+        # No sidecar at all, or an empty one. This used to fall through, and a
+        # supervisor mid-upgrade -- serving pre-sidecar skill text against these
+        # scripts -- wrote rows by hand and got a working address back from a
+        # ledger it could prove nothing about, while every SendMessage it made was
+        # gated. Refusing here is what makes that visible at the tool the skill
+        # sends you to. It is a per-LEDGER verdict, not a per-row one: no sidecar
+        # proves nothing about any row in the file, so no field resolves.
+        print(
+            f"owned: no .owner beside {ledger} -- ownership is unprovable, so "
+            "nothing here resolves.\n"
+            f"       If these rows are yours:  python3 {me} sessionId > {sidecar}\n"
+            "       If they are not:          move the ledger aside.",
+            file=sys.stderr,
+        )
+        return 5
+
+    try:
+        here = subprocess.run(
+            [sys.executable, me, "sessionId"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except Exception:
+        here = ""
+    # here == "" means me.py could not resolve this session, and the check
+    # falls through rather than blocking. That is deliberate but it is a real
+    # gap, so know when it opens: me.py reads CLAUDE_CONFIG_DIR, so pointing
+    # that at a fixture profile (as the smoke test does) makes it exit
+    # "no session record for claude pid N under <fixture>" and this check
+    # inert. Under a real profile it resolves, and the mismatch is caught.
+    # Blocking on an unresolvable self would make every fixture and every
+    # unusual profile layout unusable, which is a worse failure than the one
+    # the setup block already prevents by refusing to overwrite .owner. A
+    # MISSING sidecar is a different case and is refused above: there the file
+    # that would carry the proof does not exist, so nothing can resolve it later.
+    if here and here.lower() != owner.lower():
+        print(
+            f"owned: {ledger} is owned by session {owner}, not by this one "
+            "-- those workers belong to another run",
+            file=sys.stderr,
+        )
+        return 3
 
     row = row_for(ledger, name)
     if row is None:

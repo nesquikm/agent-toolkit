@@ -470,42 +470,57 @@ for d in roots:
 print("%d live sessions, %d with a socket, %d without" % (live, sock, live - sock))'
 ```
 
-## 3b. Ownership — `owned.py` must refuse a session it did not mint — *core*
+## 3b. Ownership — `owned.py` must refuse whatever it cannot prove — *core*
 
-Checks 2 and 3 prove a name can be seen. This one proves a name is **not enough**, which
-is the guarantee the whole skill now rests on. Hermetic: one fixture profile, one fixture
-ledger, nothing spawned.
+Checks 2 and 3 prove a name can be seen. This one proves a name is **not enough**, and
+that a *ledger* with nothing to prove it by is refused rather than trusted — the two
+halves of the guarantee the whole skill now rests on. Hermetic: one fixture profile,
+four fixture ledgers, nothing spawned.
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-mkdir -p "$D/sessions"
+mkdir -p "$D/sessions" "$D/spawn-agent"
 # pid 1 is permanently "alive" for the reason check 3 gives. Two records, same name,
 # to make the ambiguous case reachable without racing anything real.
 printf '{"pid":1,"name":"smoke-own-probe","cwd":"/","sessionId":"11111111-1111-1111-1111-111111111111","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/1.json"
-printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/led-ok.tsv"
-printf 'smoke-own-probe\tL1\tL2\tspawned\t99999999-9999-9999-9999-999999999999\t\n'   > "$D/led-foreign.tsv"
-printf 'smoke-own-probe\tL1\tL2\tspawned\t\t\n'                                       > "$D/led-legacy.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/spawn-agent/led-ok.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t99999999-9999-9999-9999-999999999999\t\n'   > "$D/spawn-agent/led-foreign.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t\t\n'                                       > "$D/spawn-agent/led-legacy.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/spawn-agent/led-nosidecar.tsv"
+# Three of the four get a sidecar. Without one they would all stop at the sidecar
+# check and never reach the assertion they exist to make.
+for f in ok foreign legacy; do
+  printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-$f.owner"
+done
 ```
+
+**The ledgers go in `$D/spawn-agent/`, not in `$D`, and the directory name is the
+load-bearing part.** The enforcement sub-check below points `TMPDIR` at `$D`, and the
+guard globs `$TMPDIR/spawn-agent/*.tsv` — so this layout is what lets the same four
+fixtures serve both halves. It is also what keeps the guard's glob off the **live**
+ledgers in the real `${TMPDIR:-/tmp}/spawn-agent/`, which belong to running sessions
+and which nothing in this check may read, write or point at.
 
 ```bash
 O="<plugin root>/skills/spawn-agent/lib/owned.py"
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-for f in ok foreign legacy; do
-  CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
+for f in ok foreign legacy nosidecar; do
+  CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
   echo "  $f -> exit=$?"
 done
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/led-ok.tsv" no-row-for-this >/dev/null 2>&1; echo "  norow -> exit=$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ok.tsv" no-row-for-this >/dev/null 2>&1; echo "  norow -> exit=$?"
 ```
 
 PASS on exactly:
 
 ```
-  ok      -> exit=0
-  foreign -> exit=3
-  legacy  -> exit=3
-  norow   -> exit=2
+  ok        -> exit=0
+  foreign   -> exit=3
+  legacy    -> exit=3
+  nosidecar -> exit=5
+  norow     -> exit=2
 ```
 
 **`foreign` is the reported incident, reduced to one line.** The name matches a live
@@ -517,9 +532,23 @@ every earlier version of this skill wrote, widened with empty fields — no mint
 nothing to check, so no ownership. A silent pass there re-opens the bug for every ledger
 already on disk.
 
+**`nosidecar` is the same row as `ok` with the sidecar removed, and that is the whole
+point of it.** The row is valid, six-column, and names a live session carrying the
+minted id — everything `ok` has. What it cannot show is *whose* the ledger is, and
+before exit 5 existed it resolved to a working `uds:` address anyway. That is not
+hypothetical: a supervisor serving pre-sidecar skill text against these scripts wrote
+exactly this file by hand, had every `SendMessage` to that worker gated in both
+directions, and was sent by the skill's own diagnostic to a tool that reported nothing
+wrong. Exit 0 here is that bug, restored.
+
 **And the `ok` row is the regression that matters most.** It must exit 0 *and* print a
 `uds:` address, because the reply path depends on it: if ownership is too strict, every
 worker becomes unaddressable and the skill stops working rather than stops hijacking.
+Note what its sidecar proves and what it does not: under the fixture profile `me.py`
+cannot resolve this session at all, so the owner-mismatch branch falls through by
+design and the value in the file is never compared. `ok` therefore tests that a
+*present* sidecar does not block — which is exactly the property `nosidecar` is
+paired against.
 
 ### The enforcement layer, if this machine has one
 
@@ -531,21 +560,63 @@ must fire, or the run is trusting prose alone:
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
 [ -x ~/.claude/hooks/spawn-agent-guard.py ] || echo "  (no guard installed -- skip, not a FAIL)"
+# 1. A session that owns nothing, sending to the fixture worker -> ask.
 printf '{"session_id":"00000000-0000-0000-0000-000000000000","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
-  | CLAUDE_CONFIG_DIR="$D" python3 ~/.claude/hooks/spawn-agent-guard.py; echo "  hook exit=$?"
+  | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 ~/.claude/hooks/spawn-agent-guard.py > "$D/ask.out" 2>&1
+echo "  ask       -> exit=$? bytes=$(wc -c < "$D/ask.out" | tr -d ' ')"
 ```
 
-PASS when it prints a `permissionDecision` of `ask`. A hook that prints `allow` is a
-FAIL — it would wave through exactly the send the guard exists to catch.
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+# 2. The SAME send, from the session named in led-ok.owner -> silence.
+printf '{"session_id":"22222222-2222-2222-2222-222222222222","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
+  | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 ~/.claude/hooks/spawn-agent-guard.py > "$D/pass.out" 2>&1
+echo "  passthru  -> exit=$? bytes=$(wc -c < "$D/pass.out" | tr -d ' ')"
+```
 
-**`CLAUDE_CONFIG_DIR` is mandatory on that line, and leaving it off passes for the wrong
-reason.** The guard only interposes on targets it can resolve to a *live registry
+PASS on exactly:
+
+```
+  ask       -> exit=0 bytes=<non-zero, and the JSON says permissionDecision "ask">
+  passthru  -> exit=0 bytes=0
+```
+
+A hook that prints `allow` on the first is a FAIL — it would wave through exactly the
+send the guard exists to catch.
+
+**Both directions, because `ask` alone is passed by a guard that asks for
+everything** — and that is not a straw man, it is the live symptom this check was
+extended for: a supervisor whose ledger had no `.owner` was gated on *every*
+`SendMessage`, in both directions, by a guard that looked perfectly healthy against
+the one-payload version of this check. The second payload is the first with one field
+changed, so the pair isolates ownership as the only variable: same target, same
+profile, same ledgers, different `session_id`. Silence and exit 0 is the whole
+assertion — the guard emits nothing when it has no objection, and any output at all
+there means an owned worker is being gated.
+
+**`TMPDIR` is mandatory on both lines, alongside `CLAUDE_CONFIG_DIR`.** The guard finds
+ledgers by globbing `$TMPDIR/spawn-agent/*.tsv`, so it is `TMPDIR` — not
+`CLAUDE_CONFIG_DIR` — that decides which ownership records it reads at all. Pointing it
+at `$D` is what makes the pass-through payload's ownership resolvable, and it is also
+what keeps the guard's glob off the live ledgers in the real
+`${TMPDIR:-/tmp}/spawn-agent/`, which belong to running sessions and are none of this
+check's business.
+
+**`CLAUDE_CONFIG_DIR` is mandatory on both lines too, and leaving it off passes for the
+wrong reason.** The guard only interposes on targets it can resolve to a *live registry
 record*; everything else it deliberately lets by, because an unresolvable `to` is an
 in-process subagent or a teammate and gating those would put a prompt in front of
 ordinary work. Without the fixture profile on the path, pid 1 resolves to nothing, the
 guard passes through, and the check prints an empty line that reads exactly like "no
 hook installed". Verified 2026-08-13 in both forms: silent without the variable, `ask`
 with it.
+
+The two gate different halves of the pass-through assertion, so neither is optional
+there. `CLAUDE_CONFIG_DIR` makes the **target** resolve; `TMPDIR` makes the
+**ownership** resolve. Miss the first and the guard is silent because it sees no peer
+— a silence indistinguishable from the one being asserted. Miss the second and it sees
+the peer but no proof, and prints `ask` where this check demands nothing.
 
 ## 4. The prune, in both directions — *core*
 
