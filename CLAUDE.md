@@ -14,11 +14,18 @@ The marketplace is deliberately named for agents, not for any one terminal. `cmu
 .claude-plugin/marketplace.json          → Marketplace catalog
 plugins/agent-toolkit/                   → The plugin (the only thing that ships)
 ├── .claude-plugin/plugin.json           → Plugin manifest
+├── hooks/                               → plugin-level hooks; auto-discovered, not per-skill
+│   ├── hooks.json                       → PreToolUse on SendMessage → the guard
+│   └── spawn-agent-guard.py             → asks before a send lands in a session
+│                                          this run cannot prove it spawned
 └── skills/
     └── spawn-agent/                     → /agent-toolkit:spawn-agent
         ├── SKILL.md                     → the host-agnostic core; contains NO terminal commands
         ├── lib/                         → host-agnostic, used by every host
-        │   ├── peer.py                  → worker name → socket address / status / cwd / sessionId
+        │   ├── me.py                    → this session's own name / address / sessionId
+        │   ├── occupant.py              → is our worker still the one in that slot?
+        │   ├── owned.py                 → ledger row → a session this run PROVABLY spawned
+        │   ├── peer.py                  → is a name already taken? (pre-launch only)
         │   └── watch-workers.py         → polls the peer registry → one line per worker state change
         └── hosts/                       → one file per terminal; you read exactly one
             ├── cmux.md                  → placement, launch, keys, close — cmux
@@ -26,7 +33,7 @@ plugins/agent-toolkit/                   → The plugin (the only thing that shi
             └── herdr.md                 → the same, for herdr (needs no resolver script)
 .claude/skills/                          → this repo's own skills; NOT shipped
 ├── release/                             → /release — the release ceremony
-└── spawn-agent-smoke/                   → /spawn-agent-smoke — eleven checks against the working tree
+└── spawn-agent-smoke/                   → /spawn-agent-smoke — twelve checks against the working tree
 ```
 
 ## Conventions
@@ -48,6 +55,28 @@ plugins/agent-toolkit/                   → The plugin (the only thing that shi
   wrong target. Measured 2026-08-12. Anything that adds a third host adds a row above,
   never a second `if`.
 - **Bundled scripts** — a skill references its own files through `${CLAUDE_PLUGIN_ROOT}/skills/<skill>/<file>`, never through a relative path or the base directory printed at load. Host-agnostic scripts go in that skill's `lib/`, host-specific ones in its `hosts/`.
+- **Plugin-level hooks live in `plugins/agent-toolkit/hooks/`**, and they are a different
+  thing from a skill's bundled scripts in the two ways that matter. `hooks/hooks.json` is
+  **discovered automatically** when the plugin is enabled and needs no field in
+  `plugin.json`. Its `timeout` is in **seconds** — verified against the docs and against
+  the wiring that works on this machine; a four-digit value copied from another repo is
+  not milliseconds, it is a timeout of well over an hour, which is indistinguishable from
+  no timeout at all until the day a hook hangs. Give every entry an explicit one.
+
+  The command still names itself through `${CLAUDE_PLUGIN_ROOT}/hooks/<file>`, but **who
+  substitutes that token is not what a skill does**: for a skill it is replaced in the
+  text the model reads, whereas here Claude Code expands it in the command line it
+  executes — so it works from a `hooks.json` and would still print nothing from a `Bash`
+  call. Two things follow from a hook not being scoped to any one skill:
+
+  - **it must scope itself.** It runs for everyone who installs the plugin, including
+    everyone who never invokes the skill, and nobody can turn it off without turning the
+    skill off too. The guard therefore returns immediately when the spawn ledger holds no
+    `.owner` sidecar — the state in which it could only ever add prompts.
+  - **it inherits the `claude` process's environment, not a login shell**, so an
+    interpreter that arrives via a profile script (`pyenv`, `asdf`) may not resolve on a
+    GUI-launched host. That is unfixable in `hooks.json` — an absolute path would be
+    wrong elsewhere — so it belongs in `README.md` prose, and it is there.
 - **The smoke test does not ship.** It lives in `.claude/skills/spawn-agent-smoke/` and gets
   no `${CLAUDE_PLUGIN_ROOT}` — that token is substituted only inside a plugin. It resolves
   the plugin root itself from `git rev-parse --show-toplevel`, then *proves* the resolution

@@ -277,8 +277,23 @@ Exit 0 means the slot holds your worker **or holds no `claude` at all** — an e
 slot is still yours to tidy up. Exit 3 means a `claude` you did not start is living
 there, and every one of those four commands must stop.
 
-**A `PreToolUse` hook may be enforcing this independently of you.** If a
-`SendMessage` comes back needing confirmation with a reason beginning *"'X' is a
+**A `PreToolUse` hook enforces this independently of you, and it ships with this
+plugin.** `hooks/spawn-agent-guard.py` is wired onto `SendMessage` by the plugin's own
+`hooks/hooks.json`, so it is live wherever this plugin is enabled — and **that is not
+the same as everywhere.** A user can disable the plugin, and where it is disabled
+there is no hook and this section is the only thing standing between a run and a
+stranger's session. The hook also scopes itself out **whenever** no `.owner` sidecar
+is present in the ledger directory: it returns before it even looks at the target,
+because with no ownership record on disk every pass it could grant is unreachable and
+the only thing it could add is a prompt.
+
+**That is a condition, not a milestone.** Teardown removes the ledger and its sidecar
+together, so the state is entered and left repeatedly — a machine that spawns all day
+is unguarded in every gap between runs, not just before its first spawn. So write as
+though nothing is watching, because for a good part of the time nothing is: the hook
+is a second line, and this section is the first.
+
+If a `SendMessage` comes back needing confirmation with a reason beginning *"'X' is a
 live Claude Code session"*, that is the guard, and it is telling you the address is
 not provably yours. **Do not answer it by re-sending, by trying the bare name, or by
 asking the user to approve it** — resolve the address through `owned.py` and find

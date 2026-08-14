@@ -77,6 +77,18 @@ The skill is written as a set of verified behaviours rather than an API tour —
 
 **Requires:** either [cmux](https://github.com/manaflow-ai/cmux) or [herdr](https://herdr.dev) — the skill refuses to spawn outside both — plus `python3` and `claude` on `PATH`.
 
+### The `SendMessage` guard — a hook, not a skill
+
+The plugin installs one `PreToolUse` hook alongside the skill: `hooks/spawn-agent-guard.py`, wired onto `SendMessage` by `hooks/hooks.json` and enabled automatically wherever the plugin is enabled. It is the enforcement layer under "only ever touch what this run minted" — when a `to` resolves to a live Claude Code session on this machine that the sending session cannot prove it spawned, the hook returns `ask`, and the user sees the target named before anything is delivered. Ownership is read from the spawn ledger's `.owner` sidecar, so it is the same proof `owned.py` uses, applied one layer down where prose cannot be talked out of it.
+
+Three properties are worth knowing before you install it:
+
+- **It never returns `allow`.** It either stays silent or asks, so it can add a confirmation and can never remove one. Nor can it be switched off from the allowlist: a `PreToolUse` decision runs ahead of the `permissions.allow` rules, so an `ask` from this hook still fires after "don't ask again for SendMessage" has been chosen and the rule written.
+- **It scopes itself to machines that are spawning.** With no `.owner` sidecar anywhere in the spawn ledger directory there is no ownership record for it to read, every pass it could grant is unreachable, and the only thing it could contribute is a prompt — so it returns before it looks at the target. Install the plugin, never run the skill, and you will never see it. Disabling the plugin removes it entirely; there is no separate switch, which is exactly why the self-scope is not optional. Note the tense: this is a condition it re-evaluates on every call, not a one-way switch that flips at your first spawn. Teardown deletes the ledger and its sidecar together, so the guard stands down again in the gaps between runs.
+- **`python3` is resolved from the `claude` process's `PATH`.** Hooks run with Claude Code's own environment rather than a profile-initialised login shell, so on a host where `python3` arrives via `pyenv`, `asdf`, or any other shim that a shell profile puts on the path, a GUI-launched `claude` may not find it. Nothing in `hooks.json` can fix that — an absolute interpreter path would simply be wrong on the next machine — so it is written here instead. The failure is quiet by design: a hook's stderr goes to the debug log and never to the transcript, so a `python3: command not found` looks exactly like a guard with no objection. If you are relying on it, enable debug logging once and confirm you can see it run.
+
+
+
 ## Conventions
 
 - **Host-specific material lives in a host file, not in a host-specific skill.** A skill that needs a terminal keeps a bare name and ships `hosts/<host>.md`; the core text never names a command. That is what keeps one trigger for "spawn an agent" instead of two skills competing to answer it.

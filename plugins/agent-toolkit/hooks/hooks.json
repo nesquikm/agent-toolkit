@@ -1,0 +1,17 @@
+{
+  "description": "Guards cross-session messaging: a PreToolUse hook on SendMessage that asks before a send lands in a live Claude Code session this run cannot prove it spawned. It never allows — it only ever stays silent or asks — and it returns immediately on a machine whose spawn ledger holds no .owner sidecar, so installing the plugin without ever spawning adds no prompts.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/spawn-agent-guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
