@@ -265,6 +265,21 @@ text.
 non-working state must produce an observed lifecycle change within five seconds or
 herdr returns `agent_prompt_stalled` rather than hanging.
 
+**`agent prompt` delivers work, so it needs the same ownership check `SendMessage`
+gets — and the shipped `PreToolUse` hook does not give it one.** That hook matches
+`SendMessage`; this is a `Bash` call, and nothing intercepts it. The exposure here is
+sharper than cmux's, because this command is addressed **by bare name** — the one
+identifier `SKILL.md` spends a section explaining is not an identity: freed when a
+session exits, reclaimable by anyone, auto-assigned to every hand-started session, and
+unique only among the live ones at a single instant. herdr's own agent namespace is
+also separate from the peer registry, so a name free in one can be taken in the other.
+So `herdr agent prompt "$NAME" …` will type a whole task into whatever currently
+answers to that name, with nothing anywhere reporting a fault.
+
+The occupant check below is what closes it, and **it is documented after this command
+rather than before it** — do not read that order as the running order. Run it first,
+or this is the channel by which a stale name hands the user's own session your work.
+
 ### The occupant check — is our worker still the one in that pane
 
 `SKILL.md`'s "A slot is not a session" applies here in full: a pane outlives the

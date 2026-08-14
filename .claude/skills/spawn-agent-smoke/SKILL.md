@@ -581,17 +581,97 @@ design and the value in the file is never compared. `ok` therefore tests that a
 *present* sidecar does not block — which is exactly the property `nosidecar` is
 paired against.
 
-### The enforcement layer, if this machine has one
+### The enforcement layer — it ships, so its absence is a FAIL
 
-A `PreToolUse` hook on `SendMessage` may be gating sends independently of the skill.
-It is not part of the plugin and its absence is not a FAIL — but when it is present it
-must fire, or the run is trusting prose alone:
+A `PreToolUse` hook on `SendMessage` gates sends independently of the skill, and it is
+**part of the plugin**: `hooks/spawn-agent-guard.py`, wired by `hooks/hooks.json`. It
+used to be an untracked file in one profile's `~/.claude/hooks/`, which is why this
+block once announced a SKIP. It no longer may — a missing guard now means the plugin
+is incomplete, and the run is trusting prose alone.
+
+First the wiring, which costs nothing and catches the whole class of failure where the
+script is fine and nothing ever calls it:
+
+```bash
+python3 - "<plugin root>" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+bad = []
+hj = os.path.join(root, "hooks", "hooks.json")
+if not os.path.isfile(hj):
+    sys.exit("  hooks.json     -> FAIL missing at %s" % hj)
+print("  hooks.json     -> present")
+try:
+    cfg = json.load(open(hj))
+except ValueError as exc:
+    sys.exit("  parses         -> FAIL %s" % exc)
+print("  parses         -> ok")
+entries = [h for group in cfg.get("hooks", {}).get("PreToolUse", [])
+           for h in group.get("hooks", [])
+           if "SendMessage" in (group.get("matcher") or "")]
+if not entries:
+    sys.exit("  matcher        -> FAIL no PreToolUse entry matching SendMessage")
+print("  matcher        -> SendMessage, %d command(s)" % len(entries))
+for h in entries:
+    cmd = h.get("command", "")
+    toks = [t for t in cmd.split() if "CLAUDE_PLUGIN_ROOT" in t]
+    if not toks:
+        print("  command path   -> FAIL names no plugin-root path: %r" % cmd)
+        bad.append(True)
+    for tok in toks:
+        p = tok.strip("\"'").replace("${CLAUDE_PLUGIN_ROOT}", root)
+        gone = not os.path.isfile(p)
+        print("  command path   -> %s%s" % (p, "   MISSING -- FAIL" if gone else ""))
+        bad.append(gone)
+    t = h.get("timeout")
+    ok = isinstance(t, int) and not isinstance(t, bool) and 1 <= t <= 120
+    print("  timeout        -> %r%s" % (t, " seconds" if ok else "  FAIL not an int in 1..120 seconds"))
+    bad.append(not ok)
+sys.exit(1 if any(bad) else 0)
+PY
+```
+
+PASS on exactly these five lines, and exit 0:
+
+```
+  hooks.json     -> present
+  parses         -> ok
+  matcher        -> SendMessage, 1 command(s)
+  command path   -> <plugin root>/hooks/spawn-agent-guard.py
+  timeout        -> 10 seconds
+```
+
+**A missing line is the failure, which is why the expected output is enumerated rather
+than described.** The first version of this block iterated the command's tokens and
+printed a `command path` line only for one containing `${CLAUDE_PLUGIN_ROOT}` — so a
+`hooks.json` naming an absolute path instead, which is exactly what a bad merge
+restoring the old hand-wired `python3 '/Users/ns/.claude/hooks/spawn-agent-guard.py'`
+would produce, printed **four lines and exited 0**. It passed by not testing anything.
+Absence of a FAIL is not a PASS unless you know how many lines to count; the loop now
+records that nothing matched and fails on it.
+
+**The command path is the assertion with teeth.** `${CLAUDE_PLUGIN_ROOT}` is expanded
+by Claude Code at execution time, so a typo in it is not a startup error and not a log
+line — the hook simply never runs, and a guard that never runs is byte-for-byte
+indistinguishable from a guard with no objection. Resolving the token by hand against
+the root check 0a derived is the only cheap way to see it.
+
+**The `timeout` is asserted by type and range, not by presence.** It is in seconds, so
+a four-digit value is not milliseconds — it is a timeout of over an hour, which behaves
+as none at all right up until a hook hangs and takes the session with it. A presence
+check prints `timeout -> 10000 seconds` and calls it PASS, committing precisely the
+mistake the sentence above it warns about; `1..120` is the range a `SendMessage` gate
+can defensibly sit in.
+
+Then the guard's own behaviour, which is the part that matters:
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-G=~/.claude/hooks/spawn-agent-guard.py
-[ -x "$G" ] || { echo "  (no guard installed -- SKIP, not a FAIL)"; exit 0; }
+G="<plugin root>/hooks/spawn-agent-guard.py"
+[ -f "$G" ] || G=~/.claude/hooks/spawn-agent-guard.py   # legacy hand-wired copy
+[ -f "$G" ] || { echo "  FAIL no guard at either path -- it ships now"; exit 1; }
+echo "  guard: $G"
 # 1. A session that owns nothing, sending to the fixture worker -> ask.
 printf '{"session_id":"00000000-0000-0000-0000-000000000000","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
   | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 "$G" > "$D/ask.out" 2>&1
@@ -605,8 +685,9 @@ echo "  ask       -> decision=$DEC exit=$X"
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-G=~/.claude/hooks/spawn-agent-guard.py
-[ -x "$G" ] || { echo "  (no guard installed -- SKIP, not a FAIL)"; exit 0; }
+G="<plugin root>/hooks/spawn-agent-guard.py"
+[ -f "$G" ] || G=~/.claude/hooks/spawn-agent-guard.py   # legacy hand-wired copy
+[ -f "$G" ] || { echo "  FAIL no guard at either path -- it ships now"; exit 1; }
 # 2. The SAME send, from the session named in led-ok.owner -> silence.
 printf '{"session_id":"22222222-2222-2222-2222-222222222222","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
   | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 "$G" > "$D/pass.out" 2>&1
@@ -618,9 +699,16 @@ echo "  passthru  -> exit=$X bytes=$(wc -c < "$D/pass.out" | tr -d ' ')"
 PASS on exactly:
 
 ```
+  guard: <plugin root>/hooks/spawn-agent-guard.py
   ask       -> decision=ask exit=0
   passthru  -> exit=0 bytes=0
 ```
+
+**Read the `guard:` line, do not skim past it.** It says which of the two paths answered,
+and the plugin one is the only one that passes cleanly: falling through to
+`~/.claude/hooks/` means the shipped file is missing and you are testing a legacy copy
+that exists on this machine and on no user's. Record that as a FAIL of the *plugin* even
+when the two assertions below it are green.
 
 **Assert the decision string, not the byte count, and this is the check correcting
 itself.** An earlier version of this block printed `bytes=` on the `ask` line and
@@ -633,10 +721,12 @@ would wave through exactly the send the guard exists to catch.
 `bytes=` stays on the pass-through line because there 0 **is** the assertion — there
 is no decision to name when a guard correctly says nothing.
 
-**Both blocks skip, rather than one announcing a skip and then running anyway.** The
-`|| { …; exit 0; }` form is what makes the announcement true. With `2>&1` capturing
-the interpreter's own error, a missing guard would otherwise print two unexplained
-lines under a heading that says its absence is not a FAIL.
+**Both blocks stop on a missing guard, rather than one announcing the failure and then
+running anyway.** The `|| { …; exit 1; }` form is what makes the announcement true.
+With `2>&1` capturing the interpreter's own error, a guard at neither path would
+otherwise print two unexplained lines instead of the one that names the fault. The
+earlier version of this exited **0** with the word SKIP, which was correct while the
+guard was an untracked file in one profile and is a false PASS now that it ships.
 
 **Both directions, because `ask` alone is passed by a guard that asks for
 everything** — and that is not a straw man, it is the live symptom this check was
@@ -670,6 +760,68 @@ there. `CLAUDE_CONFIG_DIR` makes the **target** resolve; `TMPDIR` makes the
 **ownership** resolve. Miss the first and the guard is silent because it sees no peer
 — a silence indistinguishable from the one being asserted. Miss the second and it sees
 the peer but no proof, and prints `ask` where this check demands nothing.
+
+### The two defects the guard shipped to fix — regression cover
+
+Both were live in the guard on the day it moved into the plugin, and neither is
+covered by the pair above. Both are written in the **ask-versus-silence** direction:
+each asserts the *absence* of a prompt in a state where the broken version raised one,
+or vice versa, so a regression flips a line rather than leaving the output unchanged.
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+G="<plugin root>/hooks/spawn-agent-guard.py"
+# SELF-SCOPE: a ledger directory holding a .tsv and NO .owner. Nothing in it is
+# provably anyone's, so every pass the guard could grant is unreachable and the
+# only thing it can add is a prompt -- it must return before it resolves a target.
+R="$D/regress-selfscope"
+mkdir -p "$R/spawn-agent"
+printf 'w\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n' > "$R/spawn-agent/led.tsv"
+printf '{"session_id":"00000000-0000-0000-0000-000000000000","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
+  | TMPDIR="$R" CLAUDE_CONFIG_DIR="$D" python3 "$G" > "$R/out" 2>&1
+echo "  selfscope -> exit=$? bytes=$(wc -c < "$R/out" | tr -d ' ')"
+```
+
+PASS on `selfscope -> exit=0 bytes=0`. It discriminates: the pre-ship guard answers
+**362** bytes of `ask` on this fixture, because it read the `.tsv`, found no sidecar
+beside it, proved nothing, and asked — which is what every user who installed the
+plugin and never spawned would have got on every `SendMessage`.
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+G="<plugin root>/hooks/spawn-agent-guard.py"
+# TMPDIR: a set-but-empty TMPDIR once left the ledger directory as the RELATIVE
+# path `spawn-agent`, i.e. the cwd. Same payload from two directories, one of
+# which holds a complete ledger + sidecar.
+R="$D/regress-tmpdir"
+mkdir -p "$R/holds/spawn-agent" "$R/sibling"
+printf 'w\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n' > "$R/holds/spawn-agent/led.tsv"
+# The sidecar names the SENDER, and the row's minted id names the target. Both
+# must match or the planted ledger grants nothing even to a broken guard, the two
+# cwds agree for the wrong reason, and the check passes vacuously.
+printf '00000000-0000-0000-0000-000000000000' > "$R/holds/spawn-agent/led.owner"
+for c in holds sibling; do
+  ( cd "$R/$c" && printf '{"session_id":"00000000-0000-0000-0000-000000000000","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
+    | TMPDIR="" CLAUDE_CONFIG_DIR="$D" python3 "$G" 2>&1 | wc -c | tr -d ' ' \
+    | sed "s/^/  tmpdir cwd=$c -> bytes=/" )
+done
+```
+
+PASS when the two byte counts are **identical**. That is the invariant, stated as the
+property rather than as a number: the ledger directory is not the cwd, so the cwd
+cannot change the answer. Measured against the pre-fix guard the two lines differ —
+**0 from `holds`, 356 from `sibling`**, silence and `ask` for one payload — which is a
+file in a repository deciding whether a stranger's send goes through. The shipped
+guard answers 0 from both.
+
+**Why identity and not a literal `bytes=0`.** A set-but-empty TMPDIR correctly resolves
+to `/tmp/spawn-agent`, and whether *that* directory holds sidecars is a property of the
+machine, not of the guard. Both counts are 0 wherever it is absent, as here — but
+pinning the number would turn a machine that happens to have one into a FAIL for a
+perfectly correct guard, and a smoke check that cries wolf gets read as noise. Record
+the two numbers next to the verdict either way.
 
 ## 4. The prune, in both directions — *core*
 
