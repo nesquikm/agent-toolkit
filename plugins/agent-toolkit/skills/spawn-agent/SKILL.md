@@ -152,6 +152,7 @@ python3 "$O" "$LEDGER" review-api cwd          # what the worker actually got, n
 | --- | --- | --- |
 | 0 | ours, field printed | proceed |
 | 1 | no live session for this row — never started, exited, or killed | the usual absence; retry or report `GONE` |
+| 2 | no ledger at that path, or no row in it named this | **fix the call.** An empty `$LEDGER` is the usual cause |
 | 3 | a live session holds this name and **it is not ours** | **stop.** Never send, key, read or close it |
 | 4 | more than one live session answers | **stop.** Nothing can say which is meant |
 | 5 | no `.owner` beside the ledger — **nothing in it is provably yours** | **stop.** The stderr line names the sidecar and the one command that writes it |
@@ -161,6 +162,12 @@ yet" turns a stop signal into a spin, and then into a send to a stranger.
 
 **5 is a verdict on the ledger, not on the row**, so it answers every field the same
 way: a file with no sidecar proves nothing about anything in it.
+
+**2 is the one that sits *below* the stop threshold, and that is a trap of its own.**
+The readiness loop breaks on `-ge 3`, so a mistyped name or an empty `$LEDGER` spins
+the whole timeout and then reports a worker that "never became addressable" — for a
+lookup that never named it. `owned.py` says which on stderr; read it rather than
+waiting it out.
 
 `peer.py` still exists and still takes a bare name, but it now answers only the
 pre-launch question — "is this name already taken" — and it sweeps every profile to
@@ -271,12 +278,18 @@ slot is still yours to tidy up. Exit 3 means a `claude` you did not start is liv
 there, and every one of those four commands must stop.
 
 **A `PreToolUse` hook may be enforcing this independently of you.** If a
-`SendMessage` comes back needing confirmation with a reason like *"'X' is a live
-Claude Code session started by hand"*, that is the guard, and it is telling you
-the address is not yours. **Do not answer it by re-sending, by trying the bare
-name, or by asking the user to approve it** — resolve the address through
-`owned.py` and find out why your row does not match. Confirm only when the user
-named that specific session in this turn.
+`SendMessage` comes back needing confirmation with a reason beginning *"'X' is a
+live Claude Code session"*, that is the guard, and it is telling you the address is
+not provably yours. **Do not answer it by re-sending, by trying the bare name, or by
+asking the user to approve it** — resolve the address through `owned.py` and find
+out why your row does not match. Confirm only when the user named that specific
+session in this turn.
+
+**Read the rest of that sentence, because it names two different situations.**
+*"…started by hand (it auto-named itself)"* is a session nobody launched with `-n`:
+the user's own, almost certainly, and the case where confirming is the mistake.
+*"…not spawned by this session"* is everything else, including a worker that really
+is yours and cannot prove it — which is the next paragraph.
 
 **And `owned.py` now says so rather than handing you an address.** A ledger with no
 `.owner` beside it exits 5 and names the sidecar; it used to resolve happily, which
@@ -371,13 +384,23 @@ touch "$LEDGER"   # so the first run's awk/wc don't print "no such file" to stde
 awk -F'\t' 'NF && NF!=6 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$LEDGER" \
   || { echo "stale/foreign ledger at $LEDGER -- rm it or move it aside before spawning" >&2; exit 1; }
 
-# Claim the ledger -- but never by overwriting somebody else's claim. A slot
-# outlives any one claude, so the next session to start here inherits the rows,
-# and rewriting .owner over them would hand this session every worker the
-# PREVIOUS one spawned. Refuse instead, and say which file is in the way.
+# Claim the ledger -- but never by overwriting somebody else's claim, and never by
+# minting one over rows that carry none. A slot outlives any one claude, so the next
+# session to start here inherits the rows, and either form of stamp would hand this
+# session every worker the PREVIOUS one spawned. Refuse both, and say which file is
+# in the way.
 MINE=$(python3 "${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/me.py" sessionId) \
   || { echo "cannot identify myself; not spawning" >&2; exit 1; }
 OWNER_FILE="${LEDGER%.tsv}.owner"
+
+# Rows with NO sidecar are unattributable, and the stamp at the bottom of this
+# block would quietly make them yours. `-s` is false for absent and for empty
+# alike, so this case slips past the test below rather than failing it.
+if [ ! -s "$OWNER_FILE" ] && [ -s "$LEDGER" ]; then
+  echo "$LEDGER has rows but no $OWNER_FILE -- move the ledger aside, or write the sidecar if those rows are yours" >&2
+  exit 1
+fi
+
 if [ -s "$OWNER_FILE" ] && [ "$(cat "$OWNER_FILE")" != "$MINE" ]; then
   if [ -s "$LEDGER" ]; then
     echo "ledger $LEDGER belongs to another run ($(cat "$OWNER_FILE")); move it aside" >&2
@@ -576,7 +599,7 @@ O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
 n=0
 until python3 "$O" "$LEDGER" "$NAME" >/dev/null; do
   s=$?
-  [ "$s" -ge 3 ] && { echo "$NAME resolves to a session this run did not spawn -- stopping" >&2; exit 1; }
+  [ "$s" -ge 3 ] && { echo "owned.py exit=$s for $NAME -- see its stderr above; stopping" >&2; exit 1; }
   sleep 1
   n=$((n+1))
   [ "$n" -gt 60 ] && { echo "$NAME never became addressable -- read its screen" >&2; break; }
@@ -1009,7 +1032,7 @@ worker's state. It is the watcher reporting on *itself*.
   worker is launched, so "no match yet" is the normal state while a `claude`
   boots. Check two things when it lands: that the ledger path expanded (a
   `$CALLER_SLOT` that came out empty in the `Monitor`'s own shell is the usual
-  cause), and that the rows are the current four-column format, since an older,
+  cause), and that the rows are the current **six**-column format, since an older,
   differently shaped ledger puts something that is not a name in column 1.
 
 It is emitted **at most once per run** and never at all once anything has
@@ -1306,7 +1329,7 @@ one, then **offer** — cleanup is a proposal, never a side effect of finishing:
 ```bash
 while IFS=$'\t' read -r name l1 l2 state sid pid; do
   # resolving l1 is the host file's job; empty means the user already closed it
-  reg=$(python3 "$O" "$LEDGER" "$name" status)      # empty = not ours, or not live
+  reg=$(python3 "$O" "$LEDGER" "$name" status)      # empty = not live, not ours, or exit 5
   sid=$(python3 "$O" "$LEDGER" "$name" sessionId)   # capture NOW; unreadable once it exits
   echo "$name  ledger=$state  registry=${reg:-gone}  resume=${sid:-none}"
 done < "$LEDGER"
@@ -1322,7 +1345,14 @@ confirms, with the host file's close command.
   will sit there forever — closing it discards whatever it was about to do. Leave
   those open, and say which ones you left and why.
 - `registry=gone` on a row you never reported is a worker that died mid-stage.
-  Lead with those.
+  Lead with those — **unless the whole ledger reads that way.** Every row `gone`
+  with `resume=none` is the exit-5 signature, not simultaneous deaths: with no
+  `.owner`, `owned.py` refuses every row and both captures come back empty.
+  Measured on two ledgers identical but for the sidecar, naming the same live
+  session — with it, `registry=idle resume=1111…`; without it, `registry=gone
+  resume=none`. Nothing downstream catches this for you, because `occupant.py`
+  joins on the pinned pid and never reads `.owner`, so the close would go through.
+  Write the sidecar and re-run this loop before you offer to close anything.
 - **Confirm every close by re-resolving the locator, never by reading what the close
   command echoed back.** One host prints an allocation counter that has nothing to do
   with the slot you just closed; the host file says which.

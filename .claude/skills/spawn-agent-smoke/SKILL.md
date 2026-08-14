@@ -475,29 +475,35 @@ print("%d live sessions, %d with a socket, %d without" % (live, sock, live - soc
 Checks 2 and 3 prove a name can be seen. This one proves a name is **not enough**, and
 that a *ledger* with nothing to prove it by is refused rather than trusted — the two
 halves of the guarantee the whole skill now rests on. Hermetic: one fixture profile,
-four fixture ledgers, nothing spawned.
+five fixture ledgers, nothing spawned.
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
 mkdir -p "$D/sessions" "$D/spawn-agent"
-# pid 1 is permanently "alive" for the reason check 3 gives. Two records, same name,
-# to make the ambiguous case reachable without racing anything real.
+# pid 1 is permanently "alive" for the reason check 3 gives, and it is the only pid
+# these records need -- what is being faked is the REGISTRY, not the process table.
 printf '{"pid":1,"name":"smoke-own-probe","cwd":"/","sessionId":"11111111-1111-1111-1111-111111111111","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/1.json"
+# Two more records, one name, one minted id between them: the ambiguous case, made
+# reachable without racing anything real. A different name from the probe above, so
+# the other four fixtures resolve to exactly one record as before.
+printf '{"pid":1,"name":"smoke-own-dup","cwd":"/","sessionId":"33333333-3333-3333-3333-333333333333","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/2.json"
+printf '{"pid":1,"name":"smoke-own-dup","cwd":"/","sessionId":"33333333-3333-3333-3333-333333333333","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/3.json"
 printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/spawn-agent/led-ok.tsv"
 printf 'smoke-own-probe\tL1\tL2\tspawned\t99999999-9999-9999-9999-999999999999\t\n'   > "$D/spawn-agent/led-foreign.tsv"
 printf 'smoke-own-probe\tL1\tL2\tspawned\t\t\n'                                       > "$D/spawn-agent/led-legacy.tsv"
 printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/spawn-agent/led-nosidecar.tsv"
-# Three of the four get a sidecar. Without one they would all stop at the sidecar
+printf 'smoke-own-dup\tL1\tL2\tspawned\t33333333-3333-3333-3333-333333333333\t1\n'     > "$D/spawn-agent/led-ambiguous.tsv"
+# Four of the five get a sidecar. Without one they would all stop at the sidecar
 # check and never reach the assertion they exist to make.
-for f in ok foreign legacy; do
+for f in ok foreign legacy ambiguous; do
   printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-$f.owner"
 done
 ```
 
 **The ledgers go in `$D/spawn-agent/`, not in `$D`, and the directory name is the
 load-bearing part.** The enforcement sub-check below points `TMPDIR` at `$D`, and the
-guard globs `$TMPDIR/spawn-agent/*.tsv` — so this layout is what lets the same four
+guard globs `$TMPDIR/spawn-agent/*.tsv` — so this layout is what lets one set of
 fixtures serve both halves. It is also what keeps the guard's glob off the **live**
 ledgers in the real `${TMPDIR:-/tmp}/spawn-agent/`, which belong to running sessions
 and which nothing in this check may read, write or point at.
@@ -508,9 +514,14 @@ CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
 for f in ok foreign legacy nosidecar; do
   CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
-  echo "  $f -> exit=$?"
+  printf '  %-9s -> exit=%s\n' "$f" "$?"
 done
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ok.tsv" no-row-for-this >/dev/null 2>&1; echo "  norow -> exit=$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ambiguous.tsv" smoke-own-dup >/dev/null 2>&1
+printf '  %-9s -> exit=%s\n' ambiguous "$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ok.tsv" no-row-for-this >/dev/null 2>&1
+printf '  %-9s -> exit=%s\n' norow "$?"
+CLAUDE_CONFIG_DIR="$D" python3 "$O" "" smoke-own-probe >/dev/null 2>&1
+printf '  %-9s -> exit=%s\n' noledger "$?"
 ```
 
 PASS on exactly:
@@ -520,8 +531,14 @@ PASS on exactly:
   foreign   -> exit=3
   legacy    -> exit=3
   nosidecar -> exit=5
+  ambiguous -> exit=4
   norow     -> exit=2
+  noledger  -> exit=2
 ```
+
+**The padding is not decoration.** This block is read under a heading that says
+"exactly", so an unpadded `echo` would differ textually from every expected line and
+invite a FAIL on a passing run.
 
 **`foreign` is the reported incident, reduced to one line.** The name matches a live
 session; the minted id does not. Exit 0 there would mean the ledger trusts a name, and
@@ -541,6 +558,20 @@ exactly this file by hand, had every `SendMessage` to that worker gated in both
 directions, and was sent by the skill's own diagnostic to a tool that reported nothing
 wrong. Exit 0 here is that bug, restored.
 
+**`ambiguous` is the one HARD STOP that nothing else here reaches.** Two registry
+records, one name, one minted id between them — the state measured on 2026-08-13 when
+two live sessions were started with the same `--session-id` and both registered
+without error. `owned.py` must refuse to pick, and the fixture is deliberately named
+`smoke-own-dup` rather than `smoke-own-probe` so that adding it leaves the other rows
+resolving to exactly one record, as they did before.
+
+**`noledger` is the path that used to be a stray file in your repo.** Before the
+existence check, an empty first argument was answered as a *missing sidecar*, and the
+repair line it printed ended in a bare relative `.owner` — one paste away from
+dropping that file wherever the shell happened to be standing. An empty `$LEDGER` is
+the ordinary way in, since a Bash call's variables do not survive the call. Exit 2
+names the real fault instead.
+
 **And the `ok` row is the regression that matters most.** It must exit 0 *and* print a
 `uds:` address, because the reply path depends on it: if ownership is too strict, every
 worker becomes unaddressable and the skill stops working rather than stops hijacking.
@@ -559,31 +590,53 @@ must fire, or the run is trusting prose alone:
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-[ -x ~/.claude/hooks/spawn-agent-guard.py ] || echo "  (no guard installed -- skip, not a FAIL)"
+G=~/.claude/hooks/spawn-agent-guard.py
+[ -x "$G" ] || { echo "  (no guard installed -- SKIP, not a FAIL)"; exit 0; }
 # 1. A session that owns nothing, sending to the fixture worker -> ask.
 printf '{"session_id":"00000000-0000-0000-0000-000000000000","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
-  | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 ~/.claude/hooks/spawn-agent-guard.py > "$D/ask.out" 2>&1
-echo "  ask       -> exit=$? bytes=$(wc -c < "$D/ask.out" | tr -d ' ')"
+  | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 "$G" > "$D/ask.out" 2>&1
+X=$?
+DEC=$(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1]))["hookSpecificOutput"]["permissionDecision"])' \
+  "$D/ask.out" 2>/dev/null || echo "<no decision -- see $D/ask.out>")
+echo "  ask       -> decision=$DEC exit=$X"
 ```
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+G=~/.claude/hooks/spawn-agent-guard.py
+[ -x "$G" ] || { echo "  (no guard installed -- SKIP, not a FAIL)"; exit 0; }
 # 2. The SAME send, from the session named in led-ok.owner -> silence.
 printf '{"session_id":"22222222-2222-2222-2222-222222222222","tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/cc-socks/1.sock","message":"x"}}' \
-  | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 ~/.claude/hooks/spawn-agent-guard.py > "$D/pass.out" 2>&1
-echo "  passthru  -> exit=$? bytes=$(wc -c < "$D/pass.out" | tr -d ' ')"
+  | TMPDIR="$D" CLAUDE_CONFIG_DIR="$D" python3 "$G" > "$D/pass.out" 2>&1
+X=$?
+[ -s "$D/pass.out" ] && cat "$D/pass.out"     # anything here is the failure, shown
+echo "  passthru  -> exit=$X bytes=$(wc -c < "$D/pass.out" | tr -d ' ')"
 ```
 
 PASS on exactly:
 
 ```
-  ask       -> exit=0 bytes=<non-zero, and the JSON says permissionDecision "ask">
+  ask       -> decision=ask exit=0
   passthru  -> exit=0 bytes=0
 ```
 
-A hook that prints `allow` on the first is a FAIL — it would wave through exactly the
-send the guard exists to catch.
+**Assert the decision string, not the byte count, and this is the check correcting
+itself.** An earlier version of this block printed `bytes=` on the `ask` line and
+called it PASS for anything non-zero. Measured against a stub that is the real guard
+with `"ask"` replaced by `"allow"`: the guard answers 356 bytes, the stub 358 — both
+non-zero, both accepted, while the paragraph below calls the second a FAIL. A byte
+count cannot see the one field this check is about. `decision=allow` is a FAIL; it
+would wave through exactly the send the guard exists to catch.
+
+`bytes=` stays on the pass-through line because there 0 **is** the assertion — there
+is no decision to name when a guard correctly says nothing.
+
+**Both blocks skip, rather than one announcing a skip and then running anyway.** The
+`|| { …; exit 0; }` form is what makes the announcement true. With `2>&1` capturing
+the interpreter's own error, a missing guard would otherwise print two unexplained
+lines under a heading that says its absence is not a FAIL.
 
 **Both directions, because `ask` alone is passed by a guard that asks for
 everything** — and that is not a straw man, it is the live symptom this check was
@@ -916,7 +969,7 @@ L="<the ledger path the setup block built>"
 n=0
 until python3 "$O" "$L" "<NAME>" >/dev/null; do
   s=$?
-  [ "$s" -ge 3 ] && { echo "STOP exit=$s -- that name is not our worker"; break; }
+  [ "$s" -ge 3 ] && { echo "STOP owned.py exit=$s -- see its stderr above"; break; }
   sleep 1
   n=$((n+1))
   [ "$n" -gt 20 ] && { echo "not addressable after ${n}s"; break; }
@@ -924,10 +977,17 @@ done
 echo "loop ended at n=$n"
 ```
 
-**Exit 3 or 4 here is a FAIL of the run, not of the check.** They mean a live session
-answers to your worker's name and is not the session you minted (3), or that more than
-one answers (4). Both mean the ledger row and the machine disagree about who your
-worker is, and neither improves by waiting.
+**Exit 3, 4 or 5 here is a FAIL of the run, not of the check.** They mean a live
+session answers to your worker's name and is not the session you minted (3), that more
+than one answers (4), or that the ledger has no `.owner` beside it (5). The first two
+mean the ledger row and the machine disagree about who your worker is; the third means
+the row cannot be attributed at all. None improves by waiting.
+
+**5 is the one with a repair rather than a diagnosis**, and it points at the setup
+block, not at the worker: the run reached this loop without writing its sidecar. Write
+it — `python3 <plugin root>/skills/spawn-agent/lib/me.py sessionId > "${L%.tsv}.owner"`
+— and say so in the report, because a run that got here is a run whose setup block was
+not followed. `owned.py`'s own stderr names both paths for you.
 
 A worker that never registers costs 21.8 s of wall clock there, measured — so the
 bound is the difference between a check and a stall.
@@ -1007,7 +1067,7 @@ want, got = sys.argv[1], sys.argv[2]
 print("want:", want)
 print("got :", got or "(nothing)")
 if not got:
-    sys.exit("FAIL owned.py printed no cwd -- not registered, or not ours")
+    sys.exit("FAIL owned.py printed no cwd -- not registered, not ours, or no .owner (5)")
 print("PASS" if os.path.exists(got) and os.path.samefile(want, got) else "FAIL")
 ' "$REPO" "$(python3 "$O" "$L" "<NAME>" cwd)"
 ```
@@ -1492,12 +1552,20 @@ exist, and the two are **byte-identical**. Measured 2026-08-12:
 | live worker, blocked | `waiting`, exit 0 | `permission prompt`, exit 0 |
 | live worker, not blocked | `idle`, exit 0 | nothing, exit 1 |
 | worker that died, or a name that never existed | nothing, exit 1 | nothing, exit 1 |
+| ledger with no `.owner` beside it | nothing, exit **5** | nothing, exit **5** |
 
 So `waitingFor` exit 1 on its own means either "you looked too early" or "the worker is
 gone", and nothing distinguishes them. `status` does: exit 0 says the worker is alive and
 you are early, exit 1 says it is not there at all and you should be reading check 12's
 leak proof instead of hunting a phantom block. This is the same "absent and refused look
 identical" shape check 3 is built around, one field over.
+
+**The last row is the one that says nothing about the worker at all**, and on stdout it
+is indistinguishable from the other two. Every field of every row answers that way when
+the sidecar is missing, so a *whole* column of blanks is the tell — and the exit code
+and `owned.py`'s stderr are where the reason is written. Capture the status separately
+rather than reading `${var:-}` defaults, or a run whose setup block skipped the sidecar
+reads as a machine full of dead workers.
 
 **Silence and `GONE` are both failures here, and they mean opposite things.** Silence
 past twenty seconds means the watcher never saw the wait: check that this worker's row
@@ -1673,9 +1741,13 @@ ls "${TMPDIR:-/tmp}/spawn-agent/" 2>/dev/null; echo "  (your slot's .tsv must be
 
    The second line removes **this run's** scratch directory and nothing else — the
    throwaway repo, the ledger fixtures, the deaf watcher's ledger, and check 3's
-   `fixture-profile/`. Confirm that last one specifically: it is a synthetic
-   `CLAUDE_CONFIG_DIR` holding a session record for a session that never existed, and it
-   is the single artifact here that another tool could misread as real.
+   `fixture-profile/`. Two things under it could be misread as real by another tool,
+   so confirm both are gone: `fixture-profile/` is a synthetic `CLAUDE_CONFIG_DIR`
+   holding a session record for a session that never existed, and check 3b's
+   `own-fixture/` now contains a directory literally named `spawn-agent/` holding
+   five ledgers and four sidecars. Nothing globs for those outside a `TMPDIR` pointed
+   at them, which is why they are safe to write — and also why they must not be left
+   lying in a tree that a future check might point a `TMPDIR` at.
 
    **Both guards are load-bearing and they protect different strangers.** An empty
    `CALLER_SLOT` makes the first line delete `…/spawn-agent/.tsv` and quietly leave the

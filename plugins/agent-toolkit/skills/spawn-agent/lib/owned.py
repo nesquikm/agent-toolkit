@@ -10,11 +10,16 @@ question that actually matters: **is the live session behind this ledger row the
 one this run started?**
 
   exit 0   the field, for a session proven to be ours
-  exit 1   no live session for this row — never started, exited, or killed
-  exit 3   a live session holds this NAME but is not ours — HARD STOP, never retry
+  exit 1   nothing live for this row — never started, exited or killed; also a live
+           session with no inbox socket, and a field its record does not carry
+  exit 2   no ledger at that path, or no row in it named this
+  exit 3   HARD STOP, never retry — a live session holds this NAME but is not ours,
+           or `.owner` names another session, or the row has no minted id
   exit 4   ambiguous: more than one live session answers — HARD STOP
   exit 5   no `.owner` beside the ledger — ownership is unprovable, HARD STOP
-  exit 2   usage / unreadable ledger
+
+A malformed *invocation* exits 1 too (`sys.exit` with a usage string), so read the
+table above as the answers to a well-formed call.
 
 Fields: address (default), pid, status, waitingFor, sessionId, cwd, name.
 
@@ -114,6 +119,17 @@ def main():
         sys.exit(USAGE)
     ledger, name = sys.argv[1], sys.argv[2]
     field = sys.argv[3] if len(sys.argv) > 3 else "address"
+
+    # Establish that the ledger is THERE before saying anything about ownership.
+    # An empty $LEDGER is the ordinary way in -- a Bash call's shell state does not
+    # outlive the call, so a block that forgets to re-derive it passes "" -- and it
+    # would otherwise be answered as a missing sidecar, whose repair line names a
+    # RELATIVE `.owner` and drops one into whatever directory the caller stood in.
+    # A path with no file behind it has no rows, so refusing here cannot re-open
+    # the hole the sidecar check closes.
+    if not ledger or not os.path.isfile(ledger):
+        print(f"owned: no ledger at {ledger!r}", file=sys.stderr)
+        return 2
 
     # The ledger says which workers exist; the .owner sidecar says whose they are.
     # Check it before anything else: a slot outlives any one claude, so a session
