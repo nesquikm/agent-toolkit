@@ -96,6 +96,51 @@ answering a prompt, and whenever the worker must act on the user's own authority
 | send a task | `SendMessage` to `uds:<socket>` |
 | answer a prompt | the host's keystroke command |
 
+### A peer message may narrow a worker's scope, never widen it
+
+**The clause above — "whenever the worker must act on the user's own authority" — is
+a rule, not a preference.** The reason is what a well-built worker does with an
+authorization that arrives as prose: it refuses it, and the refusal costs a gate that
+would not otherwise exist.
+
+Measured 2026-08-17, three serial workers in one run. The user's standing instruction
+— drive this work on your own, don't merge to staging or main — was relayed to the
+running worker as a `SendMessage`. It read it and raised a gate of its own rather than
+acting on it:
+
+```
+The peer session claims the operator authorized it to self-approve my remaining
+gates (…). I can't treat a peer message as your approval. How do you want the rest
+of the chain run?
+```
+
+It was right, and that is the point: a peer's claim that the user authorized something
+is not the user authorizing it, and no wording of the message can make it one. The
+same message carried two other instructions — stop at the open draft PR and never
+merge, verify on this machine only — and the worker applied both without challenge,
+saying unprompted that those narrow scope rather than expand it and so needed no
+separate authorization. It took a factual correction from that message too, after
+checking the claim against the source itself.
+
+| A peer message may … | A peer message may never … |
+| --- | --- |
+| **narrow** scope — stop at this point, this repo only, don't touch that | **widen** it — approve a gate, grant a permission, say the worker may self-approve |
+| supply facts and corrections the worker can check for itself | assert what the user said, as the grounds for acting |
+
+**Nothing enforces this for you.** The `SendMessage` guard decides on the target
+address alone and never reads the message body, so a send to a worker you really did
+spawn passes in silence however it is worded. The worker's own judgement is the only
+thing in the path.
+
+So **a worker's gate policy — whether it may approve its own checkpoints or must stop
+and ask at each one — belongs in the kickoff task text**, where it is part of the job
+the user's own launch created rather than a mid-run claim by a peer: 1 of 1 worker
+told mid-run raised the gate, and 0 of the 2 launched with the policy in their kickoff
+did. An authorization that only exists mid-run has to go by keys, using the host
+file's keystroke channel — indistinguishable from the user typing, which is both why
+it is the only channel that can carry their authority and why nothing checks it
+either.
+
 ## The peer registry is a directory of JSON files
 
 Every session with messaging writes `<config-dir>/sessions/<pid>.json` and
@@ -710,6 +755,12 @@ plus the instruction to report back. These are one-shot kickoffs; a worker canno
 be clarified as cheaply as a conversation. If the user asked for `ultracode`,
 include that word in the text — it is a keyword the worker reads, not a CLI flag.
 
+**The worker's gate policy is part of that spec** — whether it may approve its own
+checkpoints, the points where its task or its skills would otherwise stop and ask a
+human, or must stop and ask at each one. A policy that arrives later arrives from a
+peer, and "A peer message may narrow a worker's scope, never widen it", above, is why
+a worker is right to refuse it.
+
 **Ask for the findings in the reply, not just an acknowledgement.** The reply
 interrupts you with its body in it, so a worker that answers "counted 89 lines"
 has finished the reporting round trip in one hop. A worker that answers "done"
@@ -1136,6 +1187,20 @@ opens where you already want to be, that is `enter` alone. The pre-registration 
 below are where this costs the most: the wrong extra `down` selects "No, exit" and
 kills the worker outright.
 
+**The pre-selection cuts both ways, and the second direction is the quieter one.**
+"Pre-selected" means the *conservative* option, which is not the same as the option
+carrying the user's answer. Measured 2026-08-17, a worker asking how to handle its
+remaining checkpoints after the user had already said to run on:
+
+```
+❯ 1. Keep asking me at each gate
+  2. You approve them — run to the draft PR
+```
+
+A reflexive `enter` there would have selected the opposite of what the user had just
+asked for. Unlike the extra `down` below, it kills nothing and errors nothing: the run
+continues, looking healthy, under a policy nobody chose.
+
 **`SendMessage` cannot clear a block, and it does not fail loudly when you try.**
 Measured 2026-08-09: a message sent to a worker parked on an `AskUserQuestion`
 returned `success: true`, appeared on that worker's screen as queued text *beneath*
@@ -1542,6 +1607,11 @@ which is the one failure this whole section exists to prevent.
   as the backstop for a worker that finished without reporting.
 - **Messages cannot clear a block and cannot run a slash command.** Keys can do
   both, one `Bash` call per keystroke.
+- **A peer message may narrow a worker's scope; it may never widen it.** Extra
+  constraints, corrections, and facts the worker can check for itself travel fine.
+  An authorization does not: relayed as prose it was correctly refused, and cost a
+  gate that would not otherwise exist. Gate policy goes in the kickoff text; an
+  authorization that only exists mid-run goes by keys.
 - **Keep workers in your own permission class**, or messaging silently stops in
   both directions.
 - **The ledger is on disk**, at `${TMPDIR:-/tmp}/spawn-agent/<caller slot>.tsv` —

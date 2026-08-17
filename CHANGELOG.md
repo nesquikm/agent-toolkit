@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.8.1] — 2026-08-17 — "Hearsay"
+
+Mid-run, an orchestrator relayed its user's standing instruction to a running worker as a peer `SendMessage` — *you may self-approve your remaining gates*. The worker read it and **raised its own gate rather than acting on it**, saying it could not treat a peer's claim about the user as the user's approval. It was right, and that is the finding: an authorization delivered over messaging is not merely late, it is *correctly refused*, and the refusal costs a gate that would not otherwise exist.
+
+`SKILL.md` already contained the answer — *use keys "whenever the worker must act on the user's own authority"* — as a subordinate clause at the end of a sentence about slash commands, in a table about delivery mechanics. Every other hazard in that file is documented by its measured failure mode; this one was documented as a channel preference. The consequence was nowhere.
+
+What makes it decidable is an asymmetry the same worker stated unprompted, having accepted two other instructions from the same message without challenge: **those narrowed its scope rather than expanding it, so they needed no separate authorization.** A peer may restrict what a worker does and supply facts it can check for itself; a peer may never widen what it may do. The practical consequence is that gate policy belongs in the kickoff text, where it is part of the job the user's own launch created — 1 of 1 worker told mid-run raised the gate, and 0 of the 2 launched with the policy in their kickoff did.
+
+Documentation only: four insertions, no measured sentence reworded, no heading renamed, and no behavioural change to any script or hook.
+
+### Changed
+
+- **`SKILL.md` states the rule that decides it**, in a new subsection closing the two-channel section: a peer message may **narrow** a worker's scope and supply corrections it can verify, and may never **widen** it — approve a gate, grant a permission, or assert what the user said as grounds for acting. It also records that nothing enforces this: the `SendMessage` guard decides on the target address alone and never reads the message body, so a send to a worker you really did spawn passes in silence however it is worded. The worker's own judgement is the only thing in the path.
+- **Gate policy is named as part of the kickoff spec.** "Send the task" already demanded the whole spec, the literal `uds:` reply address and what *done* means; it now names the worker's gate policy — whether it may approve its own checkpoints or must stop and ask at each one — because a policy that arrives later arrives from a peer, which is exactly what a worker is right to refuse.
+- **The pre-selection warning now cuts both ways.** "Answer a blocked worker" recorded one direction of the miscount — an extra `down` on the folder-trust gate selects "No, exit" and kills the worker — and generalised from it that the safe option is usually pre-selected. Measured 2026-08-17, the inverse: on a gate offering *"1. Keep asking me at each gate"* (pre-selected) and *"2. You approve them — run to the draft PR"*, a reflexive `enter` would have chosen the opposite of what the user had just asked for. Unlike the extra `down`, it kills nothing and errors nothing — the run continues, looking healthy, under a policy nobody chose. "Pre-selected" predicts the *conservative* option, which is not the same as the one carrying the user's answer.
+
 ## [0.8.0] — 2026-08-14 — "Turnstile"
 
 For two releases this file and the README described **the enforcement hook** — the thing that stops a `SendMessage` landing in a session a run cannot prove it spawned — and no reader could obtain it. It was untracked, in no repository, wired by absolute path into one machine's `settings.json`. The skill hedged accordingly (*"a `PreToolUse` hook **may be** enforcing this"*), the smoke test called its absence "not a FAIL", and both were telling the truth about a component that was documented as if it shipped.
