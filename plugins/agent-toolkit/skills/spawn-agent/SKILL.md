@@ -1561,9 +1561,9 @@ confirms, with the host file's close command.
   command echoed back.** One host prints an allocation counter that has nothing to do
   with the slot you just closed; the host file says which.
 - Prune closed rows from the ledger so the next offer is not a list of ghosts. Match
-  on locator 1, and rewrite through a temp file — `sed -i` is the improvised
-  answer here and it is not portable to the BSD `sed` on this machine:
-  `[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }`
+  the **name**, as a whole field, and rewrite through a temp file — `sed -i` is the
+  improvised answer here and it is not portable to the BSD `sed` on this machine:
+  `[ -n "$name" ] && { awk -F'\t' -v k=1 -v want="$name" 'NF && $k != want' "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }`
   **Prune only a row whose close you actually performed** — including a foreign-host
   row you closed by reading the other host's file, and *excluding* every row the table
   above told you to report rather than close. That line has no host term because the
@@ -1572,47 +1572,40 @@ confirms, with the host file's close command.
   change — one says an unresolvable locator means "already gone; closing nothing" with
   exit 0, the other says "drop the row and close nothing", which is the prune spelled
   out. Both are how defect (1) turned a leaked slot into a clean finish.
-  A locator is also safe to match across hosts, measured on a two-row cmux+herdr
-  ledger: pruning the cmux uuid left the herdr row and pruning `w9:p3` left the cmux
-  row. A cmux uuid contains no colon and a herdr id contains no 36-character hex run,
-  so the two alphabets cannot collide. What *can* collide is two herdr ids on the same
-  host — `w9:p3` is a substring of `w9:p30` — which is a real erasure bug, is not
-  cross-host, and is deliberately not fixed here (see the note at the end of this
-  section).
-  **Both halves of that line are load-bearing, and they fail in opposite directions —
-  learn only one and you will write the other bug.**
-  - **Join the `grep` and the `mv` with `;`, never with `&&`.** `grep` exits 1 when it
-    selects no lines, so the `&&` form skips the `mv` exactly when the result is empty
-    — the last row of any ledger, which on a single-worker run is the only prune the
-    run ever does. The ghost row survives and a stray `.tmp` is left beside it.
-  - **Guard `$l1` first.** That is not defensive padding; it is what stops the same
-    one-liner shredding the ledger. `grep -v -F ""` selects *nothing*, and with the
-    `mv` now unconditional that nothing is installed over the whole file. Empty `$l1`
-    is reachable by following this file rather than by ignoring it: it comes from the
-    loop above, the prune reads as a standalone command, and variables do not survive
-    to the next `Bash` call — so a supervisor that prunes in a fresh call has it unset
-    and destroys the record of every slot the run owns. Measured both ways: unguarded,
-    a three-row ledger goes to **0 rows and 0 bytes while exiting 0** — the destruction
-    reports success, so nothing upstream can notice it, and the `&&` form's exit 1 was
-    the only tripwire there ever was; guarded, it is untouched.
+  **`-v k=1` rather than a bare dollar sign and the digit 1**, for the reason "The
+  ledger" gives above — a bare dollar-plus-digit in skill text is replaced by the
+  skill's own invocation arguments before you read it. The `NF` term skips a blank
+  line rather than writing it back.
 
-  That asymmetry is the whole point. The `&&` bug leaves one ghost row and the next
-  cleanup offers a slot that is already closed. The unguarded bug erases which slots
-  the run owns at all, and "only ever propose slots from this run's ledger" then
-  makes every one of those slots unofferable forever. One is noise; the other is the
-  exact failure the ledger exists to prevent.
+  **The name is the row key, and that is what makes a whole-field match the right
+  one.** Column 1 is what the watcher reads and what every `owned.py` lookup resolves
+  through, so a prune keyed on anything else was matching a field the rest of this
+  file does not treat as the identity. It is also host-free, so the cross-host
+  question the locators raise does not arise on this line at all.
 
-  **A third bug lives in that same `grep` and is not fixed here.** `grep -v -F` matches
-  a substring of the whole line, so on herdr a legal, non-empty `l1="w9:p3"` also
-  deletes the row for `w9:p30`. Reproduced: a two-row ledger goes to **0 rows, exit
-  0**, which is the unguarded-`$l1` catastrophe above reached with a perfectly valid
-  locator, so the `[ -n "$l1" ]` guard never fires. cmux was safe by accident — its
-  uuids are fixed-width and cannot prefix-collide — and herdr's climbing, never-reused
-  pane ids make it reachable once a server session has created ten-plus panes. The fix
-  is a whole-field `awk` match on the name, and it cannot ride along: `awk` exits 0
-  when it selects nothing, which destroys the premise of the smoke check that protects
-  the `;`-versus-`&&` lesson above. Its own change, its own reasoning, its own smoke
-  rewrite.
+  **This was a `grep -v -F` on locator 1 until v0.9.1, and that was an erasure bug.**
+  `grep` matches a substring of the whole line, so a legal, non-empty locator deleted
+  every row that merely *contained* it. Measured on a two-row herdr ledger: pruning
+  `w9:p3` took `w9:p30` with it and left **0 rows, exit 0**. Nothing caught it — the
+  locator was valid, so the emptiness guard never fired, and the destruction reported
+  success. cmux was safe by accident, its uuids being fixed-width and unable to
+  prefix-collide; herdr's climbing, never-reused pane ids reach the collision as soon
+  as a server session has created ten-plus panes.
+
+  **Two hazards documented here for three releases were properties of `grep`, and the
+  `awk` form removes both. Do not restore the warnings.** Re-measured on the new line:
+
+  | the old hazard | why it existed | on the `awk` form |
+  | --- | --- | --- |
+  | joining with `&&` skipped the `mv` on the last row, leaving a ghost row and a stray `.tmp` | `grep` exits 1 when it selects nothing | **gone** — `awk` exits 0 either way, measured on a one-row prune |
+  | an empty variable installed *nothing* over the whole file — 0 rows, 0 bytes, exit 0 | `grep -v -F ""` selects nothing | **gone** — an empty `want` keeps every row whose column 1 is non-empty; the one-row ledger survived intact |
+
+  Both survivals are why the two guards are still written above and why neither means
+  what it used to. The `;` stays because it is unconditionally correct and costs
+  nothing, not because the `&&` form still breaks. The `[ -n "$name" ]` guard stays
+  because an empty `$name` means the loop variable did not survive — variables die
+  with each `Bash` call and this prune reads as a standalone command — so it now
+  refuses a caller that lost its place, rather than preventing a catastrophe.
 - A dead worker leaves its `<pid>.json` behind. It is not yours to delete, and
   `peer` and the watcher both ignore it on the pid check.
 

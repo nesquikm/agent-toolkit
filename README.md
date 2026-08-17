@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.9.0 — "Postmark"** (the ledger's two locator columns mean different things on each host and nothing in the row said which host wrote it, so a cmux supervisor holding one herdr worker read that row as already-closed and would have leaked the tab while reporting a clean finish — column 7 now names the host, teardown refuses what it cannot reach instead of silently pruning it, and column 6 holds a literal dash because an empty interior column collapses under shell field splitting)
+Latest: **v0.9.1 — "Whole Field"** (the ledger prune matched a substring of the whole row, so pruning the herdr pane w9:p3 also deleted w9:p30 and left zero rows while exiting 0 — with a valid locator, so the emptiness guard never fired; it now matches the name as a whole awk field, and the two hazards that were properties of grep are documented as retired rather than left as warnings that describe nothing)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
