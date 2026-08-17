@@ -1333,15 +1333,72 @@ column 5 and not merely handed out. It does not prove two `claude`s on one tty a
 separated correctly — that is not constructible here without starting a stranger in
 the user's own terminal.
 
-**herdr** — `PaneInfo` carries no tty, so `occupant.py` does not apply and its
-equivalent is the two-witness check in `hosts/herdr.md` §5. Assert the strong half
-(`terminal_id` equals ledger column 3), and give it teeth the same way — compare
-against some *other* pane's `terminal_id` and confirm that comparison reports a
-mismatch. Then **record, rather than assert, what `agent_session.value` holds while
-the worker is still gated.** That witness is set by `pane.report_agent_session`, which
-a `claude` parked on the trust dialog has not reached; if it reads empty here, then
-herdr's "treat a mismatch as a stop" has the same shape as the cmux defect above and
-nobody has measured it. Report the value either way — the measurement is the point.
+**herdr** — `PaneInfo` carries no tty, but `pane process-info` carries the pane's
+`shell_pid` and `ps` turns that into one, so since 2026-08-17 `occupant.py` applies
+here too and `hosts/herdr.md` §5 is the same three-part check. Assert all three, and
+give each of them teeth:
+
+```bash
+OC="<plugin root>/skills/spawn-agent/lib/occupant.py"
+SHPID=$(herdr pane process-info --pane "$L1" | python3 -c '
+import json,sys
+print(json.load(sys.stdin)["result"]["process_info"]["shell_pid"])')
+TTY=$(ps -o tty= -p "$SHPID" | tr -d " ")
+[ -n "$TTY" ] && echo "tty=$TTY" || echo "FAIL no tty behind $L1"
+python3 "$OC" "$TTY" "$L" "<NAME>"; echo "occupant exit=$? -- PASS iff 0"
+```
+
+The control is the cmux one verbatim — same tty, same live process, only the row's
+column 5 swapped — and it must answer **3**:
+
+```bash
+CTL="${TMPDIR:-/tmp}/occupant-control.tsv"
+sed 's/<the minted SID>/11111111-2222-3333-4444-555555555555/' "$L" > "$CTL"
+python3 "$OC" "$TTY" "$CTL" "<NAME>"; echo "control exit=$? -- PASS iff 3"
+rm -f "$CTL"
+```
+
+`0` then `3` is the PASS, and `0` then `0` is the worse FAIL for the reason the cmux
+half gives: an assertion that cannot fail is not an assertion.
+
+**herdr can construct the two-process case cmux cannot.** The cmux control swaps the
+row rather than the process, because starting a stranger in the user's own terminal is
+not something a smoke run may do. Here both panes are the run's own, so if check 7c
+placed a second worker, also run `occupant.py` with **worker A's ledger and worker B's
+tty** and confirm **3**. That is a real foreign live `claude`, not a doctored row, and
+it proves the separation the swap cannot. Skip it rather than spawn an extra worker for
+it; note in the record which variant you ran.
+
+Then the two herdr witnesses, from **`pane get`** — not `agent get`, which is addressed
+by a mutable name:
+
+```bash
+herdr pane get "$L1" | python3 -c '
+import json,sys
+p=json.load(sys.stdin)["result"]["pane"]
+print("terminal_id", p["terminal_id"])
+print("agent_session", repr((p.get("agent_session") or {}).get("value","")))'
+```
+
+- **`terminal_id` must equal ledger column 3** — assert it, and give it teeth by
+  comparing against some *other* pane's `terminal_id` and confirming that reports a
+  mismatch.
+- **`agent_session.value` must be empty here, and that is now an assertion.** Measured
+  2026-08-17: the key is *absent* from `pane get` while the worker sits on the trust
+  gate, and populates with the minted uuid within 1 s of the `enter` below.
+  `pane.report_agent_session` is what writes it and a gated `claude` has not reached
+  that call. A **non-empty** value at this point is a FAIL of the measurement this
+  check rests on — say so and stop, because §5 scopes its stop rule to exactly this
+  reading. Re-read it *after* the gate clears and assert it then equals column 5; that
+  second read is the half that can catch a real mismatch, and it is where the teeth
+  are.
+
+**The empty reading is not on its own a licence to proceed, and 7e must not be written
+as though it were.** §5 relaxes the weak witness only because the occupant join above
+ran and returned 0 — measured the same day, a stranger's `claude` started in a worker's
+own surviving pane leaves `terminal_id` matching *and* `agent_session` empty, so both
+herdr witnesses say proceed and only `occupant.py` says stop. If the occupant block
+above did not run, this check has proved nothing about ownership.
 
 **Read the directory in the dialog before you press anything.** It must be the scratch
 repo. The gate is answered by `enter` **alone**, because option 1 is already selected:

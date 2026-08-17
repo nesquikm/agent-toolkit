@@ -292,40 +292,141 @@ or this is the channel by which a stale name hands the user's own session your w
 
 `SKILL.md`'s "A slot is not a session" applies here in full: a pane outlives the
 agent in it, so a worker that exited leaves a pane the user can start their own
-`claude` in, and `$L1` keeps resolving. cmux joins on the tty; herdr has no tty in
-`PaneInfo`, so use the two witnesses it does give you, **both of them**:
+`claude` in, and `$L1` keeps resolving.
+
+**herdr reaches the same evidence cmux does, and this file claimed otherwise until
+2026-08-17.** `PaneInfo` carries no tty — that part was right — but
+`herdr pane process-info` carries the pane's `shell_pid`, and `ps` turns a pid into a
+tty. So `SKILL.md`'s occupant check is not a cmux facility that herdr has to
+approximate with weaker witnesses. It is host-blind by design, it takes a tty as its
+argument, and the two lines below are what hand it one.
+
+Run all three checks. They answer different questions and none of them substitutes
+for another.
+
+**1. The pane is the pane the row was written about.** Both herdr witnesses come from
+one call:
 
 ```bash
 herdr pane get "$l1" | python3 -c '
 import json,sys
 p=json.load(sys.stdin)["result"]["pane"]
-print(p["terminal_id"])'                       # must equal ledger column 3
-herdr agent get "$NAME" | python3 -c '
-import json,sys
-a=json.load(sys.stdin)["result"]["agent"]
-print((a.get("agent_session") or {}).get("value",""))'   # must equal ledger column 5
+print("terminal_id", p["terminal_id"])                      # must equal ledger column 3
+print("agent_session", (p.get("agent_session") or {}).get("value",""))'
 ```
 
-- **`terminal_id` is the strong half.** It is minted per terminal and never reused,
-  so a mismatch means this `w9:p3` is not the `w9:p3` the row was written about —
-  which is exactly what §2 keeps column 3 for.
-**`["result"]["agent"]`, not `["result"]`.** `agent get` wraps its payload exactly as
-`pane get` does — `{"result":{"agent":{…,"agent_session":{…}},"type":"agent_info"}}` —
-and the shortened accessor returns an **empty string rather than raising**, because the
-lookup is a chained `.get`. That is worse than the `KeyError` §9 records for `pane get`:
-an empty value compares unequal to your ledger row, so the check reports a mismatch and
-stops a run whose worker was perfectly healthy. Caught exactly that way on 2026-08-13,
-against a live worker whose `agent_session.value` did match.
+`terminal_id` is minted per terminal and never reused, so a mismatch means this
+`w9:p3` is not the `w9:p3` the row was written about — exactly what §2 keeps column 3
+for. **A mismatch here is an unconditional stop.**
 
-- **`agent_session.value` is the weak half, and you should know why.** herdr stores
-  the Claude session id, but it is set by `pane.report_agent_session`, which any
-  process running as the user may call for any pane. It is an accident-detector,
-  never a boundary. Treat a match as corroboration and a mismatch as a stop.
+**Read both from `pane get`, not from `agent get`.** `pane get` carries
+`agent_session` in the identical shape — measured 2026-08-17 — and it is addressed by
+column 2 of your own ledger instead of by a name, which §7 spends a section
+establishing is mutable third-party state. A check that looks its own subject up by
+name has a hole in it the size of `herdr agent rename`.
 
-Stop on either mismatch. And note what neither witness can tell you: a human who
-types `claude` in a herdr pane **self-registers with herdr** through the user-scope
-`SessionStart` hook, so their session appears in `herdr agent list` looking exactly
-like a worker. The ledger is what distinguishes them.
+If you do reach for `agent get`, the accessor is **`["result"]["agent"]`, not
+`["result"]`** — it wraps exactly as `pane get` does,
+`{"result":{"agent":{…,"agent_session":{…}},"type":"agent_info"}}`, and the shortened
+accessor returns an **empty string rather than raising**, because the lookup is a
+chained `.get`. That is worse than the `KeyError` §9 records: it fabricates the same
+empty value a gated worker legitimately has. Caught that way on 2026-08-13, against a
+live worker whose `agent_session.value` did match.
+
+**2. The `claude` in there is ours.** This is the only one of the three that can say
+so, and it is the one that works before the worker has registered anything:
+
+```bash
+OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+SHPID=$(herdr pane process-info --pane "$l1" | python3 -c '
+import json,sys
+print(json.load(sys.stdin)["result"]["process_info"]["shell_pid"])')
+TTY=$(ps -o tty= -p "$SHPID" | tr -d " ")
+[ -n "$TTY" ] || { echo "no tty behind $l1 -- do not send, key, or close it" >&2; exit 1; }
+python3 "$OC" "$TTY" "$LEDGER" "$NAME" || exit 1        # 0 is the only pass
+```
+
+That block is the one place in this file that must be **a single `Bash` call**:
+`SHPID` and `TTY` are derived, and §1 records that a call's shell state does not
+outlive it. `SKILL.md` has the exit table — 0 proceeds, 3 and 4 are both hard stops,
+and you must not test for 3 in particular.
+
+**`shell_pid`, not the foreground pid, and that is deliberate.** The shell is in the
+pane whether or not a `claude` is, so this resolves a tty for an *empty* pane too —
+and an empty pane is `occupant.py`'s exit 0, the case that keeps a finished worker's
+tab from leaking at teardown. Reading the foreground process instead would leave you
+with no tty in exactly the case §9 needs one.
+
+**3. `agent_session.value` corroborates — and only when it holds something.**
+
+| what it holds | what it means | what to do |
+| --- | --- | --- |
+| equal to ledger column 5 | herdr saw our worker register | corroboration — proceed |
+| non-empty and unequal | another session reported itself into our pane | **stop** |
+| empty, or the key absent | nothing has been reported yet | **not a mismatch** — proceed on checks 1 and 2 |
+
+**That last row is the fix, and the row above it in this section is why it is safe.**
+`agent_session` is written by `pane.report_agent_session`, which a `claude` still on
+the folder-trust dialog has not reached. Measured 2026-08-17, one worker across the
+gate:
+
+| | parked on the gate | 1 s after `enter` |
+| --- | --- | --- |
+| `agent_session` in `pane get` | **key absent** | `{"agent":"claude","kind":"id","source":"herdr:claude","value":"<the minted uuid>"}` |
+| the chained `.get` above | `""` | the minted uuid |
+| `terminal_id` | matched column 3 | matched column 3 |
+| `terminal_title` | the raw typed argv | `✳ <name>` |
+| `occupant.py` | **0** | 0 |
+
+So the unqualified **"stop on either mismatch"** this section used to end with stopped
+the run on its own gated worker — forbidding the `enter` that was the only thing that
+would ever populate the witness. Same shape as the cmux defect v0.9.2 fixed, reached
+by a different route, and found the same way: by the smoke test, on 2026-08-17.
+
+**Scoping it to "non-empty" is safe only because check 2 exists.** On its own,
+"empty means proceed" reopens the exact hole this section is for, in a narrower
+window. Constructed and measured on 2026-08-17 — a worker was launched into `wB:pS`,
+exited with `esc`, the pane survived, and a `claude` was then started in it the way a
+user would:
+
+| witness | reading | the verdict it gives |
+| --- | --- | --- |
+| `terminal_id` | `term_659411d125b1f35` — **still matching column 3** | proceed |
+| `agent_session.value` | `""` — the stranger has not registered either | proceed, under "empty means proceed" |
+| `occupant.py` | **3** — the `claude` on that tty carries a different `--session-id` | **stop** |
+
+Both herdr witnesses said proceed. Only the tty join said stop. Never relax the weak
+witness in a run that has not made check 2.
+
+**Do not reach for `terminal_title` as the argv join.** §4 records that a gated
+worker's title is its raw argv, which makes it look like a way to read the minted id
+without `ps`. Measured 2026-08-17, the title is capped at **73 characters**, and what
+overflows is dropped from the **middle**:
+
+| typed command | length | resulting title | carries the uuid |
+| --- | --- | --- | --- |
+| `claude -n witness-probe --session-id <uuid> --permission-mode manual` | 97 | `claude -n witness-probe --session-id <uuid>` | yes — by luck; the uuid ends at character 73 exactly |
+| `claude -n witness-probe-two-longer --session-id <uuid> --permission-mode manual` | 109 | `claude -n witness-probe-two-longer --session-id  --permission-mode manual` | **no — the uuid alone was elided and both ends kept** |
+
+Eleven more characters of worker name is all it takes: the flag stays, its value
+silently empties, and a title-based join reads a healthy worker as a stranger. The
+title is also the **typed** command rather than the process argv — the real argv on
+this machine runs past 2000 characters because a wrapper injects a `--settings` blob
+the title never shows. `process-info` returns argv as a structured array with no cap
+at all, which is what `occupant.py` reads through `ps`.
+
+**What check 2 actually compares is the uuid, not the presence of the flag.** Measured
+2026-08-17: on this machine the wrapper injects a freshly generated `--session-id`
+into a *hand-started* `claude` too, so "a human never passes that flag" is not
+literally true here. It does not weaken the join — an injected uuid is random and
+never equals the one this run minted, which is why the stranger above scored 3 — but
+never rewrite the comparison as "does its argv mention `--session-id`".
+
+And note what none of the three can tell you: a human who types `claude` in a herdr
+pane **self-registers with herdr** through the user-scope `SessionStart` hook, so
+their session appears in `herdr agent list` looking exactly like a worker. The ledger
+is what distinguishes them — which is precisely why check 2 joins on the uuid *this
+run minted* rather than on anything herdr reports.
 
 ## 6. Read a worker's screen
 
@@ -492,9 +593,11 @@ derived from the row's own column 2 by the command above. So a cmux supervisor h
 a row whose column 7 says `herdr` closes it by reading this file. **Read the whole of
 it, §5's occupant check included.** That check is the only thing standing between this
 command and a pane the user has since taken over, and it lives in this file rather than
-in `SKILL.md` precisely because it is host-shaped: cmux joins on a tty, and herdr has
-no tty in `PaneInfo` at all. A supervisor that arrives here with the close half and not
-the occupant half is one context summarization away from killing what the user started.
+in `SKILL.md` precisely because it is host-shaped: both hosts join on a tty, but each
+names one its own way, and herdr's does not come from `PaneInfo` — it takes the extra
+`pane process-info` hop §5 spells out. A supervisor that arrives here with the close
+half and not the occupant half is one context summarization away from killing what the
+user started.
 
 ```bash
 herdr tab close  "$TAB"     # the whole worker tab -- the tidy default here
