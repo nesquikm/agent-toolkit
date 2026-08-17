@@ -26,9 +26,16 @@ Fields: address (default), pid, status, waitingFor, sessionId, cwd, name.
 WHY A ROW CARRIES TWO IDENTIFIERS
 
 Column 5 is the session id the supervisor MINTED and passed to `claude
---session-id` before launching. A human never passes that flag — a hand-started
-session auto-names itself and takes a random id — so a minted id can never select
-one. That is what makes the *first* identification trustworthy.
+--session-id` before launching. Nobody else can produce that value, so a minted id
+can never select a session this run did not start. That is what makes the *first*
+identification trustworthy.
+
+The guarantee is the value's unguessability, NOT the absence of the flag. Measured
+2026-08-17: a launcher on this machine injects a fresh `--session-id` into
+hand-started sessions too -- 7 of 9 auto-named ones carried one nobody typed. An
+injected id is random, so it cannot equal a minted one and the join is unaffected;
+but never weaken this to "does the session carry a session id", which on such a
+machine is true of every terminal the user has open.
 
 It is not enough on its own, and both reasons were measured on 2026-08-13:
 

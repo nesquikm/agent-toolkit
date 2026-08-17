@@ -54,8 +54,12 @@ spawn-agent writes one ledger per caller slot at
     ${TMPDIR:-/tmp}/spawn-agent/<slot>.owner   the spawning session's own id
 
 Column 5 is a uuid the supervisor MINTED and passed to `claude --session-id`, so a
-session carries it only if this run created it -- a human never passes that flag,
-and a hand-started session takes a random id and auto-names itself. Column 6 is
+session carries it only if this run created it -- nobody else can produce the value
+you generated, and a hand-started session takes a random id and auto-names itself.
+(The guarantee is that unguessability, not the absence of the flag: measured
+2026-08-17, a launcher here injects a fresh `--session-id` into hand-started
+sessions too, 7 of 9 of them. Random, so the join is unaffected -- but "carries a
+session id" is not an ownership test on such a machine.) Column 6 is
 the pid captured once that id identified the session; before the pin it holds a
 literal `-`, never an empty field, because an empty INTERIOR column collapses under
 shell field splitting and would shift column 7 into it. Column 7 names the host that
