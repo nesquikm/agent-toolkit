@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.9.2] — 2026-08-17 — "Countersign"
+
+**The guard forbade the act that lifted the guard.** `occupant.py` answers "is the `claude` on this tty the worker my ledger row names", and it joined on the pinned pid — which a row does not have between launch and readiness. Every live `claude` therefore compared unequal, so the check called this run's *own* worker a stranger and exited 3. That window is exactly where the **folder-trust gate** lives, and a keystroke is the only thing that clears it: `SKILL.md` mandates the occupant check before every send, keystroke, screen read and close and calls exit 3 a hard stop, while the gate section requires reading the screen and pressing `enter`. Followed literally, both could not hold.
+
+Found by `/spawn-agent-smoke` on 2026-08-17, in the run that was verifying the previous release. **It is not a v0.9.0 regression** — measured against one live tty with two fixtures identical but for width, the 7-column row pinning `-` and the 6-column row pinning the empty string both exit 3, differing only in the message. Any unpinned row has always read as a stranger; the placeholder only changed the wording.
+
+### Fixed
+
+- **An unpinned row joins on the argv instead of the pid.** A `claude` parked on the trust gate has not registered, so there is no record to resolve — but its argv still carries `--session-id <the uuid this run minted>`, and a human never passes that flag. That is not a new trust assumption; it is the one the whole ownership design already rests on, applied a layer earlier. The pid join is unchanged for a pinned row, gated on `.isdigit()` exactly as `owned.py` gates its own re-join. The match is a whole token, case-insensitive, split on `=` as well as whitespace, so `--session-id=<uuid>` counts and a uuid embedded in a longer path does not.
+- **The stranger direction is unchanged, which is the half that mattered.** Verified against a real live `claude` on one tty with two rows differing only in the minted id: the row naming it returns 0, the row claiming a different id returns 3. Also verified with two `claude` processes sharing one tty, where the stranger is named and ours is not — a case that "passed" before only because *everything* on that tty was a stranger, including our own worker.
+
+### Added
+
+- **Exit 4 — the row can identify nobody.** A legacy 4-column row and a name with no row at all now answer 4 rather than 3: the problem is the row, not the slot, and the repair differs. It cannot turn a stop into a pass, since 4 > 3 and every documented consumer is `|| exit 1` or a `-ge 3` threshold — but both the docstring and `SKILL.md` now say in bold that **0 is the only pass**, because testing for 3 in particular is what would break the day 4 first fires.
+- **`ps -ww`.** Measured byte-identical output with and without it, because macOS `ps` drops its width limit when stdout is not a terminal — which `capture_output=True` guarantees. It goes in anyway on a margin: a real worker's argv here is **2021 bytes with `--session-id` at column 1972**, because the host injects a ~1900-character `--settings` blob ahead of it. Under any width-limited `ps` the join would find nothing, every time.
+
+### Changed
+
+- **`CLEAR` has now been observed in the wild, and the skill says so.** For four releases it was the one watcher signal defined but never caught — the rarest by construction, since it needs a worker to stop being blocked without taking a turn. It arrived unprompted during this release's own verification, on a worker that had finished and been reported half an hour earlier: an `ATTN` and a `CLEAR` two seconds apart, the worker `idle` with `waitingFor` empty on both sides, and its transcript byte-for-byte unchanged across the pair. Four releases of trying to provoke one produced nothing; it turned up on an already-idle worker nobody was driving, which is the shape the documentation predicts and not the shape anyone was constructing.
+
+### Known
+
+- **herdr has the same defect and this release does not fix it.** herdr never calls `occupant.py` — `PaneInfo` carries no tty — and uses two witnesses instead, whose weak half is `agent_session.value`, written by a call a `claude` parked on the trust dialog has not reached. If that reads empty pre-registration then "treat a mismatch as a stop" reproduces this same contradiction on the other host. It is unmeasured, and this repo does not ship unmeasured claims in a host file, so `/spawn-agent-smoke`'s herdr branch now **records** what that value holds while a worker is gated rather than asserting anything about it. The fix, if the measurement calls for one, belongs to its own change.
+
 ## [0.9.1] — 2026-08-17 — "Whole Field"
 
 v0.9.0 documented this bug in the same paragraph that shipped it, and said it could not ride along. It rides now.
