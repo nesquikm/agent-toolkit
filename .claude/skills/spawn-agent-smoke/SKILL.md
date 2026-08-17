@@ -564,10 +564,13 @@ invite a FAIL on a passing run.
 session; the minted id does not. Exit 0 there would mean the ledger trusts a name, and
 the run would drive a session it never started.
 
-**`legacy` must fail the same way, not more softly.** That row is the four-column format
-every earlier version of this skill wrote, widened with empty fields — no minted id, so
-nothing to check, so no ownership. A silent pass there re-opens the bug for every ledger
-already on disk.
+**`legacy` must fail the same way, not more softly.** That row carries the four-column
+format every earlier version of this skill wrote, padded out to the current width — the
+minted id in column 5 is the empty one, so there is nothing to check and therefore no
+ownership. Read the fixture rather than the name: columns 6 and 7 hold `-` and a host
+token like every other row here, because the width is enforced only by the markdown and
+a row this file writes has to be one `owned.py` would really be handed. A silent pass
+there re-opens the bug for every ledger already on disk.
 
 **`nosidecar` is the same row as `ok` with the sidecar removed, and that is the whole
 point of it.** The row is well-formed and names a live session carrying the

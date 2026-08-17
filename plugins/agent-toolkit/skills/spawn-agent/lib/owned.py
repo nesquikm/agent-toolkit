@@ -49,6 +49,14 @@ identified the session, and the pid is what the row is joined on afterwards. The
 minted id establishes the binding; the pid survives it. A row is matched by pid
 only when the name still agrees, so a recycled pid cannot quietly inherit
 ownership of a slot.
+
+Before the pin, column 6 holds a literal `-` rather than an empty field -- column 7
+now names the host that wrote the row, and an empty INTERIOR column collapses under
+shell field splitting where a trailing one does not. Nothing here changes for it:
+the pid re-join is gated on `.isdigit()`, which is false for `-` exactly as it was
+for the empty string, and every index in this file is length-guarded, so 6- and
+7-column ledgers both resolve. Column 7 is never read here -- ownership is a
+question about a session, and the host a row was written on has no bearing on it.
 """
 
 import glob

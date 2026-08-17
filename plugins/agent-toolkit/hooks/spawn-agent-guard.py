@@ -50,13 +50,17 @@ OWNERSHIP COMES FROM THE SPAWN LEDGER, NOT FROM A NAME.
 
 spawn-agent writes one ledger per caller slot at
 
-    ${TMPDIR:-/tmp}/spawn-agent/<slot>.tsv     name loc1 loc2 state session_id pid
+    ${TMPDIR:-/tmp}/spawn-agent/<slot>.tsv     name loc1 loc2 state session_id pid host
     ${TMPDIR:-/tmp}/spawn-agent/<slot>.owner   the spawning session's own id
 
 Column 5 is a uuid the supervisor MINTED and passed to `claude --session-id`, so a
 session carries it only if this run created it -- a human never passes that flag,
 and a hand-started session takes a random id and auto-names itself. Column 6 is
-the pid captured once that id identified the session.
+the pid captured once that id identified the session; before the pin it holds a
+literal `-`, never an empty field, because an empty INTERIOR column collapses under
+shell field splitting and would shift column 7 into it. Column 7 names the host that
+wrote the row. Neither is read here -- this file indexes columns 5 and 6 only, and
+is length-guarded, so a 6- or a 7-column ledger both parse unchanged.
 
 Both keys are needed, and both were measured on 2026-08-13:
   - `--session-id` reserves nothing: two live sessions registered the same minted
