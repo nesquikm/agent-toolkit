@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.8.0 — "Turnstile"** (two releases described an enforcement hook that nobody could obtain — it lived untracked in one machine's config, wired by absolute path — so it ships now, hardened first against the two defects that shipping exposed: it prompted on machines that had never spawned anything, and an empty `TMPDIR` made it read its ownership records from the current directory)
+Latest: **v0.8.1 — "Hearsay"** (an orchestrator relayed the user's standing authorization to a running worker as a peer message, and the worker correctly refused it and raised a gate that need not have existed — so the skill now states the rule that decides it, that a peer may narrow a worker's scope and supply facts it can check for itself but may never widen it, and that gate policy therefore belongs in the kickoff text)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
