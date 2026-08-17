@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.9.1] — 2026-08-17 — "Whole Field"
+
+v0.9.0 documented this bug in the same paragraph that shipped it, and said it could not ride along. It rides now.
+
+The prune matched with `grep -v -F "$l1"`, which matches a substring of the **whole row** — so a legal, non-empty locator deleted every row that merely contained it. Measured on a two-row herdr ledger: pruning `w9:p3` took `w9:p30` with it and left **0 rows, exit 0**. That is the empty-variable catastrophe the `[ -n … ]` guard was written to prevent, reached with a perfectly valid locator, so the guard never fires and nothing anywhere reports a fault. cmux was safe from it by accident — its uuids are fixed-width and cannot prefix-collide — while herdr's pane ids climb and are never reused, so the collision arrives as soon as a server session has created ten-plus panes.
+
+### Fixed
+
+- **The prune matches the name as a whole field**, `awk -F'\t' -v k=1 -v want="$name"`, not a substring of the line. Column 1 is the row key the watcher already reads and every `owned.py` lookup already resolves through, so keying the prune on anything else was matching a field the rest of the skill does not treat as the identity. It is also host-free, which retires the cross-host reasoning the locator form needed.
+
+### Changed
+
+- **Two hazards documented for three releases were properties of `grep`, and are now gone.** Both re-measured on the new line, and the skill says so explicitly so that a later editor does not restore a warning that no longer describes anything: joining with `&&` used to skip the `mv` on the last row, because `grep` exits 1 when it selects nothing — `awk` exits 0 either way; and an empty variable used to install *nothing* over the whole file — an empty `want` keeps every row whose column 1 is non-empty, and the fixture survives intact. The `;` stays because it is unconditionally correct and free; the `[ -n "$name" ]` guard stays because an empty name means the loop variable did not survive a `Bash` call, which is worth refusing rather than treating as a no-op.
+- **Smoke check 4 gained a fourth direction and a control.** `D` prunes one of `w9:p3` / `w9:p30` and requires the other to survive; `D-control` replays the old `grep` on the same fixture and must destroy both rows while exiting 0. A `D-control` that returns one row is a FAIL of the *check* — it means the fixture stopped reproducing the bug, so `D` is asserting nothing. Directions `A` and `B` kept their commands but had their premises inverted by the fix, and now say what they still prove rather than what they used to.
+
 ## [0.9.0] — 2026-08-17 — "Postmark"
 
 **Breaking: the ledger is seven columns.** An older session's skill text reads a new ledger, hits `awk 'NF && NF!=6'`, prints `columns=7` and refuses to spawn. That is reachable without anyone erring — skill text is snapshotted at session start while `lib/*.py` is read fresh on every call — so a supervisor already running when this lands keeps the old check. Quit and restart it; there is nothing to migrate, because teardown deletes the ledger anyway.
