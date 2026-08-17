@@ -77,11 +77,19 @@ herdr pane get w9:p6      # a PaneInfo                              exit 0
 | --- | --- | --- |
 | 2 | the worker's **pane id** (`w9:p3`) | `herdr pane get "$l1"` — exit 1 means the pane is gone |
 | 3 | the worker's **terminal id** (`term_658d4ecc9f1202`) | recorded at creation; never reused |
+| 7 | the literal `herdr` | not resolved — `SKILL.md`'s setup block writes it from §0's detection. Never typed here |
 
 Column 3 is an identity witness, not a navigation handle. Pane ids are not reused
 *within a server session*, but durability across a **server restart is unmeasured** —
 and the ledger outlives a restart, because it is a file. The terminal id is what lets
 a later run notice that `w9:p3` is not the `w9:p3` its row was written about.
+
+**Rows 2 and 3 mean what this table says only for a row whose column 7 is `herdr`.** A
+row tagged otherwise holds another host's ids, and `herdr pane get` on one exits 1 with
+`pane_not_found` — which §9 has, until now, defined as "the user already closed it".
+Nothing in this file binds column 7: it is derived once, in `SKILL.md`'s setup block,
+from the same expression §0 used to send you here, so that the tag and the choice of
+this file are a single decision rather than two that can disagree.
 
 ## 3. Where a worker goes
 
@@ -442,7 +450,7 @@ worker that is a per-worker status line for free.
 ## 9. Close what the run opened
 
 The ledger stores the worker's **pane** id, so derive its tab at teardown rather than
-carrying a fifth column:
+adding a column for it:
 
 ```bash
 TAB=$(herdr pane get "$l1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["pane"]["tab_id"])')
@@ -455,8 +463,38 @@ on the **first** step of teardown and would have left the worker tab open and it
 ledger row unpruned. `pane current` wraps the same way. Read the shape rather than
 predicting it; that is herdr's own advice and this is what ignoring it costs.
 
-That command is also the liveness check — it exits 1 with `pane_not_found` if the user
-already closed the worker, in which case drop the row and close nothing.
+That command is also the liveness check, and **`pane_not_found` on its own is not
+proof the user closed anything.** It answers identically for a pane that is genuinely
+gone, for a pane id that did not survive a herdr **server restart** (§2 records that
+durability as unmeasured, and the ledger outlives a restart because it is a file), for
+the corrupted row `SKILL.md` records under "Resolve, guard, then write", and — before
+column 7 — for a cmux locator handed to it by a cross-host run. Ask the registry, which
+is host-independent, before you believe it:
+
+```bash
+reg=$(python3 "$O" "$LEDGER" "$name" status)
+herdr pane get "$l1" >/dev/null 2>&1 || [ -z "$reg" ] || {
+  echo "$name: tagged herdr, pane_not_found for $l1, and the registry still answers '$reg' -- a broken row or a restarted server, not a finished worker. Not closing, not pruning." >&2
+  exit 1; }
+```
+
+Only when both agree — the pane is gone *and* the worker no longer answers — is this
+the case where you close nothing and prune the row. The wrong version of this sentence
+is worse here than on cmux: a cmux supervisor reading a herdr row merely leaked the
+tab, whereas a herdr supervisor reading a cmux row leaked the surface **and pruned the
+only record that it exists**, since "drop the row" is the prune spelled out.
+
+**This close *is* reachable from a supervisor that is not in herdr**, and that is why
+`SKILL.md`'s teardown table treats the two hosts differently rather than refusing both.
+`herdr tab close <tab>` takes an explicit id and reads nothing from the environment —
+no workspace flag, no `--current`, no fallback to a focused pane — and the tab id is
+derived from the row's own column 2 by the command above. So a cmux supervisor holding
+a row whose column 7 says `herdr` closes it by reading this file. **Read the whole of
+it, §5's occupant check included.** That check is the only thing standing between this
+command and a pane the user has since taken over, and it lives in this file rather than
+in `SKILL.md` precisely because it is host-shaped: cmux joins on a tty, and herdr has
+no tty in `PaneInfo` at all. A supervisor that arrives here with the close half and not
+the occupant half is one context summarization away from killing what the user started.
 
 ```bash
 herdr tab close  "$TAB"     # the whole worker tab -- the tidy default here

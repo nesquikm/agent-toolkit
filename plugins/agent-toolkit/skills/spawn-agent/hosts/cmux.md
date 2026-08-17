@@ -53,9 +53,17 @@ once that surface is gone. Re-paste that assignment in every `Bash` call that us
 | --- | --- | --- |
 | 2 | the worker's **surface uuid** | `python3 "$S" "$l1" ref` — empty/exit 1 means the surface is gone |
 | 3 | the worker's **pane uuid** | `python3 "$S" "$SURF" pane_id` |
+| 7 | the literal `cmux` | not resolved — `SKILL.md`'s setup block writes it from §0's detection. Never typed here |
 
 Column 3 is not decoration: it is how a run finds the pane it already owns, so the
 whole run costs one split.
+
+**Rows 2 and 3 mean what this table says only for a row whose column 7 is `cmux`.** A
+row tagged otherwise holds another host's ids, and the failure is not an error — see
+§7, where this host's resolver turns a foreign locator into a clean "nothing to do".
+Nothing in this file binds column 7: it is derived once, in `SKILL.md`'s setup block,
+from the same expression §0 used to send you here, so that the tag and the choice of
+this file are a single decision rather than two that can disagree.
 
 ## 3. Where a worker goes
 
@@ -103,7 +111,7 @@ PANE=$(cmux --json --id-format both list-panes --workspace "$WS" | python3 -c '
 import json,sys
 live={p["id"]:p["ref"] for p in json.load(sys.stdin)["panes"]}
 print(next((live[c] for c in sys.argv[1:] if c in live), ""))' \
-  $(awk -F'\t' -v c=3 'NF>=3 && $c!=""{a[++n]=$c} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
+  $(awk -F'\t' -v c=3 -v k=7 -v h=cmux 'NF>=7 && $c!="" && $k==h {a[++n]=$c} END{for(i=n;i>0;i--) if(!seen[a[i]]++) print a[i]}' "$LEDGER" 2>/dev/null))
 
 if [ -n "$PANE" ]; then          # tab into the pane this run already owns
   SURF=$(cmux new-surface --workspace "$WS" --pane "$PANE" --type terminal --focus false \
@@ -115,10 +123,25 @@ fi
 [ -n "$SURF" ] || { echo "no surface came back; not sending anything" >&2; exit 1; }
 ```
 
-`-v c=3` rather than a dollar sign followed by the digit 3, for the reason `SKILL.md`
-gives under "The ledger" — a bare dollar-plus-digit in skill text is replaced by the
-skill's own invocation arguments before you read it, so the literal form silently scans
-the wrong column.
+`-v c=3`, `-v k=7` and `-v h=cmux` rather than dollar signs followed by digits, for the
+reason `SKILL.md` gives under "The ledger" — a bare dollar-plus-digit in skill text is
+replaced by the skill's own invocation arguments before you read it, so the literal
+form silently scans the wrong column. Three `-v` flags on one line is dense; a bare
+seven would be replaced by this skill's seventh argument.
+
+**The `$k==h` term is not fixing a live bug, and that is the reason to add it now.**
+Today the candidates are intersected against real `list-panes` output, and a herdr
+`term_…` string is never a live cmux pane uuid — verified on a mixed ledger, where the
+filtered form emits only the two cmux pane uuids while the unfiltered form emits
+`term_x` between them. So the guard is currently the intersection, which is a fact
+about two projects neither of which is this one, holding up a scan that is one refactor
+away from having nothing else. `NF>=7` also means a legacy ledger yields no candidate
+at all, so the run splits once more than it needed to — the correct failure direction,
+and unreachable anyway once the setup block refuses a six-column file.
+
+herdr has no equivalent scan and needs none: it creates a fresh tab per worker and
+reads the ledger nowhere. This is the only place in the plugin where one host's rows
+could reach another host's resolver by a *scan* rather than at teardown.
 
 Then resolve both locators for the ledger row (`SKILL.md`, "Spawn one agent", step 2):
 
@@ -312,6 +335,10 @@ classes.
 
 ```bash
 ref=$(python3 "$S" "$l1" ref)
+reg=$(python3 "$O" "$LEDGER" "$name" status)
+[ -n "$ref" ] || [ -z "$reg" ] || {
+  echo "$name: tagged cmux, its surface will not resolve, and the registry still answers '$reg' -- a broken row or a restarted cmux, not a finished worker. Not closing, not pruning." >&2
+  exit 1; }
 [ -n "$ref" ] || { echo "already gone; closing nothing" >&2; exit 0; }
 [ "$(python3 "$S" "$l1" id)" != "$CMUX_SURFACE_ID" ] || { echo "that is MY surface" >&2; exit 1; }
 python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$name" || {
@@ -319,6 +346,27 @@ python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$name" || {
 cmux close-surface --workspace "$WS" --surface "$ref"
 ```
 
+- **An empty `ref` alone does not mean "the user closed it", and reading it that way
+  is how a leaked slot gets reported as a clean finish.** `cmux-surface.py` walks the
+  tree for a matching ref or id and returns 1 printing nothing when it finds none — so
+  it answers *identically* for a surface the user closed, for a surface that outlived a
+  cmux restart, for the corrupted row `SKILL.md` records under "Resolve, guard, then
+  write", and — before column 7 — for a herdr locator handed to it by a cross-host run.
+  Measured 2026-08-17: a cmux supervisor's ledger held a herdr worker's row, and this
+  line is what would have consumed it, exit 0, reported as closed. The registry check
+  above is what tells the cases apart: the tag says this host, the locator is dead, and
+  the worker still answers — that row is broken or cmux restarted, and it is not a
+  finished worker. The original `exit 0` survives underneath it, for the case that
+  really is a closed tab.
+- **This close is not reachable from a supervisor that is not in cmux, and that is why
+  `SKILL.md`'s teardown table refuses a `cmux` row read from herdr.** Every command in
+  this section passes `--workspace "$WS"`, bound from `$CMUX_WORKSPACE_ID` — which
+  inside herdr is live, valid and *wrong* (`SKILL.md` §0): it names the surface
+  displaying the herdr window and is identical for every herdr pane on the machine. The
+  row's own locators are explicit; the ambient half is not, and a blank or wrong value
+  lets the command fall back to its own default, which §3 and §6 of this file already
+  document as the sharpest edge here. Report the row with its locators and its resume
+  id, and leave the tab.
 - **The empty-value guard is not optional here, and this is where it costs most.**
   `cmux close-surface --help`: `--surface <id|ref|index>    Surface to close
   (default: $CMUX_SURFACE_ID)`, and its summary adds *"Defaults to the focused

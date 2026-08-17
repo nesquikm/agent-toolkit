@@ -36,6 +36,12 @@ The join is the controlling terminal. A host can name the tty behind a slot
 this tty the pid in column 6" is decidable with `ps` alone -- no host API, nothing
 to authenticate, and it works identically for a worker that was never ours.
 
+An unpinned row holds a literal `-` in column 6 (column 7 names the host, and an
+empty interior column would collapse into it under shell field splitting). That
+compares unequal to every real pid, so an unpinned row reads as "a stranger is in
+there" -- the same verdict the empty field produced before, reached the same way.
+This check is deliberately host-blind: a tty is a tty on either host.
+
 An EMPTY slot is deliberately exit 0. A closed-then-reopened tab with only a shell
 in it is still ours to tidy up, and refusing there would leak a slot on every run
 whose worker exited cleanly.

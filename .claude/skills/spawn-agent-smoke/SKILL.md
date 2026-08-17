@@ -334,28 +334,44 @@ CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 mkdir -p "$D"
 : > "$D/empty.tsv"
-printf 'a\tb\tc\td\te\tf\n' > "$D/ok6.tsv"
+printf 'a\tb\tc\td\te\tf\tcmux\n' > "$D/ok7.tsv"
+printf 'a\tb\tc\td\te\tf\t\n' > "$D/nohost7.tsv"
+printf 'a\tb\tc\td\te\tf\n' > "$D/legacy6.tsv"
 printf 'a\tb\tc\td\n' > "$D/legacy4.tsv"
 ```
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
-for f in empty ok6 legacy4; do
-  awk -F'\t' 'NF && NF!=6 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$D/$f.tsv"
+for f in empty ok7 nohost7 legacy6 legacy4; do
+  awk -F'\t' -v k=7 'NF && (NF!=7 || $k=="") {print FILENAME": "NR" columns="NF" host=["$k"]"; bad=1} END{exit bad}' "$D/$f.tsv"
   echo "$f -> exit=$?"
 done
 ```
 
-PASS on exactly `empty -> exit=0`, `ok6 -> exit=0`, and `legacy4 -> exit=1` preceded
-by a `columns=4` line naming the file.
+PASS on exactly `empty -> exit=0`, `ok7 -> exit=0`, `nohost7 -> exit=1`,
+`legacy6 -> exit=1` and `legacy4 -> exit=1`, each refusal preceded by its own line
+naming the file — `columns=7 host=[]`, `columns=6 host=[]`, `columns=4 host=[]`.
+Measured in that order 2026-08-17.
 
-**The refused fixture is now the FOUR-column one, and that inversion is the point.**
-Four columns was this skill's own format until ownership landed, so the row that must
-now be rejected is the one every earlier run wrote. It has to be rejected because a
-four-column row carries no minted session id, which means it cannot prove the worker
-is ours — and `owned.py` exits 3 on exactly that. A run that inherited such a ledger
-and trusted it would be resolving workers by name again, which is the whole bug.
+**Two refused fixtures are formats this skill itself shipped, and that inversion is the
+point.** Four columns was the format until ownership landed; six was the format until
+the host column landed. Each has to be rejected for its own reason. A four-column row
+carries no minted session id, so it cannot prove the worker is ours, and `owned.py`
+exits 3 on exactly that. A six-column row proves ownership fine but names no host, so
+its columns 2 and 3 cannot be safely resolved by anybody — which is the defect the
+seventh column exists for. A `columns=6` line here is not a bug in the row you just
+wrote; it is another session's ledger, inherited through the slot.
+
+**`nohost7` is the fixture for the term that is easy to mistake for padding.** `awk`
+counts a trailing empty field, so a row ending in a tab is seven columns wide and says
+nothing about its host — `NF!=7` passes it and only the emptiness test catches it.
+
+**And there is one thing this check provably cannot catch**, which is why the skill
+writes `-` and not `""` into column 6: a row whose *sixth* field is empty still counts
+seven fields with a non-empty tag, so it exits 0 here while the cleanup loop reads it
+back as `pid=[cmux] host=[]`. Measured 2026-08-17. The placeholder is the only guard
+against that; this check is not a second one.
 
 **Fixtures, never the real ledger.** An empty file must pass — the setup block
 `touch`es one before the first row exists.
@@ -489,14 +505,17 @@ printf '{"pid":1,"name":"smoke-own-probe","cwd":"/","sessionId":"11111111-1111-1
 # the other four fixtures resolve to exactly one record as before.
 printf '{"pid":1,"name":"smoke-own-dup","cwd":"/","sessionId":"33333333-3333-3333-3333-333333333333","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/2.json"
 printf '{"pid":1,"name":"smoke-own-dup","cwd":"/","sessionId":"33333333-3333-3333-3333-333333333333","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/3.json"
-printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/spawn-agent/led-ok.tsv"
-printf 'smoke-own-probe\tL1\tL2\tspawned\t99999999-9999-9999-9999-999999999999\t\n'   > "$D/spawn-agent/led-foreign.tsv"
-printf 'smoke-own-probe\tL1\tL2\tspawned\t\t\n'                                       > "$D/spawn-agent/led-legacy.tsv"
-printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'  > "$D/spawn-agent/led-nosidecar.tsv"
-printf 'smoke-own-dup\tL1\tL2\tspawned\t33333333-3333-3333-3333-333333333333\t1\n'     > "$D/spawn-agent/led-ambiguous.tsv"
-# Four of the five get a sidecar. Without one they would all stop at the sidecar
+printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\tcmux\n'  > "$D/spawn-agent/led-ok.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t99999999-9999-9999-9999-999999999999\t-\therdr\n' > "$D/spawn-agent/led-foreign.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t\t-\tcmux\n'                                      > "$D/spawn-agent/led-legacy.tsv"
+printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\tcmux\n'  > "$D/spawn-agent/led-nosidecar.tsv"
+printf 'smoke-own-dup\tL1\tL2\tspawned\t33333333-3333-3333-3333-333333333333\t1\tcmux\n'    > "$D/spawn-agent/led-ambiguous.tsv"
+# Six columns, no host, sidecar present -- what a mid-upgrade supervisor writes. It
+# must still resolve, because only the markdown enforces the width.
+printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'        > "$D/spawn-agent/led-nohost.tsv"
+# Five of the six get a sidecar. Without one they would all stop at the sidecar
 # check and never reach the assertion they exist to make.
-for f in ok foreign legacy ambiguous; do
+for f in ok foreign legacy ambiguous nohost; do
   printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-$f.owner"
 done
 ```
@@ -512,7 +531,7 @@ and which nothing in this check may read, write or point at.
 O="<plugin root>/skills/spawn-agent/lib/owned.py"
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-for f in ok foreign legacy nosidecar; do
+for f in ok foreign legacy nosidecar nohost; do
   CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
   printf '  %-9s -> exit=%s\n' "$f" "$?"
 done
@@ -531,6 +550,7 @@ PASS on exactly:
   foreign   -> exit=3
   legacy    -> exit=3
   nosidecar -> exit=5
+  nohost    -> exit=0
   ambiguous -> exit=4
   norow     -> exit=2
   noledger  -> exit=2
@@ -544,19 +564,32 @@ invite a FAIL on a passing run.
 session; the minted id does not. Exit 0 there would mean the ledger trusts a name, and
 the run would drive a session it never started.
 
-**`legacy` must fail the same way, not more softly.** That row is the four-column format
-every earlier version of this skill wrote, widened with empty fields — no minted id, so
-nothing to check, so no ownership. A silent pass there re-opens the bug for every ledger
-already on disk.
+**`legacy` must fail the same way, not more softly.** That row carries the four-column
+format every earlier version of this skill wrote, padded out to the current width — the
+minted id in column 5 is the empty one, so there is nothing to check and therefore no
+ownership. Read the fixture rather than the name: columns 6 and 7 hold `-` and a host
+token like every other row here, because the width is enforced only by the markdown and
+a row this file writes has to be one `owned.py` would really be handed. A silent pass
+there re-opens the bug for every ledger already on disk.
 
 **`nosidecar` is the same row as `ok` with the sidecar removed, and that is the whole
-point of it.** The row is valid, six-column, and names a live session carrying the
+point of it.** The row is well-formed and names a live session carrying the
 minted id — everything `ok` has. What it cannot show is *whose* the ledger is, and
 before exit 5 existed it resolved to a working `uds:` address anyway. That is not
 hypothetical: a supervisor serving pre-sidecar skill text against these scripts wrote
 exactly this file by hand, had every `SendMessage` to that worker gated in both
 directions, and was sent by the skill's own diagnostic to a tool that reported nothing
 wrong. Exit 0 here is that bug, restored.
+
+**`nohost` must exit 0, and its passing is the assertion.** It is `ok` with column 7
+removed — the shape a supervisor serving pre-upgrade skill text writes into its own
+ledger, since skill text is snapshotted at session start while `lib/*.py` is read fresh
+on every call. Every reader in this plugin indexes the ledger with a length guard and
+none checks the column count, so ownership is unaffected by the width; the only thing
+that enforces seven is the markdown at the setup block. That is what makes the upgrade
+survivable in the direction that matters: a mid-upgrade supervisor keeps resolving its
+own workers for its whole life, and it is the *next* session in that slot that refuses
+the file loudly, at check 2's gate, rather than acting on rows it cannot attribute.
 
 **`ambiguous` is the one HARD STOP that nothing else here reaches.** Two registry
 records, one name, one minted id between them — the state measured on 2026-08-13 when
@@ -832,7 +865,7 @@ directions, so a run that only ever exercises one of them proves nothing.
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 LEDGER="$D/prune.tsv"
-printf 'w1\tSU-AAA\tPU-AAA\treported\n' > "$LEDGER"
+printf 'w1\tSU-AAA\tPU-AAA\treported\tS1\t-\tcmux\n' > "$LEDGER"
 l1=SU-AAA
 [ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
 echo "A: rows=$(wc -l < "$LEDGER" | tr -d ' ') tmp=$(ls "$LEDGER.tmp" 2>/dev/null | wc -l | tr -d ' ')"
@@ -847,18 +880,41 @@ is left behind. `tmp=1` is that bug.
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 LEDGER="$D/prune.tsv"
-printf 'w1\tSU-AAA\tPU-AAA\treported\nw2\tSU-BBB\tPU-BBB\treported\n' > "$LEDGER"
+printf 'w1\tSU-AAA\tPU-AAA\treported\tS1\t-\tcmux\nw2\tSU-BBB\tPU-BBB\treported\tS2\t-\tcmux\n' > "$LEDGER"
 unset l1
 [ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
 echo "B: rows=$(wc -l < "$LEDGER" | tr -d ' ') bytes=$(wc -c < "$LEDGER" | tr -d ' ')"
 ```
 
-PASS on `B: rows=2 bytes=52` — untouched. An unset locator is reachable by *following*
+PASS on `B: rows=2 bytes=72` — untouched. An unset locator is reachable by *following*
 the skill rather than by ignoring it, since variables die with each `Bash` call and the
 prune reads as a standalone command. Without the `[ -n "$l1" ]` guard, `grep -v -F ""`
 selects nothing and installs it over the whole file: `rows=0 bytes=0`, **exit 0**. The
 destruction reports success, and what it destroys is the record of which slots the run
 is allowed to close. Both directions measured 2026-08-09.
+
+There is a third direction now that a ledger can hold two hosts, and it asserts that
+the one-liner needs **no** host term:
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
+LEDGER="$D/prune.tsv"
+printf 'w1\tSU-AAA\tPU-AAA\treported\tS1\t-\tcmux\nw3\tw9:p3\tterm_658d\treported\tS3\t-\therdr\n' > "$LEDGER"
+l1=SU-AAA
+[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
+echo "C: rows=$(wc -l < "$LEDGER" | tr -d ' ') left=$(cut -f1 "$LEDGER" | tr '\n' ',')"
+```
+
+PASS on `C: rows=1 left=w3,` — the cmux row went and the herdr row stayed. Run it once
+more with `l1=w9:p3` and it must answer `left=w1,`. A cmux uuid contains no colon and a
+herdr id contains no 36-character hex run, so `grep -F` cannot cross the two alphabets
+in either direction; what decides whether a row is pruned is whether you actually
+closed it, which the teardown table settles before this line is reached. Measured both
+directions 2026-08-17. (The substring collision that *is* real — `w9:p3` erasing
+`w9:p30` — is same-host, is documented in `SKILL.md`, and is deliberately not fixed
+here: the whole-field `awk` form that fixes it exits 0 when it selects nothing, which
+would destroy direction A's premise above.)
 
 ## 5. Arm a deaf watcher and wait for `WARN` — *core*
 
@@ -1059,7 +1115,7 @@ awk -F'\t' '{printf "%d: %d cols:", NR, NF; for (i=1; i<=NF; i++) printf " [%s]"
 ```
 
 **Brackets, and no whole-record reference.** The brackets are what make an empty field
-visible — this check's own FAIL criterion is "two blank-looking fields", which
+visible — this check's own FAIL criterion is "any blank-looking field", which
 unbracketed output cannot show you. And awk's whole-record variable, a dollar sign
 followed by the digit zero, cannot appear here at all: a skill invoked with arguments
 has every bare dollar-plus-digit replaced by one of those arguments before you read it.
@@ -1074,22 +1130,40 @@ P="<plugin root>/skills/spawn-agent/lib/peer.py"
 python3 "$P" "<NAME>" name; echo "registry exit=$?"  # name form only -- peer.py serves no address
 ```
 
-PASS when the ledger holds exactly one **six-column** row naming your worker — with a
-minted uuid in column 5 and column 6 still empty — **and** the registry lookup exits 1. That pair is the whole ordering guarantee: a recorded slot
+PASS when the ledger holds exactly one **seven-column** row naming your worker — with a
+minted uuid in column 5, a literal `-` in column 6, and your host's name in column 7 —
+**and** the registry lookup exits 1. That pair is the whole ordering guarantee: a recorded slot
 that is not yet running anything. Reversed, the window between the two holds a live
 agent no ledger knows about, and a turn that dies inside it orphans the slot forever.
 
 `awk: can't open file …` means no row was written at all — the launch happened without
 a ledger, or the path is not the one the setup block built. Either is a FAIL here.
 
-Two blank-looking fields in **columns 2 and 3** is a FAIL, not cosmetics — tab is IFS
-whitespace, so the cleanup loop's `read` shifts every column left and the row can never
-be offered for closing. Column 6 *is* legitimately empty at this point: the pid is
-pinned at readiness, in 7d. Column 5 must **not** be empty — an absent minted id is a
-row that can never prove ownership, and `owned.py` exits 3 on it forever.
+Any blank-looking field is a FAIL, not cosmetics — tab is IFS whitespace, so the
+cleanup loop's `read` shifts every column left and the row can never be offered for
+closing. Column 5 must not be empty: an absent minted id is a row that can never prove
+ownership, and `owned.py` exits 3 on it forever.
+
+**Column 6 must read `[-]`, not `[]`, and this is the field that changed.** Before the
+host column the unpinned pid was the last field, so an empty one was stripped as
+trailing whitespace and nothing moved; now it is interior, and an interior empty field
+collapses. Measured 2026-08-17: the same row written with an empty column 6 reads back
+as `pid=[cmux] host=[]`, so every worker looks host-unknown until its pid is pinned in
+7d — and a worker that never registers is never pinned, which is exactly the worker
+whose slot most needs closing. Check 2's format gate cannot catch it: seven fields are
+still counted and the tag is still non-empty, so it exits 0. This bracketed dump is the
+only place it is visible.
 
 Check what columns 2 and 3 hold for your host: cmux writes a surface uuid and a pane
 uuid; herdr writes a pane id (`w9:p3`) and a terminal id (`term_…`).
+
+**And column 7 must name the host check 1a printed.** This is the inherited-
+`CMUX_SURFACE_ID` bug caught from a second angle, independent of 1e's ledger-path
+test: a herdr run whose row says `cmux` means the setup block's detection did not run
+the precedence table, and every locator in that row is about to be resolved by the
+wrong file at teardown. The tag is derived from the same expression that chose your
+host file, so disagreement between them is not possible in a healthy run — which is
+what makes it worth asserting.
 
 ### 7c. Read the launch before you send it — *host*
 
@@ -1856,12 +1930,18 @@ which is what that signal needed. So stop the monitors, then close.
 CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
 [ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot -- do not close anything"; exit 1; }
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
-while IFS=$'\t' read -r name l1 l2 state; do
+while IFS=$'\t' read -r name l1 l2 state sid pid host; do
   [ -n "$l1" ] || continue
   case "$l1" in "$CMUX_SURFACE_ID"|"$HERDR_PANE_ID") echo "REFUSING to close the caller: $name"; continue;; esac
-  echo "$name  l1=$l1  l2=$l2  state=$state"
+  echo "$name  host=$host  l1=$l1  l2=$l2  state=$state  resume=$sid"
 done < "$LEDGER"
 ```
+
+   **Every row this smoke run wrote must carry your own host in column 7**, because
+   this test is single-host by design. A row tagged otherwise is a bug in the run
+   itself, not a cross-host worker: report it, and close nothing. The `case` line above
+   stays as it is — it is already the cross-host-aware guard in this block, refusing
+   the caller's own slot under either host's variable.
 
    Then close one at a time — `cmux close-surface --workspace "$CMUX_WORKSPACE_ID"
    --surface "<ref>"`, or `herdr tab close "<tab>"` for the tab you created.

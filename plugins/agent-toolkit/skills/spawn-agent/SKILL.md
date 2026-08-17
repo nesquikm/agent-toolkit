@@ -52,6 +52,13 @@ Those paths are already absolute by the time you read this — the token is
 substituted into this text when the skill loads. It is **not** an environment
 variable, so `echo "$CLAUDE_PLUGIN_ROOT"` from a `Bash` call prints nothing.
 
+**One file decides how you operate; a second one may be needed to finish.** A run may
+place a worker on the *other* host, and its ledger row records which — so teardown can
+meet a row whose locators only the other file can read. That is the one place this
+skill reads a second host file, it happens in "Offer to close what the run opened" and
+nowhere else, and the rule for when it is allowed lives there. Nothing above that
+section is affected: placement, launch, keys and screen reads are all your own host's.
+
 **The "don't care" in row one is load-bearing, and it is the reason this is a
 precedence table rather than a pair of checks.** herdr is a server/client
 architecture, so every herdr pane inherits the environment of whatever started the
@@ -356,7 +363,7 @@ is yours and cannot prove it — which is the next paragraph.
 sent a blocked supervisor to a tool reporting nothing wrong. That state is not a
 stranger's session — it is what a supervisor **mid-upgrade** produces: skill text is
 snapshotted at session start while `lib/*.py` is read fresh on every call, so text
-from before the sidecar existed writes correct six-column rows and no sidecar at all.
+from before the sidecar existed writes correctly shaped rows and no sidecar at all.
 The workers really are yours, and ownership is still unprovable. Exit 5 prints the
 repair with the real paths filled in:
 
@@ -429,6 +436,19 @@ CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr
   exit 1
 }
 
+# The host token that goes in column 7, derived HERE from the same expression §0 used
+# to pick the host file. Never typed as a literal, and never assigned by a host file:
+# the failure this column exists to catch is a row whose locators belong to one host
+# and whose tag says the other, and a hand-copied SPAWN_HOST=cmux sitting in
+# hosts/cmux.md is exactly a second copy of the §0 decision that can disagree with it.
+# One expression means the tag and the file choice are one decision.
+#
+# The name is SPAWN_HOST and NOT `HOST`, which is the obvious choice and is a trap --
+# see "Resolve, guard, then write" below for what it costs.
+if [ "${HERDR_ENV:-}" = 1 ]; then SPAWN_HOST=herdr
+elif [ -n "${CMUX_SURFACE_ID:-}" ]; then SPAWN_HOST=cmux
+else echo "no supported host; not spawning" >&2; exit 1; fi
+
 # The repo every worker will be launched into. Guard it exactly like the slot
 # above: the working directory is the single most-dropped part of the launch, and
 # an unset REPO must fail loudly here rather than silently landing workers
@@ -441,7 +461,7 @@ mkdir -p "$(dirname "$LEDGER")"
 touch "$LEDGER"   # so the first run's awk/wc don't print "no such file" to stderr
 
 # Refuse a ledger that is not this format. touch neither truncates nor inspects.
-awk -F'\t' 'NF && NF!=6 {print FILENAME": "NR" columns="NF; bad=1} END{exit bad}' "$LEDGER" \
+awk -F'\t' -v k=7 'NF && (NF!=7 || $k=="") {print FILENAME": "NR" columns="NF" host=["$k"]"; bad=1} END{exit bad}' "$LEDGER" \
   || { echo "stale/foreign ledger at $LEDGER -- rm it or move it aside before spawning" >&2; exit 1; }
 
 # Claim the ledger -- but never by overwriting somebody else's claim, and never by
@@ -478,6 +498,21 @@ P="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/peer.py"    # name taken? (pre-l
 O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"   # is it OURS? (everything after)
 ```
 
+**`columns=6` is not a bug in the row you just wrote — it is somebody else's ledger.**
+Requiring *exactly* seven costs nothing, because a ledger is uniformly one shape by
+construction: rows with no sidecar are refused above, rows with a foreign sidecar are
+refused beside them, and a session's skill text is fixed at process start. So one
+session cannot produce a mixed 6/7 file, and the only six-column ledger this check can
+ever meet is one inherited through the slot — which the owner check refuses anyway.
+Tolerating both widths would buy exactly one thing: the right to carry a row that names
+no host into the teardown loop, which is the defect the column was added for.
+
+The `host=[]` half is a separate term rather than padding, because `awk` counts a
+trailing empty field: a row ending in a tab is seven columns wide and says nothing. The
+two known tokens are deliberately **not** listed here — an unrecognised tag fails the
+teardown table below for free, so a third host stays "add a row to §0's table" rather
+than "and also edit this awk."
+
 **`$P` before the launch, `$O` for the entire rest of the run.** They answer
 different questions and only one of them is safe to act on: `peer.py` asks "is any
 live session using this name", which is the right question exactly once, before you
@@ -494,17 +529,20 @@ out in full instead.
 
 ### The ledger
 
-Six tab-separated columns, plus a one-line `.owner` sidecar beside it:
+Seven tab-separated columns, plus a one-line `.owner` sidecar beside it:
 
 ```
-name <tab> loc1 <tab> loc2 <tab> state <tab> session_id <tab> pid
+name <tab> loc1 <tab> loc2 <tab> state <tab> session_id <tab> pid <tab> host
 ```
 
 - **column 1 is the name** — the watcher reads exactly this field.
-- **columns 2 and 3 are host locators.** The host file says what they hold and how
-  to resolve them. Nothing in this file interprets them; it only requires that
-  resolving column 2 answers "does this slot still exist" and that both are
-  non-empty before a row is written.
+- **columns 2 and 3 are host locators, and column 7 says which host file may read
+  them.** The host file says what they hold and how to resolve them. Nothing in this
+  file interprets them; it only requires that resolving column 2 answers "does this
+  slot still exist" and that both are non-empty before a row is written. Without the
+  tag the pair is not merely ambiguous, it is *silently* ambiguous: one host's
+  resolver hands back nothing for the other host's id, and nothing means "already
+  closed" everywhere in this skill.
 - **column 4 is the state**, and it is what survives you. Push notifications can be
   missed — a Monitor times out, a turn's context gets summarized — so flip a row to
   `reported` only once you have actually told the user that worker's outcome. Then
@@ -525,7 +563,17 @@ name <tab> loc1 <tab> loc2 <tab> state <tab> session_id <tab> pid
   `claude --session-id`, written **before** the launch. It is what makes a row a
   claim of ownership rather than a note about a name.
 - **column 6 is the pid**, captured at readiness once that id has identified the
-  session, and it is what the row is joined on from then on.
+  session, and it is what the row is joined on from then on. It is written `-` until
+  then, never left empty — see "Resolve, guard, then write" below, where an empty
+  column 6 stopped being harmless the moment a column followed it.
+- **column 7 is the host that wrote the row** — `cmux` or `herdr`, put there by the
+  setup block from §0's own detection. It is not bookkeeping: columns 2 and 3 are
+  meaningless without it, so this is the field that says whose resolver may be pointed
+  at them. Measured 2026-08-17: one cmux supervisor held two cmux workers and one
+  herdr worker in a single ledger. Every `owned.py` lookup worked across both — the
+  registry is host-independent — but teardown had to be done by hand, because the
+  cleanup loop resolved all three locators with one host's resolver, and the herdr row
+  came back empty, which this file reads as "the user already closed it."
 
 **Two identifiers, because each covers the other's failure, and both failures were
 measured 2026-08-13.** `--session-id` *reserves* nothing: two live interactive
@@ -618,8 +666,8 @@ esac
 # Resolve, guard, then write -- never inline the resolution into the printf.
 L1="<host locator 1>"
 L2="<host locator 2>"
-[ -n "$L1" ] && [ -n "$L2" ] || { echo "could not resolve the new slot; not launching" >&2; exit 1; }
-printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$NAME" "$L1" "$L2" spawned "$SID" "" >> "$LEDGER"
+[ -n "$L1" ] && [ -n "$L2" ] && [ -n "$SPAWN_HOST" ] || { echo "could not resolve the new slot or its host; not launching" >&2; exit 1; }
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$NAME" "$L1" "$L2" spawned "$SID" - "$SPAWN_HOST" >> "$LEDGER"
 ```
 
 **The minted id goes down before the launch, not after it.** That ordering is what
@@ -631,12 +679,52 @@ thing this skill must not trust.
 when a slot will not resolve, and command substitution throws that status away, so
 the inline form writes the row anyway with two empty fields. It is worse than a
 blank-looking row: tab is IFS whitespace, so the cleanup loop's
-`IFS=$'\t' read -r name l1 l2 state sid pid` collapses the adjacent tabs and shifts every
+`IFS=$'\t' read -r name l1 l2 state sid pid host` collapses the adjacent tabs and shifts every
 column left — `l1` receives the literal `spawned`, the row then fails to resolve,
 and it is dropped as "already closed". A real open slot that can never be offered
 for closing. (Reproduced identically in bash; this is POSIX field splitting, not a
 zsh quirk.) A slot you cannot record is a slot you must not launch into — hence the
 `exit 1` rather than a warning.
+
+**The unpinned pid is written `-`, and that is forced by the column, not a taste.**
+Until column 7 existed the pid was the *last* field, so an empty one was stripped as
+trailing IFS whitespace and nothing moved. Append a column and it becomes *interior* —
+and interior runs of IFS whitespace collapse to one delimiter, which is the same
+mechanism the paragraph above measures for empty locators, reached from the other end.
+Measured: the row written with an empty column 6 reads back `pid=[cmux] host=[]`, and
+the same row written with `-` reads back `pid=[-] host=[cmux]`. So every worker would
+look host-unknown between its row and its pid pin, and the rows that are never pinned
+at all — the timeout branch below, where the pin is skipped for an empty pid — would
+stay that way for good. Those are exactly the never-registered workers whose slots
+most need closing.
+
+**And the format check cannot save you from it.** Measured on that row: `awk` counts
+seven fields and the tag is non-empty, so the setup block's check exits 0 and says
+nothing. `-` is the guard; there is no second one. It costs nothing downstream —
+`owned.py` gates its pid re-join on the value being all digits, `occupant.py` compares
+it as a string and a stranger stays a stranger, the hook's pid lookup simply misses,
+and the pin script overwrites the field and re-joins the whole row, so column 7
+survives it unchanged.
+
+**The variable is `SPAWN_HOST`, and naming it `HOST` breaks the guard on the line
+above — silently, and only in zsh.** zsh sets `HOST` itself, to the machine's
+hostname, in every shell it starts; bash does not. So a later `Bash` call that failed
+to re-derive it — the ordinary failure this whole file warns about, since variables
+die with each call — finds `HOST` already non-empty, sails through `[ -n … ]`, and
+writes the *hostname* into column 7. Measured 2026-08-17: the guard refused correctly
+under bash and passed under zsh, writing a row tagged
+`Mikes-MacBook-Pro-M5.local`. That row then passes the setup block's format check
+(seven fields, non-empty tag) and lands on the teardown table's last line — "a word
+you do not recognise", do not close, do not prune. A leaked slot reported as a clean
+finish, which is the exact defect column 7 was added to remove, re-entered through
+its own guard. Any name that is not a shell parameter will do; this file uses
+`SPAWN_HOST` everywhere and a rename back to `HOST` is not a tidy-up.
+
+**Say it out loud when the row goes down: a worker placed on a host other than your
+own is a row you may not be able to close.** Column 7 records which, and the teardown
+table below decides what happens to it — one direction is closable and one is not.
+That is a spawn-time consequence, so it belongs beside the spawn, not only in the
+cleanup section that discovers it.
 
 That row goes down **before** the launch on purpose: cleanup reads nothing else,
 and a slot you failed to record is one you must never touch again. Launch first and
@@ -898,7 +986,7 @@ answers for it.
 **Do not collect the names in a space-joined string** — `for n in $NAMES` iterates
 once in zsh, not once per worker, and you will drive one agent while believing you
 drove four. The ledger is the list: re-read it with
-`while IFS=$'\t' read -r name l1 l2 state sid pid`.
+`while IFS=$'\t' read -r name l1 l2 state sid pid host`.
 
 Never infer which worker is which from tab or pane order; the hosts order new slots
 differently and one of them does not append. The name is the title, which is the
@@ -1098,7 +1186,7 @@ worker's state. It is the watcher reporting on *itself*.
   worker is launched, so "no match yet" is the normal state while a `claude`
   boots. Check two things when it lands: that the ledger path expanded (a
   `$CALLER_SLOT` that came out empty in the `Monitor`'s own shell is the usual
-  cause), and that the rows are the current **six**-column format, since an older,
+  cause), and that the rows are the current **seven**-column format, since an older,
   differently shaped ledger puts something that is not a name in column 1.
 
 It is emitted **at most once per run** and never at all once anything has
@@ -1407,13 +1495,49 @@ When the last stage is reported, the ledger rows are spent slots. Resolve each
 one, then **offer** — cleanup is a proposal, never a side effect of finishing:
 
 ```bash
-while IFS=$'\t' read -r name l1 l2 state sid pid; do
-  # resolving l1 is the host file's job; empty means the user already closed it
+# Re-derive the host here. $SPAWN_HOST died with the setup block's shell, exactly like
+# $CALLER_SLOT -- and the comparison's other side must come from the process
+# environment, never from the file, or the check compares the ledger against itself.
+# Not `HOST`: zsh has already set that to the machine's hostname (see the spawn).
+if [ "${HERDR_ENV:-}" = 1 ]; then SPAWN_HOST=herdr
+elif [ -n "${CMUX_SURFACE_ID:-}" ]; then SPAWN_HOST=cmux
+else echo "no supported host; refusing to resolve any row" >&2; exit 1; fi
+
+while IFS=$'\t' read -r name l1 l2 state sid pid host; do
+  # These two are host-independent, so do them FIRST -- a row you will not close still
+  # gets a complete report, and the resume id is unreadable once the process exits.
   reg=$(python3 "$O" "$LEDGER" "$name" status)      # empty = not live, not ours, or exit 5
   sid=$(python3 "$O" "$LEDGER" "$name" sessionId)   # capture NOW; unreadable once it exits
-  echo "$name  ledger=$state  registry=${reg:-gone}  resume=${sid:-none}"
+  echo "$name  host=${host:-unknown}  ledger=$state  registry=${reg:-gone}  resume=${sid:-none}  l1=$l1  l2=$l2"
 done < "$LEDGER"
 ```
+
+**Every line carries `l1`, `l2` and the resume id whether or not you will close it**,
+because step 3 of "Finish the run" deletes the ledger and its sidecar unconditionally
+and nothing on disk names those slots afterwards. Resolving `l1` is still the host
+file's job — but *which* file, and whether it may be used at all, is column 7's:
+
+| column 7 | what the row is | what to do |
+| --- | --- | --- |
+| equals this host | an ordinary row | resolve `l1` with your host file and offer it, as below |
+| names the other host, whose close needs nothing from the environment | a worker this run deliberately placed there | read that host file's close section — **all** of it, occupant check included — and offer it like any other |
+| names the other host, whose close reads the environment | the same, unreachable from here | **do not close, do not prune.** Report the line above and say why |
+| empty, or a word you do not recognise | unattributable | **do not close, do not prune.** Same report |
+
+**Which of the two middle rows applies is not a fact this file may hold.** The close
+command is in the host file and so is the answer: each host file's close section
+states, in one clause, whether its own close is reachable from a supervisor sitting in
+the other host. Read it there rather than assuming symmetry — the two hosts differ,
+and they differ for a measured reason.
+
+**A foreign row is always this run's own deliberate cross-host spawn.** A ledger this
+run may act on at all is one it owns — the sidecar checks in the setup block and
+`owned.py`'s exit 3 and 5 guarantee it — so the row was written by this supervisor at a
+moment when it had the other host file in context. There is no stranger's-row case to
+design for, which is exactly why "close it" is on the table at all.
+
+**Report foreign rows under their own heading, never mixed into the "close these?"
+list.** Never offer what you will refuse.
 
 Show that list with what each worker did, and close only the ones the user
 confirms, with the host file's close command.
@@ -1440,6 +1564,21 @@ confirms, with the host file's close command.
   on locator 1, and rewrite through a temp file — `sed -i` is the improvised
   answer here and it is not portable to the BSD `sed` on this machine:
   `[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }`
+  **Prune only a row whose close you actually performed** — including a foreign-host
+  row you closed by reading the other host's file, and *excluding* every row the table
+  above told you to report rather than close. That line has no host term because the
+  host is not what decides it: a row you refused to close is a row you never reach this
+  line for. Two host files currently teach the opposite and are corrected in the same
+  change — one says an unresolvable locator means "already gone; closing nothing" with
+  exit 0, the other says "drop the row and close nothing", which is the prune spelled
+  out. Both are how defect (1) turned a leaked slot into a clean finish.
+  A locator is also safe to match across hosts, measured on a two-row cmux+herdr
+  ledger: pruning the cmux uuid left the herdr row and pruning `w9:p3` left the cmux
+  row. A cmux uuid contains no colon and a herdr id contains no 36-character hex run,
+  so the two alphabets cannot collide. What *can* collide is two herdr ids on the same
+  host — `w9:p3` is a substring of `w9:p30` — which is a real erasure bug, is not
+  cross-host, and is deliberately not fixed here (see the note at the end of this
+  section).
   **Both halves of that line are load-bearing, and they fail in opposite directions —
   learn only one and you will write the other bug.**
   - **Join the `grep` and the `mv` with `;`, never with `&&`.** `grep` exits 1 when it
@@ -1462,6 +1601,18 @@ confirms, with the host file's close command.
   the run owns at all, and "only ever propose slots from this run's ledger" then
   makes every one of those slots unofferable forever. One is noise; the other is the
   exact failure the ledger exists to prevent.
+
+  **A third bug lives in that same `grep` and is not fixed here.** `grep -v -F` matches
+  a substring of the whole line, so on herdr a legal, non-empty `l1="w9:p3"` also
+  deletes the row for `w9:p30`. Reproduced: a two-row ledger goes to **0 rows, exit
+  0**, which is the unguarded-`$l1` catastrophe above reached with a perfectly valid
+  locator, so the `[ -n "$l1" ]` guard never fires. cmux was safe by accident — its
+  uuids are fixed-width and cannot prefix-collide — and herdr's climbing, never-reused
+  pane ids make it reachable once a server session has created ten-plus panes. The fix
+  is a whole-field `awk` match on the name, and it cannot ride along: `awk` exits 0
+  when it selects nothing, which destroys the premise of the smoke check that protects
+  the `;`-versus-`&&` lesson above. Its own change, its own reasoning, its own smoke
+  rewrite.
 - A dead worker leaves its `<pid>.json` behind. It is not yours to delete, and
   `peer` and the watcher both ignore it on the pid check.
 
@@ -1488,7 +1639,12 @@ one `GONE` per slot and read it as benign rather than chasing it.
 
 1. **`TaskStop` the monitor** by the task id you were given when you armed it.
 2. **Close each slot** you spawned, as above — resolving by locator, never by the
-   close command's echo.
+   close command's echo. **Any row you did not close goes into the final report here,
+   verbatim, with its `l1`, `l2` and `resume` id.** Step 3 deletes the ledger and the
+   sidecar unconditionally, and after that nothing on disk names those slots. Leaving
+   the file behind instead is not the alternative it looks like: the next session in
+   this slot would find rows under a foreign `.owner` and refuse to start, so a
+   refused row would brick the slot.
 3. **Delete the ledger file and its `.owner` sidecar**, not just the rows — re-deriving the slot in that same
    call, since an empty `$CALLER_SLOT` deletes `…/spawn-agent/.tsv`, reports success,
    and leaves the real ledger exactly where it was:
@@ -1568,6 +1724,12 @@ which is the one failure this whole section exists to prevent.
 - **Decide the host by precedence, before anything else.** `HERDR_ENV=1` wins over
   a present `CMUX_SURFACE_ID`, because inside herdr that variable is live, valid,
   wrong, and identical for every pane on the machine.
+- **One ledger may hold two hosts, and column 7 is what makes that safe.** The
+  registry, `owned.py`, `SendMessage` and the watcher are all host-independent, so a
+  cross-host run works — it was exercised live on 2026-08-17. What is *not*
+  host-independent is columns 2 and 3, and every command that resolves them. Tag the
+  row at spawn time from §0's detection, and at teardown resolve a row only with the
+  file column 7 names.
 - **Only ever touch what this run minted.** No message, no keystroke, no screen
   read, no close against a session that is not in your ledger under a session id
   you generated. `ListAgents` enumerating one is not permission to use it; a
