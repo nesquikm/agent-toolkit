@@ -1274,7 +1274,9 @@ herdr agent get "<NAME>" | python3 -c 'import json,sys; a=json.load(sys.stdin)["
 
 If the loop exits early on cmux, PASS, and skip to 7e's trust-gate paragraph only if a
 gate is on screen. If it hits the bound, **read the screen — this is mandatory and it
-is the whole point of the check:**
+is the whole point of the check.** A screen read is a slot command like any other, so
+`SKILL.md` wants 7e's occupant check in front of it; run that first if you are being
+strict, and record it once:
 
 ```bash
 cmux read-screen --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>"
@@ -1293,6 +1295,53 @@ place the reason is written:
 | a Claude prompt, no dialog | it booted but has not registered yet | re-run the loop once with a 40 bound before recording FAIL |
 
 ### 7e. Clear the gate — and prove the directory it names — *core*
+
+**First the occupant check — assert it returns 0, and prove the assertion has teeth —
+*host*.** `SKILL.md`'s "A slot is not a session" mandates this before every keystroke,
+and this is the keystroke it bears hardest on: the worker is gated, so it has
+registered nothing, and its ledger row is still unpinned. A check that could only join
+on the pinned pid answers **3** here — a hard stop on the run's own worker, forbidding
+the very keystroke that would clear the gate. That was the shipped behaviour until
+2026-08-17, and this check is what catches it coming back.
+
+**cmux** — the row's minted id, joined against the argv of the `claude` on that tty:
+
+```bash
+OC="<plugin root>/skills/spawn-agent/lib/occupant.py"
+S="<plugin root>/skills/spawn-agent/hosts/cmux-surface.py"
+TTY=$(python3 "$S" "<SURF>" tty)
+[ -n "$TTY" ] && echo "tty=$TTY" || echo "FAIL no tty for that surface"
+python3 "$OC" "$TTY" "$L" "<NAME>"; echo "occupant exit=$? -- PASS iff 0"
+```
+
+Then the control, against the **same tty and the same live process**, differing only
+in whose worker the row claims is sitting in it:
+
+```bash
+CTL="${TMPDIR:-/tmp}/occupant-control.tsv"
+sed 's/<the minted SID>/11111111-2222-3333-4444-555555555555/' "$L" > "$CTL"
+python3 "$OC" "$TTY" "$CTL" "<NAME>"; echo "control exit=$? -- PASS iff 3"
+rm -f "$CTL"
+```
+
+Record both numbers. `0` then `3` is the PASS. `3` then `3` is the pre-fix behaviour
+and a FAIL of the plugin, not of the worker. **`0` then `0` is the worse FAIL** — it
+means the check is passing everything rather than passing your worker, and an
+assertion that cannot fail is not an assertion. Say what the control does and does not
+prove: it swaps the *row*, not the process, so it proves the verdict is joined on
+column 5 and not merely handed out. It does not prove two `claude`s on one tty are
+separated correctly — that is not constructible here without starting a stranger in
+the user's own terminal.
+
+**herdr** — `PaneInfo` carries no tty, so `occupant.py` does not apply and its
+equivalent is the two-witness check in `hosts/herdr.md` §5. Assert the strong half
+(`terminal_id` equals ledger column 3), and give it teeth the same way — compare
+against some *other* pane's `terminal_id` and confirm that comparison reports a
+mismatch. Then **record, rather than assert, what `agent_session.value` holds while
+the worker is still gated.** That witness is set by `pane.report_agent_session`, which
+a `claude` parked on the trust dialog has not reached; if it reads empty here, then
+herdr's "treat a mismatch as a stop" has the same shape as the cmux defect above and
+nobody has measured it. Report the value either way — the measurement is the point.
 
 **Read the directory in the dialog before you press anything.** It must be the scratch
 repo. The gate is answered by `enter` **alone**, because option 1 is already selected:
