@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.9.1 — "Whole Field"** (the ledger prune matched a substring of the whole row, so pruning the herdr pane w9:p3 also deleted w9:p30 and left zero rows while exiting 0 — with a valid locator, so the emptiness guard never fired; it now matches the name as a whole awk field, and the two hazards that were properties of grep are documented as retired rather than left as warnings that describe nothing)
+Latest: **v0.9.2 — "Countersign"** (the occupant check joined on a pid the row does not have until readiness, so it called this run's own worker a stranger for exactly the window the folder-trust gate lives in — the guard forbidding the keystroke that lifts it; an unpinned row now proves ownership from the argv, where the minted session id a human never passes is already sitting, and the stranger direction is unchanged)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that

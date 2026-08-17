@@ -322,12 +322,32 @@ join is the controlling terminal — the host names the tty, `ps` names the proc
 
 ```bash
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
-python3 "$OC" "<the slot's tty>" "$LEDGER" "$NAME" || exit 1   # exit 3 = a stranger is in there
+python3 "$OC" "<the slot's tty>" "$LEDGER" "$NAME" || exit 1   # 0 is the only pass
 ```
 
-Exit 0 means the slot holds your worker **or holds no `claude` at all** — an empty
-slot is still yours to tidy up. Exit 3 means a `claude` you did not start is living
-there, and every one of those four commands must stop.
+| exit | what it means | what to do |
+| --- | --- | --- |
+| 0 | your worker is in there — **or no `claude` is**, and an empty slot is still yours to tidy up | proceed |
+| 3 | a `claude` you did not start is living there | stop. That slot is not yours again this run |
+| 4 | the row carries neither a pinned pid nor a minted id — or there is no such row — so it can identify nobody | stop. The *row* is the fault, not the slot: repair or abandon it, and never close what it names |
+
+**Every non-zero is a stop, and `|| exit 1` is how you write it.** Do not test for 3
+in particular: 3 and 4 are two diagnoses of one refusal, and a test that names one
+of them lets the other through on the day it first fires.
+
+**It passes for a worker that has not registered yet, and that is what makes it
+usable at the trust gate.** A freshly launched `claude` sits on *"Is this a project
+you created or one you trust?"* until somebody presses a key. Until it registers
+there is no pid to pin, so a check that could only join on the pinned pid called the
+run's own worker a stranger for precisely the window in which the run has to reach
+it — and this section mandates the check before every keystroke, so read literally
+the guard forbade the one act that lifts the guard. (Found by the smoke test on
+2026-08-17; it was never the `-` placeholder, and an empty column 6 failed the same
+way.) An unpinned row therefore joins on the **argv** instead: a gated process
+carries `--session-id <the uuid you minted>` on its command line, and a human never
+passes that flag. Same guarantee as the mint, read one layer earlier — before there
+is a session to look up. So a refusal at a gate is a real stranger, and the
+keystroke that clears the gate is checked like everything else.
 
 **A `PreToolUse` hook enforces this independently of you, and it ships with this
 plugin.** `hooks/spawn-agent-guard.py` is wired onto `SendMessage` by the plugin's own
@@ -701,10 +721,10 @@ most need closing.
 **And the format check cannot save you from it.** Measured on that row: `awk` counts
 seven fields and the tag is non-empty, so the setup block's check exits 0 and says
 nothing. `-` is the guard; there is no second one. It costs nothing downstream —
-`owned.py` gates its pid re-join on the value being all digits, `occupant.py` compares
-it as a string and a stranger stays a stranger, the hook's pid lookup simply misses,
-and the pin script overwrites the field and re-joins the whole row, so column 7
-survives it unchanged.
+`owned.py` gates its pid re-join on the value being all digits, `occupant.py` gates its
+own on the same test and falls through to the argv join described above, the hook's pid
+lookup simply misses, and the pin script overwrites the field and re-joins the whole
+row, so column 7 survives it unchanged.
 
 **The variable is `SPAWN_HOST`, and naming it `HOST` breaks the guard on the line
 above — silently, and only in zsh.** zsh sets `HOST` itself, to the machine's
@@ -1159,9 +1179,18 @@ are worker signals** — one named worker, one state change:
 
 `DONE`, `ASK`, `ATTN` and `GONE` were each observed firing through a live
 `Monitor` on 2026-08-09; `CLEAR` is the corrected half of the spurious pair that
-same run produced. So five are defined and four have been caught in the wild —
-`CLEAR` is the one still unobserved there, and the rarest by construction, since it
-needs a worker to stop being blocked without taking a turn.
+same run produced, and for four releases it was the one still unobserved.
+
+**All five have now been caught in the wild.** `CLEAR` arrived unprompted on
+2026-08-17, on a worker that had finished its task and been reported half an hour
+earlier: an `ATTN` and a `CLEAR` two seconds apart, with the worker `idle` and
+`waitingFor` empty on both sides of the pair. Its transcript was byte-for-byte
+unchanged across it — same record count, same final timestamp — which is the whole
+claim `CLEAR` makes and the reason it exists. Nobody could provoke it on demand in
+four attempts across four releases; it turned up on an **already-idle** worker
+nobody was driving, which is exactly the shape the bullet above predicts and not
+the shape anyone was constructing. So it stays unprovokable and is now observed:
+if you are waiting for one to prove your watcher works, you will wait.
 
 **`GONE` is the signal an event bus cannot give you.** A worker that dies outright
 — `SIGKILL`, a host crash, a slot torn down under it — never runs a hook, so
@@ -1555,7 +1584,8 @@ confirms, with the host file's close command.
   Measured on two ledgers identical but for the sidecar, naming the same live
   session — with it, `registry=idle resume=1111…`; without it, `registry=gone
   resume=none`. Nothing downstream catches this for you, because `occupant.py`
-  joins on the pinned pid and never reads `.owner`, so the close would go through.
+  never reads `.owner` — it asks who is in the slot, not whose the ledger is — so
+  the close would go through.
   Write the sidecar and re-run this loop before you offer to close anything.
 - **Confirm every close by re-resolving the locator, never by reading what the close
   command echoed back.** One host prints an allocation counter that has nothing to do
