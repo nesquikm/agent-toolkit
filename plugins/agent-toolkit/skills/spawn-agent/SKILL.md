@@ -1179,9 +1179,18 @@ are worker signals** — one named worker, one state change:
 
 `DONE`, `ASK`, `ATTN` and `GONE` were each observed firing through a live
 `Monitor` on 2026-08-09; `CLEAR` is the corrected half of the spurious pair that
-same run produced. So five are defined and four have been caught in the wild —
-`CLEAR` is the one still unobserved there, and the rarest by construction, since it
-needs a worker to stop being blocked without taking a turn.
+same run produced, and for four releases it was the one still unobserved.
+
+**All five have now been caught in the wild.** `CLEAR` arrived unprompted on
+2026-08-17, on a worker that had finished its task and been reported half an hour
+earlier: an `ATTN` and a `CLEAR` two seconds apart, with the worker `idle` and
+`waitingFor` empty on both sides of the pair. Its transcript was byte-for-byte
+unchanged across it — same record count, same final timestamp — which is the whole
+claim `CLEAR` makes and the reason it exists. Nobody could provoke it on demand in
+four attempts across four releases; it turned up on an **already-idle** worker
+nobody was driving, which is exactly the shape the bullet above predicts and not
+the shape anyone was constructing. So it stays unprovokable and is now observed:
+if you are waiting for one to prove your watcher works, you will wait.
 
 **`GONE` is the signal an event bus cannot give you.** A worker that dies outright
 — `SIGKILL`, a host crash, a slot torn down under it — never runs a hook, so
