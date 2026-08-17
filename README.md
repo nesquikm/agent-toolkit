@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.8.1 — "Hearsay"** (an orchestrator relayed the user's standing authorization to a running worker as a peer message, and the worker correctly refused it and raised a gate that need not have existed — so the skill now states the rule that decides it, that a peer may narrow a worker's scope and supply facts it can check for itself but may never widen it, and that gate policy therefore belongs in the kickoff text)
+Latest: **v0.9.0 — "Postmark"** (the ledger's two locator columns mean different things on each host and nothing in the row said which host wrote it, so a cmux supervisor holding one herdr worker read that row as already-closed and would have leaked the tab while reporting a clean finish — column 7 now names the host, teardown refuses what it cannot reach instead of silently pruning it, and column 6 holds a literal dash because an empty interior column collapses under shell field splitting)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that

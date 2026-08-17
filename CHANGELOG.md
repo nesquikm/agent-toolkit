@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.9.0] — 2026-08-17 — "Postmark"
+
+**Breaking: the ledger is seven columns.** An older session's skill text reads a new ledger, hits `awk 'NF && NF!=6'`, prints `columns=7` and refuses to spawn. That is reachable without anyone erring — skill text is snapshotted at session start while `lib/*.py` is read fresh on every call — so a supervisor already running when this lands keeps the old check. Quit and restart it; there is nothing to migrate, because teardown deletes the ledger anyway.
+
+Columns 2 and 3 are host locators whose meaning the host file defines — cmux writes a surface uuid and a pane uuid, herdr writes a pane id and a terminal id — and **nothing in the row said which host wrote it.** Measured 2026-08-17: one cmux supervisor held two cmux workers and one herdr worker in one ledger. Everything host-independent worked, and that is most of the skill: `owned.py` joins on columns 5 and 6, so addresses, status, cwd and the pid pin all resolved across hosts, and the watcher reads column 1 only. Teardown did not. It resolves *every* row's locator with *one* host's resolver, so the herdr row came back unresolvable, was read as "the user already closed it", and would have been pruned — a leaked tab, reported as a clean finish. The run that found this had to close that tab by hand.
+
+Recording the host is what makes the two cases distinguishable, and the same column then answers a question the old format could not even ask: *may* this supervisor close that row. The two hosts differ, so the answer is asymmetric rather than symmetric — see below.
+
+### Added
+
+- **Column 7 names the host that wrote the row**, derived in the setup block from the same expression §0 uses to pick the host file, so the tag and the file choice are one decision rather than two that can disagree. That matters precisely because a herdr pane inherits the herdr *server's* environment: in a herdr-under-cmux session both hosts' variables are live and a hand-copied literal would be invisibly wrong.
+- **The teardown table replaces one silent branch with four explicit ones.** A row tagged this host resolves as before. A row tagged the other host is closed when that host's close needs nothing from the environment, and refused with a full report when it does. A row that is empty or unrecognised is never closed and never pruned. Every line now carries `l1`, `l2` and the resume id whether or not it will be closed, because "Finish the run" deletes the ledger unconditionally and nothing on disk names those slots afterwards.
+- **Each host file states, in its own close section, whether its close is reachable from a supervisor sitting in the other host** — so `SKILL.md` never has to assume symmetry, and stays free of terminal commands. cmux → herdr works (`herdr tab close` takes an explicit id); herdr → cmux does not, because `cmux close-surface` needs `--workspace`, whose value inside herdr is the inherited-and-wrong one.
+
+### Fixed
+
+- **`cmux.md`'s pane-reuse scan is scoped to cmux rows.** It read column 3 of every row, so a herdr terminal id was offered as a pane candidate. Harmless only because it intersected against live cmux panes.
+- **Both host files stopped teaching "unresolvable means already closed."** cmux exited 0 with *"already gone; closing nothing"* and herdr said *"drop the row and close nothing"* — true for a slot the user closed, false for a locator this supervisor merely cannot read, and false again for herdr's own explicitly-unmeasured pane-id durability across a server restart.
+
+### Changed
+
+- **Column 6 holds a literal `-` before the pid is pinned, never an empty field.** This is not tidiness and it was measured, in both zsh and bash: an empty *trailing* column is stripped, but appending column 7 makes it *interior*, and adjacent tabs collapse under IFS field splitting — so `pid` receives `cmux` and `host` receives nothing. `awk` still counts `NF=7`, so the format check cannot catch it. Every worker would have read host-unknown between its row being written and its pid being pinned, and rows that never pin — the 60-second timeout branch — would have stayed that way forever, which is exactly the set of workers the column was added to protect.
+- **The variable is `SPAWN_HOST`, and `HOST` was a trap.** zsh presets `HOST` to the machine's hostname; bash does not. A block that failed to re-derive it — the ordinary failure this file warns about on every page, since shell state dies with each call — passed its own non-empty guard under zsh and wrote `Mikes-MacBook-Pro-M5.local` into column 7. That row then passes the format check and lands on the "word you do not recognise" branch: a leaked slot reported as a clean finish, re-entered through the guard meant to prevent it.
+- **Three shipped docstrings described a six-column ledger**, the guard's by printing the schema line verbatim. No behaviour changed: every reader is length-guarded, `owned.py`'s pid re-join is gated on `.isdigit()` (false for `-` exactly as for the empty string), and `occupant.py` reads `-` as a stranger the same way it read the empty field.
+
 ## [0.8.1] — 2026-08-17 — "Hearsay"
 
 Mid-run, an orchestrator relayed its user's standing instruction to a running worker as a peer `SendMessage` — *you may self-approve your remaining gates*. The worker read it and **raised its own gate rather than acting on it**, saying it could not treat a peer's claim about the user as the user's approval. It was right, and that is the finding: an authorization delivered over messaging is not merely late, it is *correctly refused*, and the refusal costs a gate that would not otherwise exist.
