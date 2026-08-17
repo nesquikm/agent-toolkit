@@ -856,65 +856,99 @@ pinning the number would turn a machine that happens to have one into a FAIL for
 perfectly correct guard, and a smoke check that cries wolf gets read as noise. Record
 the two numbers next to the verdict either way.
 
-## 4. The prune, in both directions — *core*
+## 4. The prune, in four directions — *core*
 
-Both halves of the documented one-liner are load-bearing and they fail in **opposite**
-directions, so a run that only ever exercises one of them proves nothing.
+The documented one-liner matches the **name** as a whole field. Three of these four
+directions are properties it must keep; the fourth is the regression test for the bug
+that made it stop being a `grep`, and it is the one with teeth.
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 LEDGER="$D/prune.tsv"
 printf 'w1\tSU-AAA\tPU-AAA\treported\tS1\t-\tcmux\n' > "$LEDGER"
-l1=SU-AAA
-[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
+name=w1
+[ -n "$name" ] && { awk -F'\t' -v k=1 -v want="$name" 'NF && $k != want' "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
 echo "A: rows=$(wc -l < "$LEDGER" | tr -d ' ') tmp=$(ls "$LEDGER.tmp" 2>/dev/null | wc -l | tr -d ' ')"
 ```
 
 PASS on `A: rows=0 tmp=0`. This is the last-row case, which on a one-worker run is the
-only prune the run ever does — joined with `&&` instead of `;` the `mv` is skipped
-(because `grep` exits 1 when it selects nothing), the ghost row survives, and a `.tmp`
-is left behind. `tmp=1` is that bug.
+only prune the run ever does. **Read what it proves now, because the premise inverted in
+v0.9.1.** Under the old `grep` this direction caught a `&&` joiner — `grep` exits 1 when
+it selects nothing, so the `mv` was skipped and a ghost row and a stray `.tmp` survived.
+`awk` exits **0** whether or not it selects anything (measured on exactly this fixture),
+so that failure is gone and `&&` would pass here too. What A still proves is that the
+last row is removable at all and that no `.tmp` is left behind.
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 LEDGER="$D/prune.tsv"
 printf 'w1\tSU-AAA\tPU-AAA\treported\tS1\t-\tcmux\nw2\tSU-BBB\tPU-BBB\treported\tS2\t-\tcmux\n' > "$LEDGER"
-unset l1
-[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
+unset name
+[ -n "$name" ] && { awk -F'\t' -v k=1 -v want="$name" 'NF && $k != want' "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
 echo "B: rows=$(wc -l < "$LEDGER" | tr -d ' ') bytes=$(wc -c < "$LEDGER" | tr -d ' ')"
 ```
 
-PASS on `B: rows=2 bytes=72` — untouched. An unset locator is reachable by *following*
+PASS on `B: rows=2 bytes=72` — untouched. An unset variable is reachable by *following*
 the skill rather than by ignoring it, since variables die with each `Bash` call and the
-prune reads as a standalone command. Without the `[ -n "$l1" ]` guard, `grep -v -F ""`
-selects nothing and installs it over the whole file: `rows=0 bytes=0`, **exit 0**. The
-destruction reports success, and what it destroys is the record of which slots the run
-is allowed to close. Both directions measured 2026-08-09.
+prune reads as a standalone command. **This premise also changed.** Under `grep` an
+unguarded empty variable installed nothing over the whole file — `rows=0 bytes=0`, exit
+0, measured 2026-08-09. Under `awk` an empty `want` keeps every row whose column 1 is
+non-empty, so the unguarded form leaves this fixture at `rows=2` as well. The guard is
+now refusing a caller that lost its loop variable, not preventing a catastrophe, and B
+asserts the guard is still *there* rather than that removing it destroys anything.
 
-There is a third direction now that a ledger can hold two hosts, and it asserts that
-the one-liner needs **no** host term:
+The third direction asserts that the one-liner needs **no** host term:
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
 LEDGER="$D/prune.tsv"
 printf 'w1\tSU-AAA\tPU-AAA\treported\tS1\t-\tcmux\nw3\tw9:p3\tterm_658d\treported\tS3\t-\therdr\n' > "$LEDGER"
-l1=SU-AAA
-[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
+name=w1
+[ -n "$name" ] && { awk -F'\t' -v k=1 -v want="$name" 'NF && $k != want' "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
 echo "C: rows=$(wc -l < "$LEDGER" | tr -d ' ') left=$(cut -f1 "$LEDGER" | tr '\n' ',')"
 ```
 
 PASS on `C: rows=1 left=w3,` — the cmux row went and the herdr row stayed. Run it once
-more with `l1=w9:p3` and it must answer `left=w1,`. A cmux uuid contains no colon and a
-herdr id contains no 36-character hex run, so `grep -F` cannot cross the two alphabets
-in either direction; what decides whether a row is pruned is whether you actually
-closed it, which the teardown table settles before this line is reached. Measured both
-directions 2026-08-17. (The substring collision that *is* real — `w9:p3` erasing
-`w9:p30` — is same-host, is documented in `SKILL.md`, and is deliberately not fixed
-here: the whole-field `awk` form that fixes it exits 0 when it selects nothing, which
-would destroy direction A's premise above.)
+more with `name=w3` and it must answer `left=w1,`. The name is host-free, so this is now
+a property that holds by construction rather than one that depended on two id alphabets
+failing to overlap; keep the direction anyway, because "by construction" is a claim and
+this is the measurement of it.
+
+The fourth is the regression test, and it is the reason this section exists in its
+current form. **Run the control alongside it — an assertion that cannot fail is not an
+assertion:**
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
+LEDGER="$D/prune.tsv"
+ROWS='w1\tw9:p3\tterm_a\treported\tS1\t-\therdr\nw2\tw9:p30\tterm_b\treported\tS2\t-\therdr\n'
+
+printf "$ROWS" > "$LEDGER"
+name=w1
+[ -n "$name" ] && { awk -F'\t' -v k=1 -v want="$name" 'NF && $k != want' "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
+echo "D: rows=$(wc -l < "$LEDGER" | tr -d ' ') left=$(cut -f1 "$LEDGER" | tr '\n' ',')"
+
+printf "$ROWS" > "$LEDGER"
+l1=w9:p3
+[ -n "$l1" ] && { grep -v -F "$l1" "$LEDGER" > "$LEDGER.tmp"; mv "$LEDGER.tmp" "$LEDGER"; }
+echo "D-control: rows=$(wc -l < "$LEDGER" | tr -d ' ')"
+```
+
+PASS on **`D: rows=1 left=w2,`** and **`D-control: rows=0`**, and both halves are
+required. `D` is the fix: `w9:p3` and `w9:p30` are distinct rows and pruning one leaves
+the other. `D-control` replays the shipped-until-v0.9.1 `grep -v -F` on the same fixture
+and must **destroy both rows while exiting 0** — a valid, non-empty locator, so the
+emptiness guard never fires and nothing anywhere reports a fault.
+
+A `D-control` of `rows=1` is a **FAIL of the check, not a pass of the code**: it means
+the fixture no longer reproduces the bug, so `D` is asserting nothing. herdr reaches this
+collision as soon as a server session has created ten-plus panes, since its pane ids
+climb and are never reused; cmux was safe from it by accident, its uuids being
+fixed-width and unable to prefix-collide.
 
 ## 5. Arm a deaf watcher and wait for `WARN` — *core*
 
