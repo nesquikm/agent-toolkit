@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.9.4] — 2026-08-18 — "Rollcall"
+
+The watcher decided whether a blocked worker needed an *answer* or an *approval* by asking whether the string `input` appeared anywhere in the registry's `waitingFor`. That is the whole discriminator behind two signals the skill documents as meaning different things, and it was one plausible new value away from being wrong.
+
+The value arrived. Measured 2026-08-17, on a Claude Code **session-limit dialog** ("You've hit your session limit", offering *Stop and wait* / *Upgrade your plan*), the registry read `status=waiting waitingFor=dialog open` — a third string, undocumented, which the substring test routed to `ATTN` correctly **by luck**. A string like `input needed for permission` would have reported a permission prompt as an `AskUserQuestion` instead, silently.
+
+### Fixed
+
+- **`waitingFor` routes through an explicit table, not a substring.** `input needed` → `ASK`; `permission prompt` and `dialog open` → `ATTN`; anything else → `ATTN`. Verified against both versions on the same seven inputs: the old code routes `input needed for permission` to `ASK` and the new one to `ATTN`, while all three known values print byte-identically, so the smoke checks that match those literals are unaffected.
+- **An unrecognised value no longer becomes a state of its own.** The old code gave two *different* unknown strings two different states, so a worker moving between them emitted a spurious transition — and, worse, the transition *out* of an unseen state goes unrecognised, which is exactly how a `DONE` gets lost. Measured on one sequence: eight lines before, seven after, with the eighth being the phantom. The state now collapses to `attn` for every unrecognised value while the literal travels beside it, which is the same collapse the `status` tail has always done for `busy`/`shell` and is commented as such at both sites.
+
+### Added
+
+- **An unknown value names itself in the line it causes**: `ATTN <name> -- unrecognised waitingFor 'mcp approval'`. So the next new string documents itself in the notification rather than arriving invisibly. An empty or absent `waitingFor` falls in the same bucket and prints as `''` — deliberately not given a table entry, since there is no measurement of `status=waiting` with an empty value to justify calling it known.
+- **Smoke check 11d**, synthetic: it drives a throwaway registry through all four routing cases and asserts the seven expected lines, that two different unknowns produce no transition between them, and that `DONE` still fires after an unknown-value block. It needs no worker, slot or host, which is why it can sit after the check that kills the worker. It is explicit in its own text that it feeds strings this repo made up, so 11a and 11b remain the only *live* evidence that the registry still writes the three the table lists.
+
+### Known
+
+- **Nothing fails if the registry renames one of the three.** The watcher would keep answering `ATTN` — the right answer, by the default — and the only trace would be the `-- unrecognised waitingFor` suffix on a line nobody may be reading. That is a large improvement on a silent `ASK` and it is not detection. The candidate fix is a one-shot `WARN` the first time an unrecognised value is seen, since the watcher already has that channel and a supervisor already reads `WARN` as "the watcher itself has a problem". Deliberately not done here: it is new signal behaviour, and this change was scoped to the routing.
+
 ## [0.9.3] — 2026-08-17 — "Shim"
 
 Two findings, and the second one is about this plugin's central claim.

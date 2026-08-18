@@ -177,15 +177,19 @@ in a herdr pane exactly as it does for one in a cmux surface.
 
 Three properties of it are load-bearing:
 
-- **`status` is open-ended, and `waitingFor` splits the blocked case in two.**
-  `idle` when the turn ended; `waiting` with `waitingFor: "input needed"` (an
-  `AskUserQuestion`) or `waitingFor: "permission prompt"` (a tool or plan
-  approval), both measured live 2026-08-09. Everything else means working — and
-  it is **not** just `busy`: a supervisor mid-run was caught reporting `shell`.
-  So treat the set as open and collapse the tail to "working". A watcher that
-  keeps each unknown value as a state of its own stops recognising the
-  transition *out* of it, and the turn-end it was built to catch never fires.
-  That bug was live in this skill's own watcher until `shell` exposed it.
+- **`status` is open-ended, and so is `waitingFor`.** `idle` when the turn
+  ended; `waiting` when a human is needed, and then `waitingFor` says which
+  kind — `"input needed"` (an `AskUserQuestion`) and `"permission prompt"` (a
+  tool or plan approval) both measured live 2026-08-09, `"dialog open"` (a
+  Claude Code modal, measured on a **session-limit** dialog) added 2026-08-17.
+  Any other `status` means working — and it is **not** just `busy`: a supervisor
+  mid-run was caught reporting `shell`. So treat **both** sets as open and
+  collapse each tail to a single value. A watcher that keeps an unknown value as
+  a state of its own stops recognising the transition *out* of it, and the
+  turn-end it was built to catch never fires. That bug was live in this skill's
+  own watcher until `shell` exposed it, and it is why an unrecognised
+  `waitingFor` collapses onto the `ATTN` state rather than becoming a state
+  named after itself — see the routing table under the watcher's signals.
 - **The file outlives the process.** A `SIGKILL`ed worker's JSON was still on
   disk afterwards, unchanged, still saying `idle`. So a glob alone reports a dead
   worker as healthy forever — **always check the pid** (`os.kill(pid, 0)`).
@@ -204,7 +208,7 @@ O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
 
 python3 "$O" "$LEDGER" review-api              # uds:/tmp/cc-socks/30580.sock — the SendMessage `to`
 python3 "$O" "$LEDGER" review-api status       # idle | busy | waiting | shell | …
-python3 "$O" "$LEDGER" review-api waitingFor   # input needed | permission prompt
+python3 "$O" "$LEDGER" review-api waitingFor   # input needed | permission prompt | dialog open | …
 python3 "$O" "$LEDGER" review-api sessionId    # for `claude --resume`, unreadable once it exits
 python3 "$O" "$LEDGER" review-api cwd          # what the worker actually got, not what you intended
 ```
@@ -1166,8 +1170,9 @@ are worker signals** — one named worker, one state change:
   something it is already holding.
 - `ASK <name>` — **suspended** on an `AskUserQuestion`. Not an ending, and no
   `DONE` follows until someone answers it.
-- `ATTN <name>` — suspended on a permission prompt, a plan approval, or a held
-  peer message. Not an ending either.
+- `ATTN <name>` — suspended on anything else a human must clear: a permission
+  prompt, a plan approval, a held peer message, a Claude Code dialog. Not an
+  ending either.
   **Its absence proves nothing about the worker's mode.** A worker launched
   `--permission-mode manual` ran a read-only `find … | wc -l` with no prompt at
   all, and no allow-rule explained it — the settings had an empty `allow` list
@@ -1190,6 +1195,33 @@ are worker signals** — one named worker, one state change:
 - `GONE <name>` — the process is no longer running: a clean `/exit`, a crash, or a
   kill. The registry cannot tell those apart, and neither can you from this line
   alone — check whether that worker had already reported.
+
+**Which of the first two you get is an explicit table, not a guess.** The
+registry's `waitingFor` is the entire discriminator, and the watcher routes it by
+name:
+
+| `waitingFor` | signal | measured on |
+| --- | --- | --- |
+| `input needed` | `ASK` | an `AskUserQuestion`, 2026-08-09 |
+| `permission prompt` | `ATTN` | a tool prompt, a plan approval, a held peer message, 2026-08-09 |
+| `dialog open` | `ATTN` | a Claude Code **session-limit** dialog — "You've hit your session limit", offering *Stop and wait* / *Upgrade your plan* — 2026-08-17 |
+| anything else | `ATTN`, **and the line names the value** | — |
+
+`ATTN` is the default because it claims only *a human is needed*, which is true
+of every blocked state. `ASK` claims a **specific** dialog is on screen — the one
+a supervisor may answer with an `AskUserQuestion` response — so it is the claim
+that must never be guessed. An unrecognised value reads as
+`ATTN <name> -- unrecognised waitingFor '<the literal>'`, so the next string the
+registry invents documents itself the first time it blocks a worker, instead of
+arriving as a bare `ATTN` nobody can trace back to a cause.
+
+**That literal travels beside the state, never inside it**, for the same reason
+the `status` tail collapses to "working": two different unrecognised values must
+compare as the *same* state, or a worker blocked on one and then finishing loses
+its `DONE`. This replaced a bare "is `input` anywhere in the value" substring
+test, under which `dialog open` routed correctly only because it happens not to
+contain the word, and a value like `input needed for permission` would have
+reported a permission prompt as `ASK` with nothing anywhere reporting a fault.
 
 `DONE`, `ASK`, `ATTN` and `GONE` were each observed firing through a live
 `Monitor` on 2026-08-09; `CLEAR` is the corrected half of the spurious pair that

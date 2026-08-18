@@ -1837,12 +1837,14 @@ permission-class mismatch, and check 8's diagnosis tells you to read `ATTN` as "
 message is being held, not lost". Nothing here has ever made an `ATTN` appear, so that
 branch has never been observed to work in a run.
 
-This check makes each of them fire on purpose.
+This check makes each of them fire on purpose, and then 11d makes the one state a live
+worker cannot be talked into fire as well.
 
-**It runs before teardown and it uses its own worker.** Before, because every line below
-comes from the run's watcher and teardown stops it. Its own worker, because 11c
-deliberately kills one, and killing the worker checks 7–10 rest on would destroy their
-evidence.
+**11a to 11c run before teardown and use their own worker.** Before, because every line
+they produce comes from the run's watcher and teardown stops it. Their own worker,
+because 11c deliberately kills one, and killing the worker checks 7–10 rest on would
+destroy their evidence. **11d needs neither** — it is a synthetic harness against
+`watch-workers.py` and may be run at any point, including after teardown.
 
 **Write its ledger row before you launch it**, exactly as 7b requires. This worker is as
 real as any other and check 12 must find it.
@@ -1902,11 +1904,15 @@ python3 "$O" "$L" "<NAME2>" status
 python3 "$O" "$L" "<NAME2>" waitingFor
 ```
 
-PASS on `waiting`, and a `waitingFor` that does **not** contain the word `input`. That
-substring is the entire discriminator — `watch-workers.py` prints `ASK` when
-`waitingFor` contains `input` and `ATTN` otherwise — so a permission prompt reported as
-`ASK` means the two have been transposed and check 8's diagnosis has been pointing at
-the wrong branch all along.
+PASS on `waiting`, and a `waitingFor` of literally **`permission prompt`**. Assert the
+literal, not "it does not contain `input`": `watch-workers.py` routes by an explicit
+table (`WAITING_STATES`), so what this check proves is that the registry still emits a
+string that table lists. Two different failures hide behind the same `ATTN` here and
+only the literal separates them — a permission prompt reported as `ASK` means the two
+entries have been transposed and check 8's diagnosis has been pointing at the wrong
+branch all along, while an `ATTN` whose line ends in `-- unrecognised waitingFor '…'`
+means the registry changed the string under us and 11d is where you read what it
+changed to.
 
 **Read `status` first, and interpret `waitingFor` only against a `status` that exited
 0.** `waitingFor` is absent from the record whenever the worker is not blocked, and
@@ -1997,15 +2003,20 @@ matching the literal string. Then the same registry pair, and this time `waiting
 **must** contain `input` — measured on both hosts 2026-08-12 as literally `input needed`.
 
 Those two lines are the whole content of this check: one `waiting` status routed to two
-different signals by a single substring test, observed going both ways within one run,
-on one worker.
+different signals by the `waitingFor` value alone, observed going both ways within one
+run, on one worker.
 
-**And that substring is more fragile than it looks — record the literal `waitingFor`
-strings, not just which signal fired.** The discriminator is a bare "is `input` anywhere
-in this value" test. `permission prompt` merely happens not to contain the word. A future
-registry value like *"input needed for permission"* would route a permission prompt to
-`ASK` silently, with nothing anywhere reporting a fault — and the two strings this check
-recorded are the only evidence a later reader would have that the split ever worked.
+**Record the literal `waitingFor` strings, not just which signal fired.** These two are
+the only *live* evidence in the whole suite that the table's entries still match what the
+registry writes; 11d exercises the routing but feeds it strings this file made up. If
+either literal has drifted, 11d will still pass and the plugin will still be wrong.
+
+The substring test these two literals used to feed is gone. Until 2026-08-18 the
+discriminator was a bare "is `input` anywhere in this value" test, under which
+`permission prompt` routed correctly only because it happens not to contain the word,
+and a future value like *"input needed for permission"* would have reported a permission
+prompt as `ASK` silently, with nothing anywhere reporting a fault. 11d asserts that case
+directly.
 
 ### 11c. `CLEAR` or `DONE`, and then `GONE`
 
@@ -2051,6 +2062,97 @@ one `GONE` line.
 
 Finally, prune `<NAME2>`'s row from the ledger, using the documented one-liner check 4
 exercises, so check 12 does not offer to close a slot that is already gone.
+
+### 11d. The routing table, and the value it has never seen — *synthetic*
+
+**This one needs no worker, no slot and no host**, which is why it sits after the check
+that kills the worker rather than before it. It drives `watch-workers.py` over a
+throwaway registry in a temp `CLAUDE_CONFIG_DIR`, so it can visit states 11a and 11b
+cannot reach on demand — a `waitingFor` the plugin has never been shown.
+
+Provoking a real one would mean provoking a real Claude Code dialog nobody controls;
+`dialog open` was caught by accident on a **session-limit** dialog on 2026-08-17, which
+is not something a suite can arrange. So this is a unit-style harness against the file,
+and its own limits are the point: it proves the *routing*, never that the registry still
+writes the strings the table lists. 11a and 11b are what prove that, and neither is
+redundant with this.
+
+```bash
+W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
+
+D=$(mktemp -d) && mkdir -p "$D/sessions"
+printf 'route-probe\tL1\tL2\tspawned\tsid\t1\n' > "$D/led.tsv"
+CLAUDE_CONFIG_DIR="$D" WATCHER="$W" LEDGER="$D/led.tsv" REC="$D/sessions" python3 - <<'PY'
+import json, os, subprocess, sys, time
+
+rec_path = os.path.join(os.environ["REC"], "%d.json" % os.getpid())
+w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], os.environ["LEDGER"], "0.2"],
+                     stdout=subprocess.PIPE, text=True)
+
+def step(status, waiting_for=None):
+    rec = {"pid": os.getpid(), "name": "route-probe", "sessionId": "sid", "status": status}
+    if waiting_for is not None:
+        rec["waitingFor"] = waiting_for
+    open(rec_path + ".tmp", "w").write(json.dumps(rec))
+    os.replace(rec_path + ".tmp", rec_path)
+    time.sleep(0.6)
+
+step("busy")                                   # first sight, silent
+step("waiting", "input needed")                # -> ASK
+step("busy")
+step("waiting", "permission prompt")           # -> ATTN
+step("busy")
+step("waiting", "dialog open")                 # -> ATTN
+step("busy")
+step("waiting", "input needed for permission") # UNKNOWN -> ATTN + the literal
+step("waiting", "mcp approval")                # a DIFFERENT unknown -> no line at all
+step("busy")
+step("idle")                                   # -> DONE, after an unknown block
+step("waiting", "brand new thing")             # UNKNOWN -> ATTN + the literal
+step("idle")                                   # -> CLEAR
+w.terminate()
+print(w.stdout.read(), end="")
+PY
+rm -rf "$D"
+```
+
+**The record's pid is the driver's own**, so the watcher's liveness check passes for as
+long as the harness runs and fails the moment it does not — nothing to clean up and no
+way to leave a phantom worker behind. The `os.replace` is deliberate too: the real
+registry is rewritten in place and can be caught mid-write, and this harness must not
+spend its time reproducing that hazard when `read_record` already has its own reasons.
+
+PASS on **exactly these seven lines, in this order**:
+
+```
+ASK  route-probe
+ATTN route-probe
+ATTN route-probe
+ATTN route-probe -- unrecognised waitingFor 'input needed for permission'
+DONE route-probe
+ATTN route-probe -- unrecognised waitingFor 'brand new thing'
+CLEAR route-probe
+```
+
+Four things are being asserted at once, and a run that gets six lines or eight has
+failed even if every line it printed looks right:
+
+- **The three known values route as the table says** — lines 1 to 3, `input needed` to
+  `ASK` and both of the others to `ATTN`.
+- **An unknown value routes to `ATTN` and the line names it** — line 4. This is the
+  string the old substring test sent to `ASK`, so a run of this harness against a
+  pre-2026-08-18 `watch-workers.py` prints `ASK  route-probe` there. That contrast is
+  the check.
+- **`DONE` still fires after an unknown block** — line 5, and the regression this whole
+  shape exists to prevent. Give an unrecognised value a state of its own and the
+  `-> idle` transition out of it stops being recognised, exactly as an unrecognised
+  `status` once lost its `DONE` until `shell` exposed it. The literal has to ride
+  *beside* the state for that reason and no other.
+- **Two different unknowns are the same state** — the *absence* of a line between 4 and
+  5, where `mcp approval` followed `input needed for permission` with no transition
+  reported. An eighth line there means the collapse is not happening and line 5 is
+  living on luck. This is the assertion that is easiest to lose and hardest to see, so
+  count the lines rather than reading them.
 
 ## 12. Teardown, and proof that nothing leaked
 
