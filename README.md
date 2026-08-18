@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.9.2 — "Countersign"** (the occupant check joined on a pid the row does not have until readiness, so it called this run's own worker a stranger for exactly the window the folder-trust gate lives in — the guard forbidding the keystroke that lifts it; an unpinned row now proves ownership from the argv, where the minted session id a human never passes is already sitting, and the stranger direction is unchanged)
+Latest: **v0.9.3 — "Shim"** (herdr's occupant check stopped the run on its own worker while it sat on the trust gate, because the file assumed no tty was reachable there — pane process-info hands over a shell pid, so occupant.py applies unchanged and the two witnesses become corroboration; and the claim that a human never passes --session-id turned out false on this machine, 7 of 9 hand-started sessions carrying an injected one, so ownership is now documented as resting on the value's unguessability rather than on the flag's absence)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that

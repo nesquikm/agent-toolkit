@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.9.3] — 2026-08-17 — "Shim"
+
+Two findings, and the second one is about this plugin's central claim.
+
+v0.9.2 fixed the pre-registration occupant hole on cmux. herdr had the same contradiction, reached without `occupant.py` being involved: `hosts/herdr.md` §5 joined on two witnesses because "herdr has no tty in `PaneInfo`", and ended **"Stop on either mismatch"** unqualified. A `claude` parked on the trust gate has not reached `pane.report_agent_session`, so the weak witness is unreadable — and the check stopped the run on its own gated worker, forbidding the keystroke that would let it register.
+
+**The premise was the bug.** `PaneInfo` carries no tty, but that was never the same claim as "herdr cannot name one". `herdr pane process-info` returns the pane's `shell_pid`; `ps` turns that into a tty; and `occupant.py` — host-blind by design, already handed a `"<the slot's tty>"` placeholder each host is meant to fill — then applies **unchanged**. No new script, and nothing outside herdr's own file needed to move.
+
+### Fixed
+
+- **herdr's occupant check joins on a tty, like cmux's, and the two witnesses become what they always were.** Three checks, explicitly non-substitutable: `terminal_id` for pane identity (unconditional stop on mismatch); the tty join for *process* identity, which is the only one that works pre-registration; and `agent_session.value` as corroboration — equal proceeds, **non-empty and unequal stops**, absent is not a mismatch. The relaxation in the third is written as conditional on the second having run, so it cannot be lifted without the guard.
+- **The naive relaxation would have shipped a hole, and it was reconstructed live rather than argued about.** A worker was exited with `esc`, its pane kept, and a stranger started in it the way a user would. `terminal_id` still matched — it identifies the terminal, not the session — and the stranger had not registered either, so **both herdr witnesses said proceed**. Only the tty join said stop. Scoping the weak witness alone would have handed a stranger the run's keystrokes in exactly the window the fix was meant to open.
+- **`agent_session` is absent, not empty.** The empty string an earlier run recorded was a chained `.get` manufacturing it. Both witnesses are now read from `pane get`, which carries the key identically and is addressed by the ledger's own pane locator rather than by a name the file elsewhere establishes is mutable third-party state — so the check no longer looks its own subject up by name. `shell_pid` rather than a foreground pid, so an *empty* pane still resolves a tty, which is the case teardown needs.
+
+### Changed
+
+- **Ownership rests on unguessability, not on the absence of a flag.** For eight releases four places said *a human never passes `--session-id`*, and used it as the reason a minted uuid cannot select a hand-started session. Measured 2026-08-17: of 9 live sessions started by hand on this machine (no `-n`, so auto-named), **7 carried a `--session-id` nobody typed**, injected by a launcher wrapping the CLI — the supervising session among them. The guarantee is intact, because an injected id is freshly random and cannot equal one you generated. But stated the wrong way it invites the fatal simplification: an ownership test of *does this session carry a session id* passes every terminal the user has open. `SKILL.md`, `owned.py` and the guard hook now say which property is load-bearing.
+- **`terminal_title` is not an argv join, and fails in a way worth recording.** It holds the *typed* command, not the process argv, capped at **73 characters** and elided from the **middle**. Measured: one probe kept its uuid only because the id ended at character 73 exactly; eleven more characters of worker name dropped the uuid alone while keeping the flag and the text after it. A check reading that title would have passed on the first probe and silently matched nothing on the second.
+- **Smoke 7e's herdr branch asserts instead of records.** It runs the shipped `process-info` → tty → `occupant.py` block with the same `0` then control `3` shape cmux uses, asserts `agent_session` is absent while gated — a non-empty reading there is a FAIL of the measurement §5 rests on — and re-reads it after the gate to assert it equals column 5, which is the half that can catch a real mismatch.
+
 ## [0.9.2] — 2026-08-17 — "Countersign"
 
 **The guard forbade the act that lifted the guard.** `occupant.py` answers "is the `claude` on this tty the worker my ledger row names", and it joined on the pinned pid — which a row does not have between launch and readiness. Every live `claude` therefore compared unequal, so the check called this run's *own* worker a stranger and exited 3. That window is exactly where the **folder-trust gate** lives, and a keystroke is the only thing that clears it: `SKILL.md` mandates the occupant check before every send, keystroke, screen read and close and calls exit 3 a hard stop, while the gate section requires reading the screen and pressing `enter`. Followed literally, both could not hold.
