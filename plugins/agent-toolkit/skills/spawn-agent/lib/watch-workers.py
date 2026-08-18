@@ -14,7 +14,11 @@ watch a non-default profile; colon-separate several to watch them all at once.
 One line per state change, each becoming a chat notification:
 
   ASK   <name>  suspended on AskUserQuestion — will not resolve without a human
-  ATTN  <name>  suspended on a permission prompt or a plan approval — likewise
+  ATTN  <name>  suspended on anything else a human must clear: a permission
+                prompt, a plan approval, a held peer message, a Claude Code
+                dialog — likewise. Also the default for a `waitingFor` this
+                file does not recognise, and the line then carries that
+                literal value so the next new one documents itself.
   DONE  <name>  went from working to idle, so a turn ended
   CLEAR <name>  stopped being blocked without a turn running — nothing to collect
   GONE  <name>  its process is no longer running (clean exit, crash, or kill)
@@ -36,6 +40,26 @@ USAGE = "usage: watch-workers.py <ledger.tsv> [poll_seconds]"
 # normal state for the seconds a `claude` spends booting and registering, and
 # warning on the first poll would cry wolf on every healthy run.
 WARN_AFTER = 30.0
+
+# Which signal a blocked worker is due, keyed by the registry's `waitingFor`.
+# Every value here was measured on this machine: `input needed` and
+# `permission prompt` on 2026-08-09, `dialog open` on 2026-08-17 — that last on
+# a session-limit dialog ("You've hit your session limit"), which is neither a
+# tool prompt nor a question and had no entry to fall into.
+#
+# An explicit map rather than a substring test. The predecessor was
+# `"ask" if "input" in waiting_for else "attn"`, which routed `dialog open`
+# correctly only because that string happens not to contain the word: a later
+# value like "input needed for permission" would have sent a permission prompt
+# to ASK with nothing anywhere reporting a fault. ASK is the narrower claim —
+# *this* worker is sitting on an AskUserQuestion — so it is the one that must
+# never be guessed. See snapshot() for what becomes of a value absent from this
+# table.
+WAITING_STATES = {
+    "input needed": "ask",
+    "permission prompt": "attn",
+    "dialog open": "attn",
+}
 
 
 def registry_dirs():
@@ -126,7 +150,7 @@ def read_record(path):
 
 
 def snapshot(names, paths):
-    """(name -> state, names caught mid-write, the memo for the next poll).
+    """(name -> state, torn names, the memo for the next poll, unknown-value notes).
 
     `paths` maps a registry file to the wanted name last read out of it. It is
     what makes a torn read attributable at all: the file is named for the pid,
@@ -136,10 +160,16 @@ def snapshot(names, paths):
     It is rebuilt from this poll's glob rather than added to, so a watcher armed
     for hours cannot accumulate an entry for every session file that has ever
     existed on the machine — it holds at most one per wanted, live worker.
+
+    `notes` carries the literal `waitingFor` of any worker blocked on a value
+    WAITING_STATES does not list. It is a *fourth* return rather than a richer
+    state because the state is what gets compared between polls; see the
+    routing below.
     """
     out = {}
     torn = set()
     fresh = {}
+    notes = {}
     for d in registry_dirs():
         for path in glob.glob(os.path.join(d, "*.json")):
             rec, was_torn = read_record(path)
@@ -163,7 +193,25 @@ def snapshot(names, paths):
             status = rec.get("status")
             if status == "waiting":
                 waiting_for = rec.get("waitingFor") or ""
-                out[name] = "ask" if "input" in waiting_for else "attn"
+                state = WAITING_STATES.get(waiting_for)
+                if state is None:
+                    # The same collapse as the `status` tail below, for the same
+                    # reason: an unrecognised value must not become a state of
+                    # its own, or the transition *out* of it goes unrecognised
+                    # and the DONE is lost. `attn` is the honest default — it
+                    # claims only "a human is needed", which is true of every
+                    # blocked state — and it is where a value with no entry
+                    # belongs whether it is new, empty, or missing entirely.
+                    #
+                    # The literal rides in `notes`, *beside* the state and never
+                    # inside it, so two different unknown values still compare
+                    # equal poll to poll while the line reporting the first one
+                    # still names it. Fold it into the state instead and the
+                    # collapse above is undone the moment a second unknown value
+                    # exists.
+                    state = "attn"
+                    notes[name] = waiting_for
+                out[name] = state
             elif status == "idle":
                 out[name] = "idle"
             else:
@@ -173,7 +221,7 @@ def snapshot(names, paths):
                 # otherwise become a state of its own, so the -> idle transition
                 # out of it would not be recognised and the DONE would be lost.
                 out[name] = "busy"
-    return out, torn, fresh
+    return out, torn, fresh, notes
 
 
 def main():
@@ -218,9 +266,9 @@ def main():
     while True:
         names = wanted(ledger)
         if names:
-            now, torn, paths = snapshot(names, paths)
+            now, torn, paths, notes = snapshot(names, paths)
         else:
-            now, torn = {}, set()
+            now, torn, notes = {}, set(), {}
 
         if now or torn:
             deaf_since = None
@@ -249,7 +297,17 @@ def main():
             if state == "ask":
                 print(f"ASK  {name}", flush=True)
             elif state == "attn":
-                print(f"ATTN {name}", flush=True)
+                # An unrecognised `waitingFor` is reported as itself here and
+                # nowhere else. The state was collapsed to keep DONE working, so
+                # this line is the only place a new registry value can surface —
+                # without it the string that fell through arrives invisibly and
+                # the next reader has no evidence it ever existed.
+                extra = (
+                    f" -- unrecognised waitingFor {notes[name]!r}"
+                    if name in notes
+                    else ""
+                )
+                print(f"ATTN {name}{extra}", flush=True)
             elif state == "idle" and was == "busy":
                 print(f"DONE {name}", flush=True)
             elif state == "idle" and was in ("ask", "attn"):
