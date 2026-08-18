@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.9.3 — "Shim"** (herdr's occupant check stopped the run on its own worker while it sat on the trust gate, because the file assumed no tty was reachable there — pane process-info hands over a shell pid, so occupant.py applies unchanged and the two witnesses become corroboration; and the claim that a human never passes --session-id turned out false on this machine, 7 of 9 hand-started sessions carrying an injected one, so ownership is now documented as resting on the value's unguessability rather than on the flag's absence)
+Latest: **v0.9.4 — "Rollcall"** (the watcher told an answerable question apart from an approval by asking whether the word input appeared anywhere in the registry's waitingFor, and a third value turned up on a session-limit dialog that it routed correctly only by luck — routing is now an explicit table with a safe default, an unrecognised value names itself in the line it causes, and two unknown values no longer become two states, which is how a DONE was being lost)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
