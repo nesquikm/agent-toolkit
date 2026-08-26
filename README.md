@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.10.1 — "Rewind"** (the cmux host file said a worker's alternate screen was unreachable, which was a fact about the read flags stated as a fact about the host — pageup now scrolls it and pagedown restores, the only way to see which row is selected on a dialog that a long queued peer message has pushed off the viewport, while a scroll still recovers only what Claude Code drew, so the transcript stays the answer for anything the worker printed)
+Latest: **v0.10.2 — "Errata"** (0.10.1 corrected an over-stated claim and shipped one of its own — that read-screen's --scrollback and --lines must precede --surface — so this withdraws it: both orders exit 0 with byte-identical output, the original error was zsh declining to word-split an unquoted variable into three argv words, and the paragraph now documents that trap instead)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that

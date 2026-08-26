@@ -1371,9 +1371,10 @@ measured 2026-08-27, a worker the registry reported as `waiting` / `input needed
 whole screen was queued message text, with no `❯` and no footer anywhere on it. Do not
 answer that blind, and do not read it as the block having cleared. Your host file's
 screen-reading section is where the recovery is, and the two hosts reach it
-differently: cmux scrolls the worker's alternate screen with a key — which moves the
-view and so comes with a rule about putting it back before you send the key that
-answers — while herdr reads further back into that screen and moves nothing. The
+differently: on cmux you scroll the worker's alternate screen with a key, which moves
+the view and so carries a rule about putting it back before you send the key that
+answers; on herdr you ask a read source for more of that screen, and herdr does the
+scrolling itself, only while the agent is not drawing. The
 transcript tells you a question exists; only the screen tells you which row carries the
 `❯` right now.
 

@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.10.2] — 2026-08-27 — "Errata"
+
+0.10.1 existed to correct a claim in `hosts/cmux.md` that was stated more widely than the measurement behind it supported. It shipped one of its own. This release withdraws it.
+
+The false claim was that `--scrollback` and `--lines` must precede `--surface` on `read-screen`, and that the other order "exits non-zero with `read-screen: unexpected arguments`" — described, with some irony, as "the loud kind of failure". It is not a failure at all. Measured 2026-08-27 on Claude Code v2.1.246, with the exit status captured directly rather than read through a pipeline: the plain call, the flags-before-target call and the flags-after-target call all exit 0 with empty stderr and byte-identical output, 2679 bytes apiece. It was caught by a smoke run against the released version, by neither of the two sessions that wrote and reviewed it.
+
+The retraction is worth more than the deletion would have been, because the original error was real and its cause is a trap this repo can hit anywhere. It came from a loop that passed the flags through an unquoted variable, and **zsh does not word-split an unquoted parameter expansion where bash does** — so a variable holding `--scrollback --lines 200` reaches cmux as one argv word, which cmux correctly rejects. The error message names the whole string as a single unexpected argument, and that is the tell: one argument that should have been three, not a complaint about ordering.
+
+### Changed
+
+- **The flag-order claim in §5 is withdrawn and replaced, not deleted.** The paragraph now states that both orders are accepted, gives the measurement that says so, and records that the opposite was believed and shipped — so a reader who re-derives the claim from a bad reading lands on the retraction rather than on silence. The paragraph it vacated is spent on the zsh word-splitting trap instead, which applies to every command line in the skill that is assembled in a variable, and whose remedy is to write the flags out or use an array rather than to reorder them.
+- **One clause in `SKILL.md`'s "Answer a blocked worker" is softened to what the source supports.** It said herdr "reads further back into that screen and moves nothing"; `hosts/herdr.md` says herdr recovers alternate-screen history *by scrolling it*, gated on the agent not drawing, and says nothing at all about where the pane's view is left. herdr was not measured in either of these two releases, so the text now claims only what that file actually records. Nothing else in the 0.10.1 text was taken on trust — every other figure in §5 came out of the 17-capture fixture and was re-checked against it here.
+
 ## [0.10.1] — 2026-08-27 — "Rewind"
 
 For eight releases the cmux host file has said that a Claude Code worker's history is out of reach from this host: `--scrollback`, `--lines` and `capture-pane` all hand back the same viewport, because Claude Code draws on the alternate screen and cmux's reader has no scrollback there to walk. That measurement is right, it was re-confirmed on 2026-08-27 against a fresh worker — plain and `--scrollback --lines 200` both returned the same 52 viewport lines and reached 0 of 150 markers — and it is kept in the file verbatim. What was wrong was the sentence drawn from it: **never answer a history question from this host's screen**. That is a fact about the read *flags* stated as a fact about the *host*, and the difference costs one case.
