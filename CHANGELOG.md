@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 > **Update discipline:** this file must be updated on every version bump. `/release` does it for you; see `## Releasing` and `## Release Files` in `CLAUDE.md` for what it rewrites.
 
+## [0.10.0] — 2026-08-26 — "Tether"
+
+Every spawned worker has carried a name for as long as the ledger has existed — `-n` is what keeps four identical terminals apart — but the name stopped at the edge of the machine. A worker was reachable from the surface it was spawned into and from nowhere else, so a supervisor who walked away from the desk had no way back to a run that was still going. This release adds the bridge, as an argument the caller has to ask for by name.
+
+The opt-in is forced, not stylistic, and that is the whole design. `--remote-control` **hard-exits before the session starts** on an account whose organization disables Remote Control or whose subscription does not cover it — so the obvious implementation, putting it on every launch line, would brick every spawn for those operators, and would do it at the moment a supervisor has the least evidence to work with: the worker simply never comes up, and nothing it failed to leave behind says why. A caller that does not ask for a bridge now gets a launch line byte-identical to the one that shipped in 0.9.4.
+
+### Added
+
+- **`--remote-control "$NAME"` as an opt-in variant at all four launch sites.** It carries the same string `-n` does, so the surface title (or the herdr agent), the ledger row and the remote card all read alike instead of making the reader hold three names for one worker. Four sites and not two, because each host ships a plain form *and* a `--permission-mode manual` form: a variant added to only one of them is a feature that vanishes the instant a caller asks for a permission class, which is precisely when a long-running worker is most worth reaching from a phone. Naming and bridging stay separate — `-n` is on every launch, the bridge is the extra argument, and declining the bridge still names the worker.
+- **Smoke check 7f, which pins both halves of that default.** It is the one check in the file that needs no worker, no host and no network: it reads the two shipped host files and asserts `bridged=2 plain=2` on each, failing loudly at `bridged=0` (the argument never shipped) and at `plain=0` (it stopped being opt-in). Both halves are asserted because a one-sided check is the real failure mode here — assert only that the flag is reachable and the check passes forever while the default silently inverts into the bricking case above. It was falsified in both directions before it was written down, against the pre-change tree and against a tree whose plain lines had been given the flag, and the suite header moves from twelve checks to thirteen accordingly.
+
 ## [0.9.4] — 2026-08-18 — "Rollcall"
 
 The watcher decided whether a blocked worker needed an *answer* or an *approval* by asking whether the string `input` appeared anywhere in the registry's `waitingFor`. That is the whole discriminator behind two signals the skill documents as meaning different things, and it was one plausible new value away from being wrong.

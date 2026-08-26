@@ -166,6 +166,32 @@ With a permission class, on the same line:
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --permission-mode manual\n"
 ```
 
+### Remote control — opt-in, and only when the caller asks
+
+A caller that wants the worker reachable from a phone or claude.ai/code supplies a
+remote-control name; nothing else changes. Append `--remote-control "$NAME"` to
+whichever of the two lines above you are already sending — the same `$NAME` the
+`-n` flag carries, so the tab title, the ledger row and the remote card all read
+the same string:
+
+```bash
+cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --remote-control \"$NAME\"\n"
+```
+
+```bash
+cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --permission-mode manual --remote-control \"$NAME\"\n"
+```
+
+**Opt-in is forced, not stylistic.** `--remote-control` HARD-EXITS before the
+session starts on an account whose organization disables Remote Control, or whose
+subscription does not cover it. Sending it unconditionally would brick every spawn
+for those operators — so a caller who did not ask for a bridge gets a launch line
+byte-identical to the ones above it, with no remote-control argument anywhere.
+
+**Naming is not bridging.** `-n` is present on every launch and is what keeps four
+identical terminals apart; the bridge is the separate argument. A caller that
+declines the bridge still names its worker.
+
 **The inner `\"` around `$REPO` is not decoration.** The outer quotes belong to the
 supervisor's shell and are consumed there; what reaches the worker's terminal is the
 expanded text. A repo path with a space arrives as `cd /Users/ns/my repo && …`, and

@@ -174,6 +174,32 @@ With a permission class, after the same separator:
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --permission-mode manual
 ```
 
+### Remote control — opt-in, and only when the caller asks
+
+A caller that wants the worker reachable from a phone or claude.ai/code supplies a
+remote-control name; nothing else changes. Append `--remote-control "$NAME"` after
+the same separator, to whichever of the two lines above you are already running —
+the same `$NAME` the `-n` flag carries, so the herdr agent, the ledger row and the
+remote card all read one string:
+
+```bash
+herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --remote-control "$NAME"
+```
+
+```bash
+herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --permission-mode manual --remote-control "$NAME"
+```
+
+**Opt-in is forced, not stylistic.** `--remote-control` HARD-EXITS before the
+session starts on an account whose organization disables Remote Control, or whose
+subscription does not cover it. Sending it unconditionally would brick every spawn
+for those operators — so a caller who did not ask for a bridge gets a launch line
+byte-identical to the ones above it, with no remote-control argument anywhere.
+
+**Naming is not bridging.** `-n` is present on every launch and is what `peer.py`
+and the ledger resolve against; the bridge is the separate argument. A caller that
+declines the bridge still names its worker.
+
 **A duplicate-name refusal here is exit 1, and exit 1 is a hard stop.** herdr
 carries `agent_name_taken` — *"agent name <N> is already used"* — so `agent start`
 will not silently attach to somebody else's agent, which is the good news. The trap

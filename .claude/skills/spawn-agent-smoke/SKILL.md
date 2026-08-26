@@ -5,7 +5,7 @@ description: Smoke-test the spawn-agent skill on this machine — a bounded, evi
 
 # Smoke-test `spawn-agent`
 
-Twelve checks, two workers, about eight minutes. It answers one question: **does this
+Thirteen checks, two workers, about eight minutes. It answers one question: **does this
 plugin work on this machine right now** — after an edit, after a release, or when a
 run has started feeling wrong.
 
@@ -1448,6 +1448,51 @@ False, `samefile` answers True. `spawn-agent` documents the doubled slash as pur
 cosmetics and warns that "the trap is the fixing"; the trap here is the mirror image,
 an equality assertion that turns the one check proving this plugin's most-repeated bug
 is fixed into a guaranteed FAIL on every machine with a `$TMPDIR`.
+
+### 7f. Remote control is opt-in — both sides, all four sites — *static*
+
+The one check in this file that needs no worker, no host and no network: it reads the
+two shipped host files and answers whether the remote-control argument is present
+where a caller asks for it and **absent where nobody did**.
+
+Both halves matter, and a one-sided check is the failure mode. Assert only that the
+flag is reachable and it passes forever while the default silently inverts — and an
+inverted default is not a cosmetic drift: `--remote-control` HARD-EXITS before the
+session starts on an account whose organization disables Remote Control, so a flag
+that leaked into the default launch line bricks every spawn for that operator.
+Assert only that the default is clean and the feature can quietly go missing.
+
+Sample one site and the check is one-sided wearing a different hat. There are FOUR
+launch lines, not two — each host ships a plain form and a `--permission-mode manual`
+form — so the assertion counts all of them:
+
+```bash
+H=plugins/agent-toolkit/skills/spawn-agent/hosts
+CM='cmux send .*claude -n \$NAME'
+HD='herdr agent start .*-n "\$NAME"'
+fail=0
+
+total=$(grep -cE "$CM" "$H/cmux.md")
+with=$(grep -E "$CM" "$H/cmux.md" | grep -c -- '--remote-control')
+echo "cmux.md: total=$total bridged=$with plain=$(( total - with ))"
+{ [ "$total" -eq 4 ] && [ "$with" -eq 2 ]; } || { echo "FAIL cmux.md"; fail=1; }
+
+total=$(grep -cE "$HD" "$H/herdr.md")
+with=$(grep -E "$HD" "$H/herdr.md" | grep -c -- '--remote-control')
+echo "herdr.md: total=$total bridged=$with plain=$(( total - with ))"
+{ [ "$total" -eq 4 ] && [ "$with" -eq 2 ]; } || { echo "FAIL herdr.md"; fail=1; }
+
+exit $fail
+```
+
+**PASS** is `bridged=2 plain=2` on both hosts. Anything else fails, and the two ways
+it fails are the two defects: `bridged=0` means the argument never shipped;
+`plain=0` means it stopped being opt-in.
+
+Falsified in both directions before it was written down. Against the pre-change tree
+it reports `total=2 bridged=0 plain=2` and exits 1; against a tree whose plain lines
+were given the flag it reports `bridged=4 plain=0` and exits 1. A check that cannot
+fail is not a check, and this one fails on each defect separately.
 
 ## 8. The task, the address, and the reply — *core*
 
