@@ -289,11 +289,30 @@ scrollback to walk. Re-confirmed 2026-08-27 on a worker with 150 marked lines be
 plain and `--scrollback --lines 200` both returned the same 52 viewport lines and
 reached **0** of the 150 markers.
 
-**Those two flags go before `--surface`, not after it.** `cmux read-screen --scrollback
---lines 200 --workspace "$WS" --surface "$REF"` parses; the same flags written after the
-target exit non-zero with `read-screen: unexpected arguments`. That is the loud kind of
-failure and it costs nothing — noted only because everything else on this page is the
-quiet kind.
+**Flag order does not matter here, and v0.10.1 of this file said it did.** That claim is
+**withdrawn**: `--scrollback --lines 200` written before `--surface` and written after it
+both exit 0 with empty stderr and byte-identical output — measured 2026-08-27 on Claude
+Code v2.1.246, three calls including the plain form, 2679 bytes apiece, exit status
+captured directly rather than through a pipeline. It is recorded rather than deleted
+because it was believed, shipped, and is worth recognising if it is ever re-derived.
+
+**What produced the error was zsh, not cmux, and *that* trap is real.** The observation
+behind the retracted claim came from a loop that passed the flags through an unquoted
+variable:
+
+```bash
+f="--scrollback --lines 200"
+cmux read-screen --workspace "$WS" --surface "$REF" $f   # Error: unexpected arguments
+```
+
+**zsh does not word-split an unquoted parameter expansion**; bash does. So `$f` arrives
+as a *single* argv word — the literal string `--scrollback --lines 200` — which cmux is
+right to reject. Reproduced deliberately 2026-08-27: exit 1 with that exact message,
+while the same three flags written as three words exit 0. The tell is in the message,
+which names the **whole string** as one unexpected argument: read that as "one argument
+that should have been three", never as a complaint about order. It applies to every
+command line in this skill that is assembled in a variable — write the flags out, or use
+an array; do not reorder them and conclude you fixed something.
 
 So **prefer the worker's transcript for anything that asks what the worker produced** —
 "did its first reply get refused", "what did it print before it stalled". A grep of
