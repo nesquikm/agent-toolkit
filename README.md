@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.9.4 — "Rollcall"** (the watcher told an answerable question apart from an approval by asking whether the word input appeared anywhere in the registry's waitingFor, and a third value turned up on a session-limit dialog that it routed correctly only by luck — routing is now an explicit table with a safe default, an unrecognised value names itself in the line it causes, and two unknown values no longer become two states, which is how a DONE was being lost)
+Latest: **v0.10.0 — "Tether"** (a spawned worker was named on the machine and reachable nowhere else, so an opt-in --remote-control argument now rides at all four launch sites carrying the same name the -n flag does — opt-in because the flag hard-exits before session start on an account whose organization disables Remote Control, and smoke check 7f asserts both halves so the default cannot silently invert into bricking every spawn)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
