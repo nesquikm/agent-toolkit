@@ -1077,10 +1077,11 @@ is a file:
 **Prefer the transcript, and on one host it is the only option.** Those rows are not
 equal: a send that has scrolled off is still in the file and is no longer on the screen,
 and Claude Code draws on the alternate screen, whose history a host may not be able to
-reach at all. cmux cannot — every scrollback flag it has returns the current viewport,
-so a grep comes back clean over a refusal sitting just above it. herdr can, but only
-while the worker is idle. Both host files give the measurement and the exact command;
-read yours before you conclude anything from a screen.
+reach at all. cmux's read flags cannot — every one of them returns the current
+viewport, so a grep comes back clean over a refusal sitting just above it, and its
+keystroke channel scrolls the screen but reaches only what Claude Code drew. herdr can,
+but only while the worker is idle. Both host files give the measurement and the exact
+command; read yours before you conclude anything from a screen.
 
 Read it by the tool call, not by the address. **No `SendMessage` call at all** means the
 task's own wording talked the worker out of the tool — see "Send the task" above. A
@@ -1363,6 +1364,18 @@ remaining checkpoints after the user had already said to run on:
 A reflexive `enter` there would have selected the opposite of what the user had just
 asked for. Unlike the extra `down` below, it kills nothing and errors nothing: the run
 continues, looking healthy, under a policy nobody chose.
+
+**And the read can come back with no dialog on it at all.** A screen read shows one
+viewport, and a long queued peer message can push an open dialog off the top of it —
+measured 2026-08-27, a worker the registry reported as `waiting` / `input needed` whose
+whole screen was queued message text, with no `❯` and no footer anywhere on it. Do not
+answer that blind, and do not read it as the block having cleared. Your host file's
+screen-reading section is where the recovery is, and the two hosts reach it
+differently: cmux scrolls the worker's alternate screen with a key — which moves the
+view and so comes with a rule about putting it back before you send the key that
+answers — while herdr reads further back into that screen and moves nothing. The
+transcript tells you a question exists; only the screen tells you which row carries the
+`❯` right now.
 
 **`SendMessage` cannot clear a block, and it does not fail loudly when you try.**
 Measured 2026-08-09: a message sent to a worker parked on an `AskUserQuestion`

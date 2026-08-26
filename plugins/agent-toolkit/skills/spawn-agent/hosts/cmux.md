@@ -267,9 +267,14 @@ caller's own (see §6). A read is the least destructive of the four, which is ex
 why it is the easiest place to acquire the habit of reading your own screen back and
 believing it is the worker's.
 
-That is the live viewport, and on this host it is **all you can ever have**. Use it for
-what a viewport answers — is a dialog open, which row carries the `❯`, did the launch
-leave a shell prompt with an error above it — and for nothing that asks about history.
+That is the live viewport. Use it for what a viewport answers — is a dialog open, which
+row carries the `❯`, did the launch leave a shell prompt with an error above it.
+
+**The read flags cannot give you anything but that viewport — but the keystroke channel
+can move which part of the alternate screen the viewport shows.** Those are two separate
+facts, measured two weeks apart, and the rest of this section keeps them apart: the
+first is why the transcript is the default, the second is what closes the one case the
+transcript cannot answer.
 
 **`--scrollback` and `--lines` do not reach a Claude Code worker's history, and they
 fail by returning the viewport rather than by erroring.** Measured 2026-08-12 against a
@@ -279,16 +284,96 @@ worker with 120 uniquely marked lines and one real refusal behind it: plain,
 markers. `--lines` implies `--scrollback`; they are one control, not two. The flags are
 not broken — a control run in the same surface, after `/exit` dropped it to a plain
 shell, returned 128 lines and every one of the 120 markers on the first try. The cause
-is that Claude Code runs on the **alternate screen**, which has no scrollback for cmux
-to read. herdr recovers alt-screen history by scrolling it while the agent is idle;
-cmux exposes no command that does, so there is no flag and no retry that fixes this.
+is that Claude Code runs on the **alternate screen**, which cmux's *reader* has no
+scrollback to walk. Re-confirmed 2026-08-27 on a worker with 150 marked lines behind it:
+plain and `--scrollback --lines 200` both returned the same 52 viewport lines and
+reached **0** of the 150 markers.
 
-So **never answer a history question from this host's screen** — "did its first reply
-get refused", "what did it print before it stalled". A grep of those 55 lines returns a
-clean zero over a refusal sitting just above them, which is a false green and not a
-short answer. Read the worker's transcript instead (`SKILL.md`, "Read a worker's
-output"): count `SendMessage` `tool_use` blocks and read refusals out of the matching
-`tool_result` blocks. That file has neither a viewport nor a host in it.
+**Those two flags go before `--surface`, not after it.** `cmux read-screen --scrollback
+--lines 200 --workspace "$WS" --surface "$REF"` parses; the same flags written after the
+target exit non-zero with `read-screen: unexpected arguments`. That is the loud kind of
+failure and it costs nothing — noted only because everything else on this page is the
+quiet kind.
+
+So **prefer the worker's transcript for anything that asks what the worker produced** —
+"did its first reply get refused", "what did it print before it stalled". A grep of
+those 55 lines returns a clean zero over a refusal sitting just above them, which is a
+false green and not a short answer. Read the worker's transcript instead (`SKILL.md`,
+"Read a worker's output"): count `SendMessage` `tool_use` blocks and read refusals out
+of the matching `tool_result` blocks. That file has neither a viewport nor a host in it.
+
+**Scrolling does not soften that, because a scroll recovers what Claude Code *drew*,
+not what the worker printed.** Measured 2026-08-27: a worker told to `echo` 150 uniquely
+marked lines rendered them as the single collapsed line `Ran 1 shell command`, and
+scrolling that session to its very top reached the startup banner without passing one
+marker. They were never on the alternate screen to be recovered. So for an output
+question the transcript is not the more convenient answer, it is the only one — and the
+subsection below does not change that.
+
+### Scrolling the alternate screen — what the keystroke channel reaches
+
+**`pageup` scrolls a worker's alternate screen; `pagedown` comes back.** Measured
+2026-08-27 on this machine. It is a keystroke, so it takes **§6's whole gate** —
+resolve the ref into a variable, refuse an empty one, and run the occupant check:
+
+```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+REF=$(python3 "$S" "$l1" ref)
+[ -n "$REF" ] || { echo "that worker's surface is gone; not sending keys" >&2; exit 1; }
+python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
+cmux send-key --workspace "$WS" --surface "$REF" pageup
+```
+
+An empty `--surface` is your own surface here exactly as it is everywhere else in this
+file, and a `pageup` that falls back to that default scrolls the session the user is
+reading.
+
+**The case this closes is the one the transcript cannot.** A long queued peer message
+pushes an **open dialog** off the top of the viewport, and the screen read then shows
+the queued text and no dialog at all. Reproduced 2026-08-27: a worker registered
+`waiting` / `input needed` while its 53-line screen carried fifty lines of queued
+message, with no `❯` and no footer anywhere on it. One `pageup` brought back
+
+```
+❯ 1. ALPHA-KEEP
+  2. BRAVO-PICK
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+```
+
+The transcript tells you a question exists. Only the screen tells you which row carries
+the `❯` right now, and `SKILL.md`'s "Answer a blocked worker" turns entirely on that.
+
+**`fn+↓ to scroll` in the screen output is how you know you are scrolled** — present in
+all 9 captures of that run taken while scrolled and absent in all 8 taken at the bottom.
+Match that fragment and not the whole hint: the prefix changes, reading `Jump to bottom:`
+normally and `N new messages:` once the worker has drawn something below you.
+
+Three properties of a scrolled surface, each measured in that run and each a way to be
+wrong about a worker:
+
+- **A scroll persists, and your own next screen read inherits it.** The viewport stays
+  where you put it while the worker goes on drawing — three reads spread over several
+  seconds of a working worker all returned the same scrolled region, while the chrome
+  around it (status line, input box) stayed live. A read taken after an un-restored
+  `pageup` is a read of the past wearing the present's footer.
+- **Keys land while scrolled, and landing one does not restore the view.** `down` sent
+  to the dialog above while the surface was scrolled moved the `❯` from option 1 to
+  option 2 and left the surface exactly where it was. So the answer goes through, and
+  both the operator and your next read are left looking at history.
+- **It works on a worker that is still drawing**, which is where this host differs from
+  herdr rather than falling short of it: herdr scrolls the alternate screen *for* you
+  and so refuses with `agent_not_idle` while the agent is working, where here the scroll
+  is a keystroke and nothing arbitrates it.
+
+**So `pagedown` back to the bottom before anything else** — before the next screen read,
+before the `enter` that answers the dialog, and before you leave the tab. Confirm it by
+the absence of the `fn+↓ to scroll` fragment rather than by the key having been sent.
+
+**Read first and key second at a worker sitting on a dialog.** `pageup` selects nothing
+and answers nothing, which is exactly why it is safe to aim at a blocked worker; every
+key you send after it is an answer.
 
 ## 6. Keystrokes
 
@@ -333,6 +418,12 @@ fall back to its own default" — reached through a different command. **Every
 
 One `send-key` per `Bash` call — the auto-mode classifier denies the compound form
 and sometimes the single form too; the single form succeeds on retry.
+
+**Navigation keys are keystrokes and take this whole gate too.** `pageup` and `pagedown`
+answer nothing and select nothing, but they are sent down the same channel to the same
+resolved ref, so an empty `--surface` scrolls your own session and a stale locator
+scrolls a stranger's. §5's scrolling subsection is where they are measured and where the
+rule about putting the view back lives.
 
 For a slash command, text then Enter, as two calls:
 
