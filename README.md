@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.10.0 — "Tether"** (a spawned worker was named on the machine and reachable nowhere else, so an opt-in --remote-control argument now rides at all four launch sites carrying the same name the -n flag does — opt-in because the flag hard-exits before session start on an account whose organization disables Remote Control, and smoke check 7f asserts both halves so the default cannot silently invert into bricking every spawn)
+Latest: **v0.10.1 — "Rewind"** (the cmux host file said a worker's alternate screen was unreachable, which was a fact about the read flags stated as a fact about the host — pageup now scrolls it and pagedown restores, the only way to see which row is selected on a dialog that a long queued peer message has pushed off the viewport, while a scroll still recovers only what Claude Code drew, so the transcript stays the answer for anything the worker printed)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
