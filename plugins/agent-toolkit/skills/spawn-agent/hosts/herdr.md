@@ -563,8 +563,11 @@ worker whose tab you never focused settles as `done`, and `done` does not satisf
 `--until idle`. Since a worker spawned `--no-focus` is by construction one whose tab
 nobody focused, that is the normal case here, not an edge one. Wait on `done`, wait on
 both, or omit `--until` entirely — bare `agent wait` uses the settled-state defaults
-and accepts all three. To block on "finished", prefer the watcher's `DONE`, which is
-driven by the registry rather than by whether a human looked at a tab.
+and accepts all three. To block on "finished", prefer the watcher's `DONE` — or its
+other rendering `GATE`, the same transition for a worker that ended its turn on a
+question — which is driven by the registry rather than by whether a human looked at a
+tab. herdr's own `done` cannot tell those two apart either: a worker sitting on a prose
+gate has ended its turn, so the pane settles exactly as a finished one does.
 
 **Use this in addition to the watcher, never instead of it** (`SKILL.md`, "A host
 that publishes its own agent states does not replace this"). Nothing here reports a

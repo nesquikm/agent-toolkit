@@ -5,7 +5,7 @@ description: Smoke-test the spawn-agent skill on this machine — a bounded, evi
 
 # Smoke-test `spawn-agent`
 
-Thirteen checks, two workers, about eight minutes. It answers one question: **does this
+Fourteen checks, two workers, about eight minutes. It answers one question: **does this
 plugin work on this machine right now** — after an edit, after a release, or when a
 run has started feeling wrong.
 
@@ -99,12 +99,34 @@ machine were `directory` sources pointing at this repo when this was written.
 **Keep the plugin root it prints.** Every block below writes it out in full; there is
 no token to lean on.
 
-### 0b. The staleness gate
+### 0b. The staleness gate — **check the served text first, then this**
 
-**Skill text is resolved once, at session start, and cached for the life of the
-process.** A session that started before the plugin changed is running the old text
-and will smoke-test bytes nobody ships. Subagents inherit their parent's snapshot, so
-re-running this inside a `Task` refreshes nothing.
+**The premise this gate was built on was falsified on 2026-09-04.** It assumes skill
+text is pinned at session start; measured on CLI 2.1.260, a session started at
+16:10:09 was served `SKILL.md` edits written at 16:24:36, and a later edit to an
+already-invoked skill was picked up on re-invocation in that same session. The roster
+of *which* skills exist refreshes asynchronously — a brand-new skill is briefly
+`Unknown skill` — but the text of an existing one is not frozen. See CLAUDE.md,
+"A session *does* see its own edits to a skill".
+
+**So run the direct check before the clock below, and let it decide:**
+
+> Grep the skill text you were actually served — it is in your context — for a marker
+> you know you just wrote. Present means you are testing the current bytes, whatever
+> the mtime arithmetic says. That is the fact this whole section is a proxy for.
+
+The clock still earns its place for the case the direct check cannot cover: **you did
+not make the edit and do not know what marker to look for.** Then session-start-versus-
+mtime is real evidence that something changed under you, and worth acting on.
+
+**A FAIL here is therefore no longer a stop on its own.** It fails *closed* — on
+2026-09-04 it reported `STALE SESSION` for a session demonstrably holding the current
+text, and following it would have refused a valid run. Record the FAIL, run the direct
+check, and report which one you acted on and why.
+
+Subagents are the one part of the old model left standing: they inherit their host's
+text, so re-running this inside a `Task` refreshes nothing. That was verified
+2026-08-09 and has not been re-measured since.
 
 **Only `SKILL.md` is snapshotted.** Everything else the skill ships — `lib/*.py`,
 `hosts/*.md`, `hosts/*.py` — is opened at use time, by `Read` or by `python3`, so it is
@@ -159,9 +181,10 @@ open is worse than no gate.
 
 **Keep the pid it prints.** Check 1 needs it.
 
-**On FAIL, stop.** Open a new tab yourself and run `/spawn-agent-smoke` there — a
-`claude` started after the edit is the only thing that loads it. Two notes on the
-alternatives:
+**On FAIL where the direct check above also says stale**, open a new tab yourself and
+run `/spawn-agent-smoke` there — that is the unambiguous case, and the sentence that
+used to sit here ("a `claude` started after the edit is the only thing that loads it")
+is the falsified premise, not a reason. Two notes on the alternatives:
 
 - Quitting and relaunching in **this** slot works too, and inherits this slot's
   ledger file, because the ledger is keyed by the host's slot id and that outlives
@@ -1832,7 +1855,13 @@ Compare what you actually sent against the block at the top of this check:
 
 ## 9. `DONE`, from the run's own watcher — *core*
 
-PASS when the run's watcher prints `DONE <NAME>`.
+PASS when the run's watcher prints `DONE <NAME>` — **or `GATE <NAME> -- "…"`**, which
+is the same `busy → idle` transition rendered with the worker's closing words because
+they read as a question. Either is a PASS here; record which one you got and the literal
+line. This check proves the transition is *seen*. Whether the watcher tells the two
+apart correctly is check 11e's job, and it is deliberately not asserted on a live worker
+— what the smoke worker happens to say last is not something this suite controls, so
+making it the assertion would make check 9 flap on a change of wording.
 
 **Expect it after the reply, not before.** The worker sends its reply as its last act
 and delivery is immediate, while `DONE` waits on the next poll — up to a poll interval
@@ -1875,21 +1904,22 @@ purpose.
 
 ## 11. The blocked-worker signals — `ASK`, `ATTN`, `CLEAR`, `GONE` — *core, host commands*
 
-Check 5 proves `WARN` and check 9 proves `DONE`. The watcher's four remaining lines have
+Check 5 proves `WARN`, check 9 proves the turn-end line and 11e proves which of its two
+renderings you get. The watcher's four remaining lines have
 never been proved by this suite at all — they are asserted from hand measurements taken
 elsewhere. One of them is load-bearing twice over: check 1d exists to stop a
 permission-class mismatch, and check 8's diagnosis tells you to read `ATTN` as "the
 message is being held, not lost". Nothing here has ever made an `ATTN` appear, so that
 branch has never been observed to work in a run.
 
-This check makes each of them fire on purpose, and then 11d makes the one state a live
-worker cannot be talked into fire as well.
+This check makes each of them fire on purpose, and then 11d and 11e make the two states
+a live worker cannot be talked into fire as well.
 
 **11a to 11c run before teardown and use their own worker.** Before, because every line
 they produce comes from the run's watcher and teardown stops it. Their own worker,
 because 11c deliberately kills one, and killing the worker checks 7–10 rest on would
-destroy their evidence. **11d needs neither** — it is a synthetic harness against
-`watch-workers.py` and may be run at any point, including after teardown.
+destroy their evidence. **11d and 11e need neither** — both are synthetic harnesses
+against `watch-workers.py` and may be run at any point, including after teardown.
 
 **Write its ledger row before you launch it**, exactly as 7b requires. This worker is as
 real as any other and check 12 must find it.
@@ -2066,17 +2096,20 @@ directly.
 ### 11c. `CLEAR` or `DONE`, and then `GONE`
 
 Answer or dismiss the question from 11b and record **which line the watcher prints
-next**. The two are a real distinction and only one of them is guaranteed:
+next**. A turn ran or it did not — that is a real distinction and only one side of it is
+guaranteed. The first two rows are the same side, told apart by 11e:
 
 | What follows | Means |
 | --- | --- |
 | `DONE <NAME2>` | it took a turn after unblocking — the normal case, and a PASS |
+| `GATE <NAME2> -- "…"` | the same turn, ended on a question of its own — also a PASS, and record the quoted words |
 | `CLEAR <NAME2>` | it unblocked without taking a turn, so nothing is coming and the task would need re-sending |
 
 **Record which you got; do not chase the other.** `CLEAR` is the one line this suite
 still cannot produce on demand — it needs a block that ends with no turn behind it, and
 whether dismissing a question does that is not something this check controls. Seeing
-`DONE` proves the unblock is *reported*, which is the property check 9 depends on. Write
+either turn-end line proves the unblock is *reported*, which is the property check 9
+depends on. Write
 down which line appeared rather than recording "11c PASS" on its own; a suite that
 cannot say which of two signals it saw is not measuring the difference between them.
 
@@ -2198,6 +2231,146 @@ failed even if every line it printed looks right:
   reported. An eighth line there means the collapse is not happening and line 5 is
   living on luck. This is the assertion that is easiest to lose and hardest to see, so
   count the lines rather than reading them.
+
+### 11e. `GATE` — a worker that asked in prose, told from one that finished — *synthetic*
+
+**Synthetic for the same reason 11d is, plus one of its own.** The state under test is a
+worker that ends its turn with a question in prose, which is not something you can
+reliably arrange in a live worker: what a real agent says last depends on its task, its
+skills and its mood, and a check that asserted on it would flap. So this drives
+`watch-workers.py` over a throwaway `CLAUDE_CONFIG_DIR` holding a synthetic registry
+record **and a synthetic transcript**, which is what the signal actually reads.
+
+**Both halves are asserted, and a one-sided check would be worse than no check.** A
+detector that fired on every turn-end would pass "GATE fires on a prose gate" perfectly
+while making the supervisor cry blocked on every finished worker — which is worse than
+the defect it replaced. So four of the eight transitions below must produce `DONE`, and
+they are the point of the check as much as the two `GATE`s are.
+
+```bash
+W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
+
+D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/repo"
+WATCHER="$W" SCRATCH="$D" python3 - <<'PY'
+import json, os, string, subprocess, sys, time
+
+D = os.environ["SCRATCH"]
+CWD = os.path.join(D, "repo")
+SID = "11111111-2222-3333-4444-555555555555"
+SAFE = frozenset(string.ascii_letters + string.digits)
+
+tdir = os.path.join(D, "projects", "".join(c if c in SAFE else "-" for c in CWD))
+os.makedirs(tdir)
+transcript = os.path.join(tdir, SID + ".jsonl")
+rec_path = os.path.join(D, "sessions", "%d.json" % os.getpid())
+ledger = os.path.join(D, "led.tsv")
+open(ledger, "w").write("gate-probe\tL1\tL2\tspawned\t%s\t%d\tcmux\n" % (SID, os.getpid()))
+
+def say(*blocks, **kw):
+    rec = {"type": "assistant", "isSidechain": kw.get("sidechain", False),
+           "message": {"content": list(blocks)}}
+    with open(transcript, "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+        fh.write(json.dumps({"type": "system", "subtype": "hook"}) + "\n")
+
+def text(s):  return {"type": "text", "text": s}
+def tool():   return {"type": "tool_use", "name": "Bash", "input": {}}
+
+def step(status, waiting_for=None):
+    rec = {"pid": os.getpid(), "name": "gate-probe", "sessionId": SID,
+           "cwd": CWD, "status": status}
+    if waiting_for is not None:
+        rec["waitingFor"] = waiting_for
+    open(rec_path + ".tmp", "w").write(json.dumps(rec))
+    os.replace(rec_path + ".tmp", rec_path)
+    time.sleep(0.6)
+
+w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], ledger, "0.2"],
+                     stdout=subprocess.PIPE, text=True,
+                     env=dict(os.environ, CLAUDE_CONFIG_DIR=D))
+
+step("busy")                                          # first sight, silent
+
+say(text("All twelve checks pass. The tree is clean."))
+step("idle")                                          # 1 -> DONE   finished
+
+step("busy")
+say(text('Ran the suite; 3 files changed.\n\nApply commit "fix: tell a gate from an ending"? [y / n / edit]'))
+step("idle")                                          # 2 -> GATE   the mandated prose gate
+
+step("busy")
+say(text("The question was whether the pid check holds? It does.\n\nDone: 4 rows pruned."))
+step("idle")                                          # 3 -> DONE   question in the BODY, not the close
+
+step("busy")
+say(text("Ready when you are.\n\nProceed to the release ceremony [yes / no]"))
+step("idle")                                          # 4 -> GATE   option list, no question mark
+
+step("busy")
+say(text("Sending the report."), tool())
+step("idle")                                          # 5 -> DONE   turn ended on a tool call
+
+step("busy")
+say(text("Should I keep going?"), sidechain=True)
+say(text("Sub-agent finished. Nothing further."))
+step("idle")                                          # 6 -> DONE   the question was a sub-agent's
+
+step("busy")
+say(text("`skills/` is still untracked in dotfiles (`??`) -- nothing committed."))
+step("idle")                                          # 7 -> DONE   git's ?? is not a question
+
+step("waiting", "permission prompt")                  #   -> ATTN
+step("idle")                                          # 8 -> CLEAR  no turn ran, so no new prose
+
+w.terminate()
+print(w.stdout.read(), end="")
+PY
+rm -rf "$D"
+```
+
+PASS on **exactly these nine lines, in this order**:
+
+```
+DONE gate-probe
+GATE gate-probe -- "Apply commit "fix: tell a gate from an ending"? [y / n / edit]"
+DONE gate-probe
+GATE gate-probe -- "Proceed to the release ceremony [yes / no]"
+DONE gate-probe
+DONE gate-probe
+DONE gate-probe
+ATTN gate-probe
+CLEAR gate-probe
+```
+
+That is nine lines for eight transitions plus the `ATTN`, and the count is the check as
+much as the content: a run that prints ten has a `GATE` where a `DONE` belongs.
+
+Five assertions ride on it, and the last three are the ones that break first:
+
+- **`GATE` fires on the mandated form** — line 2, the shipped skill contract's literal
+  `Apply commit "<subject>"? [y / n / edit]`, and the line carries the words back. This
+  is the half the defect asked for.
+- **`GATE` fires on a bracketed option list with no question mark** — line 4. It is the
+  narrow square-bracket rule; a looser one that also accepted parentheses made
+  `(Asia/Tbilisi)` and every markdown link a gate.
+- **`DONE` still means finished** — lines 1, 3, 5, 6, 7. Four different ways a turn can
+  end without a gate, and every one of them must stay a bare `DONE`. Run this against a
+  detector that greps the whole message for a question mark and line 3 turns into a
+  `GATE`; against one that walks back past the final assistant record, line 5 reports
+  the question from transition 4 as a gate that is not open; against one that does not
+  skip `isSidechain`, line 6 reports a sub-agent's question as the worker's own.
+- **A `?` inside git's `??` is not a question** — line 7. This is the exact string a
+  bare `"?" in line` test fired on across the real transcripts on this machine.
+- **`CLEAR` never becomes a `GATE`** — line 9. The transcript is not consulted on a
+  `waiting → idle` transition at all, because no turn ran and there is nothing new for
+  the worker to have said. A `GATE` there would be the stale-question failure arriving
+  by a second route.
+
+**The record's pid is the driver's own**, exactly as in 11d, so the liveness check passes
+for as long as the harness runs and there is nothing to clean up. The transcript is
+appended to with a `system` record after each assistant record, because that is what
+Claude Code really writes — the last line of a real transcript is not the assistant's,
+and a reader that only looked at the final record would find nothing.
 
 ## 12. Teardown, and proof that nothing leaked
 

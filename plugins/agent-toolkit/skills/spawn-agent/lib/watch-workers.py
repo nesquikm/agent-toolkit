@@ -20,6 +20,13 @@ One line per state change, each becoming a chat notification:
                 file does not recognise, and the line then carries that
                 literal value so the next new one documents itself.
   DONE  <name>  went from working to idle, so a turn ended
+  GATE  <name>  the same transition, but the last thing the worker said reads as
+                a question for a human. The registry cannot see this: a worker
+                that asks in prose and ends its turn is byte-identical to one
+                that finished, so the discriminator is its transcript, and the
+                line carries the closing words so a supervisor can route the
+                gate without reading a screen. DONE and GATE are the two
+                renderings of one transition and never both fire for it.
   CLEAR <name>  stopped being blocked without a turn running — nothing to collect
   GONE  <name>  its process is no longer running (clean exit, crash, or kill)
   WARN  <text>  the watcher itself is deaf — it matches nothing, so it will
@@ -29,7 +36,9 @@ One line per state change, each becoming a chat notification:
 import glob
 import json
 import os
+import re
 import signal
+import string
 import sys
 import time
 
@@ -61,10 +70,67 @@ WAITING_STATES = {
     "dialog open": "attn",
 }
 
+# --- the third state: a worker that asked in prose and ended its turn ---------
+#
+# The registry has two states for a worker that is not working: `idle` (a turn
+# ended) and `waiting` (a human is needed, and `waitingFor` says which dialog).
+# It has no state for the third thing that actually happens: a worker asks its
+# question **in prose** and ends its turn, which registers `idle` and is
+# byte-for-byte identical on disk to a worker that finished its work. Measured
+# five times in one session on 2026-09-04 — two commit gates, two release gates,
+# one more commit gate — each reported as a bare DONE, each read as turn churn,
+# and each discovered only by reading the worker's screen.
+#
+# It cannot be fixed by telling workers to raise gates through AskUserQuestion so
+# that `waitingFor` fires: the gates come out of skill contracts that *mandate*
+# prose, one shipped skill requiring literally `Apply commit "<subject>"? [y / n /
+# edit]`. A worker obeying its skill asks in prose, so the discriminator has to be
+# something the watcher can observe rather than something the worker must change.
+#
+# The transcript is that thing, and it is the only one: same config dir, keyed by
+# the `cwd` and `sessionId` the registry record already carries, no host command
+# and no terminal — which is what keeps this file host-agnostic. Read only on the
+# transition, never on a poll.
+
+# How far back from the end of a transcript to look for the final assistant
+# record. Two attempts because a single tool result can be larger than the first
+# window; both are cheap because this runs once per turn-end, not once per poll.
+TAIL_BYTES = (1 << 20, 1 << 23)
+
+# How much of the worker's closing line rides in the GATE line.
+EXCERPT = 200
+
+# `<config-dir>/projects/<esc-cwd>/<sessionId>.jsonl`, where esc-cwd replaces
+# every non-alphanumeric character with `-`. ASCII deliberately: str.isalnum() is
+# true for accented letters and would leave them in place, so a cwd outside ASCII
+# would build a path that does not exist and silently lose every GATE under it.
+SAFE = frozenset(string.ascii_letters + string.digits)
+
+# A question mark that closes a word, not any question mark anywhere. The
+# difference is measured: over the 611 transcripts on this machine, a bare `"?"
+# in line` test also fired on git's `??` shorthand inside backticks and on a URL
+# query string, and this form fires on neither.
+QMARK = re.compile(r"[\w\"'’)\]]\?")
+
+# The other shape a prose gate takes: a trailing bracketed option list, as in
+# `Apply commit "…"? [y / n / edit]`. Deliberately narrow — square brackets only,
+# short word-ish tokens only. The loose first version accepted any parenthesised
+# text containing a slash, which made `· resets 1pm (Asia/Tbilisi)` and every
+# markdown link `](https://…)` a gate; this one fired on **zero** of those 611
+# transcripts, and it is kept for the mandated form above rather than for
+# anything it has caught.
+CHOICE = re.compile(r"\[\s*\w[\w -]{0,11}(?:\s*[/|]\s*\w[\w -]{0,11}){1,4}\s*\]\s*$")
+
 
 def registry_dirs():
+    """(config dir, its sessions dir) for every profile being watched.
+
+    Both halves are needed: the record is read out of `sessions/`, and the
+    transcript that answers "was that an ending or a question" lives beside it
+    under `projects/` in the same profile.
+    """
     raw = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    return [os.path.join(d, "sessions") for d in raw.split(":") if d]
+    return [(d, os.path.join(d, "sessions")) for d in raw.split(":") if d]
 
 
 def wanted(ledger):
@@ -149,8 +215,128 @@ def read_record(path):
     return (None, True) if alive(pid) else (None, False)
 
 
+def transcript_path(config_dir, cwd, session_id):
+    if not config_dir or not cwd or not session_id:
+        return None
+    esc = "".join(c if c in SAFE else "-" for c in cwd)
+    return os.path.join(config_dir, "projects", esc, session_id + ".jsonl")
+
+
+def tail_records(path, nbytes):
+    """(records, whole_file) from the last nbytes of a .jsonl transcript.
+
+    The leading fragment is dropped whenever the read started mid-file, and an
+    unparseable line is skipped rather than fatal — a transcript is appended to
+    while this reads it, so the last line can be half-written.
+    """
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        start = max(0, fh.tell() - nbytes)
+        fh.seek(start)
+        blob = fh.read()
+    lines = blob.decode("utf-8", "replace").split("\n")
+    if start:
+        lines = lines[1:]
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out, start == 0
+
+
+def final_assistant_text(records):
+    """The text of the LAST thing this session said, or None if it said nothing.
+
+    It returns at the first assistant record it meets scanning backwards and
+    never walks past it, which is the whole staleness guarantee. Walk further and
+    a turn that ended on a tool call — a worker whose last act was `SendMessage`
+    and no prose — would be described by whatever it said in some *earlier* turn,
+    and a question from ten minutes ago would be reported as a gate that is not
+    open. An empty string is therefore a real answer, distinct from None: this
+    turn ended without the worker saying anything.
+
+    Sub-agent records are interleaved into the same file, so a session whose last
+    act was spawning one would otherwise be described by its sub-agent's closing
+    words rather than its own.
+    """
+    for rec in reversed(records):
+        if rec.get("type") != "assistant" or rec.get("isSidechain"):
+            continue
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            return None
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        parts = []
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return None
+
+
+def gate_line(text):
+    """The closing line, when it reads as a question for a human. Else None.
+
+    Only the last non-empty line is ever tested, and the test stops there rather
+    than searching upwards. A report body is full of questions it answers itself;
+    a gate is the last thing on screen, and that asymmetry is the precision.
+    Measured over 611 transcripts: 22 hits, every one of them a real question put
+    to a human ("Want me to push and open a draft PR?", "May I commit?", "Run
+    it?"), and no clear false positive.
+    """
+    for raw in reversed(text.split("\n")):
+        line = raw.strip().strip("*_`> ").strip()
+        if not line:
+            continue
+        return line if (QMARK.search(line) or CHOICE.search(line)) else None
+    return None
+
+
+def excerpt(line):
+    clean = " ".join("".join(c if c.isprintable() else " " for c in line).split())
+    return clean if len(clean) <= EXCERPT else clean[: EXCERPT - 3].rstrip() + "..."
+
+
+def gate_excerpt(source):
+    """The GATE line's payload for a worker whose turn just ended, or None.
+
+    None for every failure to read as well as for a genuine ending, and that is
+    deliberate: a missing transcript, an unreadable one, a cwd that has moved, a
+    file with no assistant record in range all fall back to exactly today's DONE.
+    This can add information to a transition; it can never take a DONE away.
+    """
+    path = transcript_path(*source) if source else None
+    if not path:
+        return None
+    for nbytes in TAIL_BYTES:
+        try:
+            records, whole = tail_records(path, nbytes)
+        except OSError:
+            return None
+        text = final_assistant_text(records)
+        if text is not None:
+            line = gate_line(text)
+            return excerpt(line) if line else None
+        if whole:
+            break  # already read the entire file; a bigger window finds no more
+    return None
+
+
 def snapshot(names, paths):
-    """(name -> state, torn names, the memo for the next poll, unknown-value notes).
+    """(name -> state, torn names, next poll's memo, unknown-value notes, sources).
 
     `paths` maps a registry file to the wanted name last read out of it. It is
     what makes a torn read attributable at all: the file is named for the pid,
@@ -165,12 +351,19 @@ def snapshot(names, paths):
     WAITING_STATES does not list. It is a *fourth* return rather than a richer
     state because the state is what gets compared between polls; see the
     routing below.
+
+    `sources` carries what it takes to find a worker's transcript — its profile,
+    its `cwd` and its `sessionId`, all three straight off the record this poll has
+    already read. It is collected for every live worker and *used* for none of
+    them here: the read happens in main(), once, on the transition, because doing
+    it in this loop would open a transcript for every idle worker on every poll.
     """
     out = {}
     torn = set()
     fresh = {}
     notes = {}
-    for d in registry_dirs():
+    sources = {}
+    for config_dir, d in registry_dirs():
         for path in glob.glob(os.path.join(d, "*.json")):
             rec, was_torn = read_record(path)
             if rec is None:
@@ -190,6 +383,7 @@ def snapshot(names, paths):
             if name not in names or not alive(rec.get("pid")):
                 continue
             fresh[path] = name
+            sources[name] = (config_dir, rec.get("cwd"), rec.get("sessionId"))
             status = rec.get("status")
             if status == "waiting":
                 waiting_for = rec.get("waitingFor") or ""
@@ -221,7 +415,7 @@ def snapshot(names, paths):
                 # otherwise become a state of its own, so the -> idle transition
                 # out of it would not be recognised and the DONE would be lost.
                 out[name] = "busy"
-    return out, torn, fresh, notes
+    return out, torn, fresh, notes, sources
 
 
 def main():
@@ -266,9 +460,9 @@ def main():
     while True:
         names = wanted(ledger)
         if names:
-            now, torn, paths, notes = snapshot(names, paths)
+            now, torn, paths, notes, sources = snapshot(names, paths)
         else:
-            now, torn, notes = {}, set(), {}
+            now, torn, notes, sources = {}, set(), {}, {}
 
         if now or torn:
             deaf_since = None
@@ -309,7 +503,18 @@ def main():
                 )
                 print(f"ATTN {name}{extra}", flush=True)
             elif state == "idle" and was == "busy":
-                print(f"DONE {name}", flush=True)
+                # One transition, two renderings. The registry says only that a
+                # turn ended; the transcript says whether the worker ended it by
+                # asking a human something, which is the case a bare DONE has
+                # been reporting as a completion. GATE is that DONE with the
+                # question attached, never a second line about the same event —
+                # so a supervisor that sees GATE has been told the turn ended
+                # too, and loses nothing if the reading is wrong.
+                gate = gate_excerpt(sources.get(name))
+                if gate:
+                    print(f'GATE {name} -- "{gate}"', flush=True)
+                else:
+                    print(f"DONE {name}", flush=True)
             elif state == "idle" and was in ("ask", "attn"):
                 # Unblocked with no working state in between, so no turn ran.
                 # A terminal UI overlay opening and closing over an already-idle
