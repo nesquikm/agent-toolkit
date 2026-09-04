@@ -1036,11 +1036,31 @@ finishes, so a slow agent never blocks reporting a fast one.
 
 ## Watch — two pushes, and you need both
 
-**A stage stops being worked on in two different ways, and only one of them is an
-ending.** It can *end* — the turn finishes — or it can *suspend*, parked on a
-question or a permission prompt with the turn still open. Both leave the worker
-doing nothing; only the first ever resolves on its own. And a worker can simply
-*die*, which looks like neither.
+**A stage stops being worked on in three different ways, and only one of them is
+an ending.** It can *end* — the turn finishes and the work is done. It can
+*suspend*, parked on a Claude Code dialog with the turn still open. Or it can
+**gate**: ask its question *in prose* and end the turn, which looks like the
+first and behaves like the second. And a worker can simply *die*, which looks
+like none of them.
+
+**The third one is the one that costs you, because the registry cannot see it.**
+A worker parked on a dialog registers `waiting`, and `waitingFor` names which —
+that is `ASK` and `ATTN`. A worker that types `Apply commit "…"? [y / n / edit]`
+and stops registers `idle`, **byte-for-byte identical to a worker that finished
+its work**. Measured five times in one session on 2026-09-04 — two commit gates,
+two release gates, one more commit gate — every one reported as a bare `DONE`,
+every one read as turn churn, and every one discovered only by reading the
+worker's screen. Twice the operator noticed the stall before the supervisor did
+and asked why it had stopped. That is the real cost: a supervisor cannot route a
+gate it cannot see, so the human becomes the polling mechanism.
+
+**And you cannot fix it from the task text.** The obvious instruction — *raise
+your gates with `AskUserQuestion` so `waitingFor` fires* — asks a worker to
+disobey its own skills: these gates come out of skill contracts that **mandate**
+prose, one shipped skill requiring literally `Apply commit "<subject>"? [y / n /
+edit]`. A worker following its skill will ask in prose, so the discriminator has
+to be something the watcher can observe. It is the transcript, and `GATE` below
+is what the watcher makes of it.
 
 ### The worker's reply — results, pushed
 
@@ -1057,6 +1077,15 @@ that *printed* its reply instead of sending one has done nothing the registry ca
 wrong. It took a turn and went idle. The best you get is a `DONE`, and you may not even
 get that — `DONE` is a sampled `busy → idle` transition, and a print-only turn is the
 shortest one a worker can take, so it can open and close inside a single poll.
+
+**A `GATE` does not name it either, and is not evidence against it.** `GATE` reads the
+same transcript this section sends you to, but it answers a different question — *did
+this turn end on a question* — and a printed reply that ends in a statement is a `DONE`
+like any other. Where the two do meet, `GATE` is worth more than it looks: the printed
+reply is *in* the transcript, so a worker that printed its findings and closed with an
+offer hands you the closing words in the signal itself. That is the fastest positive
+evidence of a print-only reply there is, and it still is not a substitute for the
+transcript read below.
 
 So the trigger is the absence of a signal, not the presence of one: **you are owed a
 reply and it has not come.** Before re-sending, ask whether the worker is idle and then
@@ -1089,7 +1118,7 @@ task's own wording talked the worker out of the tool — see "Send the task" abo
 opposite fault, the ref wall, and its fix is the literal `uds:` address in the task
 text rather than any change to the prohibitions.
 
-### The watcher — one Monitor, five worker signals
+### The watcher — one Monitor, six worker signals
 
 ```bash
 python3 -u "${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/watch-workers.py" \
@@ -1156,19 +1185,36 @@ directory while the spawn side writes rows somewhere else: one `WARN` at 30 s, a
 every signal in the run lost. If the doubled slash bothers you when you paste it,
 leave it bothering you.
 
-Each output line becomes a chat notification that re-invokes you. **Five of them
+Each output line becomes a chat notification that re-invokes you. **Six of them
 are worker signals** — one named worker, one state change:
 
-- `DONE <name>` — that worker went from **working to idle**, so a turn ended.
-  Not the same as "the work is finished": a worker parked awaiting its own
-  background sub-agent ends its turn too. The worker's own reply is what tells you
-  the outcome.
+- `DONE <name>` — that worker went from **working to idle**, so a turn ended, and
+  the last thing it said does not read as a question. Not the same as "the work is
+  finished": a worker parked awaiting its own background sub-agent ends its turn
+  too. The worker's own reply is what tells you the outcome.
   **Expect that reply to arrive *before* this line, not after.** The worker sends
   it as its last act and delivery is immediate, while `DONE` waits on the next
   poll, up to one poll interval (2 s by default) later — measured in that order on
   2026-08-09. So `DONE` is a backstop for a worker that finished without reporting,
   and a supervisor that gates on `DONE` before reading the findings is waiting for
   something it is already holding.
+- `GATE <name> -- "<its closing words>"` — **the same transition**, but the worker
+  ended its turn by asking a human something. This is the third state above: the
+  registry says `idle` either way, so the watcher opens the worker's transcript
+  and reads the last line it said. **`GATE` is a `DONE` with the question
+  attached, never a second line about the same event** — the two never both fire
+  for one transition, so a supervisor that sees `GATE` has been told the turn ended
+  as well.
+  **Read the quoted words and route the gate.** They are there so you do not have
+  to go to the screen for the thing the screen was the only source of: nine times
+  in ten the line itself says whether this is yours to answer, the user's to
+  answer, or a question the worker has already answered for itself. Answer it
+  through the host's keystroke channel, not `SendMessage` — see "Answer a blocked
+  worker", which applies unchanged, and note that unlike `ASK` and `ATTN` this
+  worker is **not** blocked: its turn is over, so a peer message reaches it rather
+  than queuing. What it may reach it *with* is the constraint — "A peer message
+  may narrow a worker's scope, never widen it" — and an approval gate is exactly
+  the thing a peer message may not carry.
 - `ASK <name>` — **suspended** on an `AskUserQuestion`. Not an ending, and no
   `DONE` follows until someone answers it.
 - `ATTN <name>` — suspended on anything else a human must clear: a permission
@@ -1228,7 +1274,7 @@ reported a permission prompt as `ASK` with nothing anywhere reporting a fault.
 `Monitor` on 2026-08-09; `CLEAR` is the corrected half of the spurious pair that
 same run produced, and for four releases it was the one still unobserved.
 
-**All five have now been caught in the wild.** `CLEAR` arrived unprompted on
+**All five of those have now been caught in the wild.** `CLEAR` arrived unprompted on
 2026-08-17, on a worker that had finished its task and been reported half an hour
 earlier: an `ATTN` and a `CLEAR` two seconds apart, with the worker `idle` and
 `waitingFor` empty on both sides of the pair. Its transcript was byte-for-byte
@@ -1249,7 +1295,78 @@ process state rather than on events. It is also why the watcher is not retired b
 host that publishes its own lifecycle states — see the note at the end of this
 section.
 
-**A sixth line exists, and it is not a worker signal.** That distinction is the
+**`DONE` versus `GATE` is decided in the transcript, and it is the one signal
+that is not read off the registry.** The record for a prose gate and the record
+for a finished worker are the same bytes — `status: "idle"`, no `waitingFor`, and
+nothing about what the worker said — so there is nothing in `sessions/<pid>.json`
+to route on. The watcher therefore resolves
+`<config-dir>/projects/<esc-cwd>/<sessionId>.jsonl` from the `cwd` and
+`sessionId` on that same record, reads its tail, and tests **the last non-empty
+line of the last thing the session itself said**:
+
+| what the closing line looks like | signal |
+| --- | --- |
+| contains a question mark that closes a word — `commit?`, `it?`, `(y)?` | `GATE` |
+| ends in a bracketed option list — `[y / n / edit]`, `[yes / no]` | `GATE` |
+| anything else, **including a question earlier in the report** | `DONE` |
+| the turn ended on a tool call and said nothing | `DONE` |
+| no transcript, no `cwd`, unreadable file, no assistant record in range | `DONE` |
+
+Six properties of that are deliberate, and each one is a false positive that was
+measured and removed rather than reasoned away. The corpus is the 611 transcripts
+on this machine, over which the shipped rule fires on **22, or 3.8%, every one of
+them a real question put to a human** — "Want me to push and open a draft PR?",
+"May I commit?", "Run it?":
+
+- **Only the last line is tested, and the test stops there** rather than
+  searching upwards. A report body is full of questions it answers itself; a gate
+  is the last thing on screen. That asymmetry is where the precision comes from.
+- **Only the last assistant record is read, and the reader never walks past it.**
+  A turn that ended on a `SendMessage` with no prose after it says nothing, and
+  says nothing *as its answer* — walk further back and a question from two turns
+  ago gets reported as a gate that is not open.
+- **Sub-agent records are skipped.** They interleave into the same file, so a
+  worker whose last act was spawning one would otherwise be described by its
+  sub-agent's closing words.
+- **A question mark must close a word.** A bare "is there a `?` in the line" test
+  also fired on git's `??` shorthand inside backticks and on a URL query string.
+- **The bracket rule is square-bracketed and narrow.** Written loosely enough to
+  accept any parenthesised text containing a slash, it made `· resets 1pm
+  (Asia/Tbilisi)` and every markdown link `](https://…)` a gate — seven of the
+  first run's 35 hits. It now fires on none of the 611 and is kept for the
+  mandated `[y / n / edit]` form rather than for anything it has caught.
+- **Every failure to read falls back to `DONE`.** A missing transcript, a moved
+  `cwd`, an unreadable file all produce exactly the pre-change line. This signal
+  can add information to a transition; it can never take a `DONE` away.
+
+It is polled the same way everything else here is, with one exception worth
+knowing: the transcript is opened **only on the transition**, never on a poll, so
+a run of idle workers costs no more reads than it did before.
+
+**Its provenance, stated the way the other five are — and both halves are live.**
+The defect is a live measurement: five prose gates in one session, 2026-09-04. So
+is the signal, caught the same day through a live `Monitor` on **one real worker,
+in one run, both ways**:
+
+```
+DONE smoke-773
+GATE smoke-773 -- "Apply commit "fix(watcher): tell a gate from an ending"? [y / n / edit]"
+```
+
+The first came when it finished its task and replied; the second when it was asked
+to end a turn on a prose question. **Its registry record was the same both times** —
+`"status":"idle"`, no `waitingFor` field at all — which is the entire claim this
+signal makes, confirmed against the raw JSON at the moment `GATE` fired. The
+transcript was the only thing that differed, and the watcher read it across a
+*profile boundary*: the worker registered under `~/.claude` while its supervisor ran
+under `~/.claude-st`, and the transcript resolved because the path is built from the
+profile the record was found in rather than from the watcher's own.
+
+The smoke suite's check 11e is the reproducible version — eight transitions over a
+throwaway profile, asserting both that `GATE` fires on a prose gate and that it does
+**not** fire on four different ways of merely finishing.
+
+**A seventh line exists, and it is not a worker signal.** That distinction is the
 whole of how to read it: `WARN` names no worker and says nothing about any
 worker's state. It is the watcher reporting on *itself*.
 
@@ -1341,6 +1458,20 @@ the same moment.
 `ASK` and `ATTN` both mean *a human is being waited on, and the run is stopped
 until one shows up*. Neither line says what was asked. **Read the screen first**,
 then answer with keys — both commands are in the host file.
+
+**`GATE` belongs to this section too, and it differs from those two in exactly
+one way that matters here: the worker is not blocked.** Its turn ended, so its
+inbox is open and a peer message reaches it rather than queuing — which makes it
+the one waiting worker you *can* answer without keys, and also the one where the
+scope rule bites hardest. A gate is nearly always an approval, and **"A peer
+message may narrow a worker's scope, never widen it"** means your `SendMessage`
+cannot supply one: a well-built worker will refuse it and raise a second gate,
+which is a round trip spent to end up where you started. So route by what the
+quoted words ask for — a question you are entitled to answer (which file, which
+branch, which of two readings) goes by `SendMessage`; an approval goes to the
+user, or to the keystroke channel if they have already authorized you to press
+it. And unlike `ASK` and `ATTN`, you usually do not have to read the screen at
+all: the `GATE` line carries the question.
 
 **Reading first is not a diagnostic nicety, it is the whole procedure.** Which keys
 are right depends entirely on which row is already highlighted (`❯`), and dialogs in
@@ -1489,7 +1620,33 @@ nothing about the launch hints at it:
    2. No, exit
 ```
 
-**Expect that plain form, and read option 2 before you touch anything** — it has two
+**That order is not stable, and on 2026-09-04 it was reversed.** Measured on this
+machine, CLI 2.1.260, on a fresh scratch checkout, the dialog rendered with no numbers
+and the destructive option **selected**:
+
+```
+ Accessing workspace:
+ /private/var/folders/…/spawn-agent-smoke/773/smoke repo
+
+ Quick safety check: Is this a project you created or one you trust? …
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+```
+
+`enter` there **kills the worker**, and it is the keystroke every version of this file
+before today told you to press. So read the two rules below in the order they are
+written: *count the `❯` row* is the rule, and "option 1 is pre-selected" is an
+observation that has now been falsified twice over — once in ordering and once in the
+numbering, since this variant labels nothing. Never send a memorised keystroke at this
+dialog; the only safe sequence is the one you derive from the screen you just read.
+
+**Expect either form, and read option 2 before you touch anything** — it has further
 variants and they do not do the same thing. The `⚠ This folder pre-approves N tool
 permissions in .claude/settings.json` line appears **only** when the target has a
 `.claude/settings.json`, and it comes with the softer second option:
@@ -1850,6 +2007,11 @@ which is the one failure this whole section exists to prevent.
 - **`DONE` means a turn ended, not that the work is done** — and the worker's
   reply usually arrives *before* it. Collect findings from the reply; treat `DONE`
   as the backstop for a worker that finished without reporting.
+- **`GATE` is that same turn-end with the worker's question attached**, and it is
+  the one line that says a human is needed on a worker the registry calls `idle`.
+  A prose gate — `Apply commit "…"? [y / n / edit]` — is not `waiting`, so `ASK`
+  and `ATTN` never fire for it. Read the quoted words and route it; do not read it
+  as `DONE` with decoration.
 - **Messages cannot clear a block and cannot run a slash command.** Keys can do
   both, one `Bash` call per keystroke.
 - **A peer message may narrow a worker's scope; it may never widen it.** Extra
