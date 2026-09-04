@@ -144,23 +144,38 @@ Three consequences:
   To know what a session is running, check `git rev-parse HEAD` here — not the version.
 - **Don't leave an experimental branch checked out.** Return to `main` when you stop
   working on a branch, or you are silently running unreviewed skill text everywhere.
-- **A session cannot see its own edits to a skill.** Skill text is resolved once, at
-  session start, and cached in the running process; the `Skill` tool does not re-read
-  the tree when it fires. A session that was already running when you edited a skill
-  keeps serving the old text for the rest of its life, and nothing in its behaviour
-  signals that it is stale. Subagents inherit the snapshot of the `claude` process
-  hosting them, so spawning a fresh one to check an edit returns its parent's text,
-  not the tree's — there is no way to verify the edit from inside. Read "an edit is
-  live in the next session" literally: **the next session**, meaning a `claude`
-  process started after the edit. Here the natural one is a worker spawned into a
-  fresh cmux tab by the very skill under test.
+- **A session *does* see its own edits to a skill — this reversed on 2026-09-04, and
+  the old rule is why the smoke suite still has a gate that fails on a healthy tree.**
+  Skill text is **not** pinned at session start. What a session holds is a roster of
+  the skills it knows about, refreshed asynchronously while it runs, and the text is
+  served from that refresh rather than from process start. Measured on CLI 2.1.260,
+  in a session started at 16:10:09:
 
-  Verified 2026-08-09: `SKILL.md` was edited at 13:57:41. A subagent inside a `claude`
-  process started at 13:16:29 was served the pre-edit text — all seven markers checked
-  were absent and the served text matched the pre-edit content exactly — while a
-  worker spawned into a fresh cmux tab at 14:10:31 was served the post-edit text, all
-  seven markers present. Same working tree, same `directory`-source install, same
-  moment; the only variable was process start time.
+  | act | result |
+  | --- | --- |
+  | edited two `SKILL.md` at 16:24:36, invoked both later | **post-edit** text served, both times, first invocation |
+  | created a brand-new skill at 17:08:38, invoked it at once | `Unknown skill` — the roster had not refreshed yet |
+  | invoked it one tool call later | served, so the roster refreshes *during* a session |
+  | deleted the file, invoked again | still served its text — the refresh is what captures it, not the invocation |
+  | rewrote it, invoked again minutes later | served the **new** text, in the same session |
+
+  So an edit to a skill is verifiable from inside the session that made it, after a
+  refresh. What is **not** immediate is a *newly created* skill: it stays `Unknown
+  skill` until the roster next refreshes, and nothing announces when that is. That is
+  the one case still worth opening a new `claude` for.
+
+  **What did not change, and was not re-measured:** subagents inherit their host's
+  text, so spawning one to check an edit can still return the parent's copy —
+  verified 2026-08-09 and left standing here because nothing today tested it. Do not
+  read the reversal above as covering it.
+
+  **The smoke suite's check 0b still implements the old model and is now wrong**, and
+  it fails *closed*: it compares session start time against the newest `SKILL.md`
+  mtime and says `STALE SESSION, start a fresh claude`. On 2026-09-04 it said exactly
+  that while the session was being served the current bytes — the gate refused a run
+  that would have been valid. Until it is rewritten, the direct measurement outranks
+  it: grep the text you were actually served for a marker you just wrote. That is the
+  thing 0b is a proxy for, and you can check it in one step.
 
 ## Release Files
 

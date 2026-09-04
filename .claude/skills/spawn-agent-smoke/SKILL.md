@@ -99,12 +99,34 @@ machine were `directory` sources pointing at this repo when this was written.
 **Keep the plugin root it prints.** Every block below writes it out in full; there is
 no token to lean on.
 
-### 0b. The staleness gate
+### 0b. The staleness gate — **check the served text first, then this**
 
-**Skill text is resolved once, at session start, and cached for the life of the
-process.** A session that started before the plugin changed is running the old text
-and will smoke-test bytes nobody ships. Subagents inherit their parent's snapshot, so
-re-running this inside a `Task` refreshes nothing.
+**The premise this gate was built on was falsified on 2026-09-04.** It assumes skill
+text is pinned at session start; measured on CLI 2.1.260, a session started at
+16:10:09 was served `SKILL.md` edits written at 16:24:36, and a later edit to an
+already-invoked skill was picked up on re-invocation in that same session. The roster
+of *which* skills exist refreshes asynchronously — a brand-new skill is briefly
+`Unknown skill` — but the text of an existing one is not frozen. See CLAUDE.md,
+"A session *does* see its own edits to a skill".
+
+**So run the direct check before the clock below, and let it decide:**
+
+> Grep the skill text you were actually served — it is in your context — for a marker
+> you know you just wrote. Present means you are testing the current bytes, whatever
+> the mtime arithmetic says. That is the fact this whole section is a proxy for.
+
+The clock still earns its place for the case the direct check cannot cover: **you did
+not make the edit and do not know what marker to look for.** Then session-start-versus-
+mtime is real evidence that something changed under you, and worth acting on.
+
+**A FAIL here is therefore no longer a stop on its own.** It fails *closed* — on
+2026-09-04 it reported `STALE SESSION` for a session demonstrably holding the current
+text, and following it would have refused a valid run. Record the FAIL, run the direct
+check, and report which one you acted on and why.
+
+Subagents are the one part of the old model left standing: they inherit their host's
+text, so re-running this inside a `Task` refreshes nothing. That was verified
+2026-08-09 and has not been re-measured since.
 
 **Only `SKILL.md` is snapshotted.** Everything else the skill ships — `lib/*.py`,
 `hosts/*.md`, `hosts/*.py` — is opened at use time, by `Read` or by `python3`, so it is
@@ -159,9 +181,10 @@ open is worse than no gate.
 
 **Keep the pid it prints.** Check 1 needs it.
 
-**On FAIL, stop.** Open a new tab yourself and run `/spawn-agent-smoke` there — a
-`claude` started after the edit is the only thing that loads it. Two notes on the
-alternatives:
+**On FAIL where the direct check above also says stale**, open a new tab yourself and
+run `/spawn-agent-smoke` there — that is the unambiguous case, and the sentence that
+used to sit here ("a `claude` started after the edit is the only thing that loads it")
+is the falsified premise, not a reason. Two notes on the alternatives:
 
 - Quitting and relaunching in **this** slot works too, and inherits this slot's
   ledger file, because the ledger is keyed by the host's slot id and that outlives
