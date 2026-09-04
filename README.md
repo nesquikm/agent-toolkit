@@ -52,7 +52,7 @@ They have one structural property you cannot configure away — **there is nowhe
 | Sees skill edits made during this session | no — it inherits your process's snapshot | yes — a new process reads the tree |
 | Costs | almost nothing | a whole session |
 
-That last-but-one row is the one that bites in this repo specifically: skill text is resolved once, at session start, so a subagent spawned to test an edit to a skill is served its parent's stale copy. A worker in a fresh tab is the only thing on the machine that can read what you just wrote.
+That last-but-one row is the one that bites in this repo specifically: a subagent inherits the text its host process holds, so one spawned to test an edit to a skill can be served its parent's stale copy. The *session* is not the problem — measured 2026-09-04, a session does see its own skill edits, because the roster of skills it knows about refreshes while it runs. A subagent hanging off that process is the case that does not, and a worker in a fresh tab is the unambiguous way to read what you just wrote.
 
 So: subagents for fan-out nobody needs to see. Spawned agents when the work is long enough, risky enough or interesting enough that a human wants a window into it — or when you want to hand a running session over and walk away.
 
@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.10.2 — "Errata"** (0.10.1 corrected an over-stated claim and shipped one of its own — that read-screen's --scrollback and --lines must precede --surface — so this withdraws it: both orders exit 0 with byte-identical output, the original error was zsh declining to word-split an unquoted variable into three argv words, and the paragraph now documents that trap instead)
+Latest: **v0.11.0 — "Ajar"** (the watcher could not tell a worker waiting on a prose approval gate from one that had finished — both register idle with an identical record — so it now reads the tail of the worker's transcript on a turn-end and reports GATE with the question it asked, tuned against all 611 transcripts on this machine and proved live both ways on one worker; also withdraws a folder-trust instruction that was inverted on CLI 2.1.260, where the prescribed enter selects "No, exit" and kills the worker)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
