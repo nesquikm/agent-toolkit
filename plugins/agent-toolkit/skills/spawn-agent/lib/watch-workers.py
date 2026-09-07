@@ -285,8 +285,26 @@ def is_ours(rec, ident):
     a session's id in place, and without it a worker that cleared its context
     would stop matching, be reported `GONE`, and never be heard from again — a
     likelier event than a cross-profile name collision, so a strict id-only join
-    would trade one silent loss for another. A row with neither identifier is a
-    legacy row and is accepted on its name, exactly as before.
+    would trade one silent loss for another.
+
+    Two shapes deserve naming, because "legacy" is not one thing. The both-falsy
+    branch is the FOUR-column row, which carries no identifier at all and is
+    accepted on its name exactly as before. A FIVE-column row is not covered by
+    it: column 5 is read as a minted id, and on those ledgers it holds a pid, so
+    neither branch fires and the row matches nothing. That costs nothing here —
+    column 1 of a five-column ledger holds a session uuid rather than a name, so
+    it matched nothing before this join existed either, and the setup block
+    refuses any ledger that is not exactly seven columns. Do not "fix" it by
+    sniffing whether column 5 looks like a uuid: this join should be boring and
+    TOTAL, and a heuristic about a format nobody writes any more is one nobody
+    can falsify.
+
+    Note also that `-` is TRUTHY, so an unpinned row takes the minted-id path
+    rather than the legacy one and its worker would stop matching if it later ran
+    `/clear`. That is unreachable rather than handled — a row is unpinned only
+    until its worker registers, and a rotation cannot precede that — but `-`
+    reads as "no pid" to everyone who meets it, so it is written down here rather
+    than left to be re-derived.
     """
     minted, pinned = ident
     if not minted and not pinned:
