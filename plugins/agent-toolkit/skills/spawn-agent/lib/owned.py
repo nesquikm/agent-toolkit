@@ -72,6 +72,16 @@ import os
 import subprocess
 import sys
 
+# `peer.py` already answers "every profile on this machine", and these two must
+# agree: a post-launch lookup that searches fewer profiles than the pre-launch
+# name check reports a healthy worker as one that never started. They are one
+# implementation rather than two because they drifted apart exactly once already
+# -- see `registry_roots` below. Imported by path, not by bare name: this file is
+# run as a script from anywhere, and sys.path[0] is only the lib directory when
+# the interpreter was pointed straight at it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import peer  # noqa: E402
+
 USAGE = "usage: owned.py <ledger.tsv> <name> [field]"
 
 
@@ -90,26 +100,60 @@ def alive(pid):
 
 
 def registry_roots():
-    """Every profile a session may register in, empty segments dropped.
+    """Every profile a session may register in — `peer.py`'s list, not a copy.
 
-    A trailing or doubled colon — what a shell hook appending a profile path
-    produces — would otherwise leave d == "" and degrade the glob to the relative
-    `sessions/*.json`, read from whatever directory the caller stood in.
+    This used to read CLAUDE_CONFIG_DIR and fall back to `~/.claude` only when it
+    was unset, so it searched ONE profile while `peer.py` deliberately searched
+    them all. A spawned worker does not register where its supervisor watches:
+    measured on a live worker 2026-09-07, the supervisor ran under `~/.claude-st`
+    and the worker's record sat in `~/.claude/sessions/`, so every lookup here
+    exited 1. The readiness loop then burned its whole bound and reported a
+    healthy, addressable worker as one that never became addressable — which is
+    byte-identical to a launch that never ran `claude` at all, and is reached by a
+    cause the skill's list of that ambiguity does not mention. Colon-joining both
+    profiles into CLAUDE_CONFIG_DIR by hand was the workaround; this removes the
+    need for it.
+
+    Widening cannot select a stranger's session. Every join below is on the
+    session id this run MINTED, which nobody else can produce, so a larger search
+    space cannot change *which* session answers — only whether it is found at all.
+    What widening can do is find the same session twice, which `live_records`
+    handles, because more-than-one is a hard stop here.
     """
-    raw = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    return [d for d in raw.split(":") if d]
+    return peer.roots()
 
 
 def live_records():
-    out = []
+    """Every live session record across those roots, each file counted once.
+
+    Deduplicated **by file identity**, and the choice of key is load-bearing in
+    both directions. It has to dedupe, because `len(mine) > 1` is exit 4 — a hard
+    stop — and two roots can reach one file: a profile whose `sessions/` is a
+    symlink to another's survives `peer.roots()`'s dedupe, which compares the
+    profile directories and not what is under them. Widening the search without
+    this would convert a silently unreachable worker into a loud refusal to
+    proceed, which is not an improvement.
+
+    It must NOT dedupe on the record's contents. Two live sessions can genuinely
+    carry one minted id — measured 2026-08-13, both registered, neither errored —
+    and that is precisely the state exit 4 exists to stop the run on. Two distinct
+    files stay two records here however identical their bytes; only one file
+    reached twice collapses.
+    """
+    out, seen = [], set()
     for d in registry_roots():
         for path in glob.glob(os.path.join(d, "sessions", "*.json")):
             try:
                 with open(path) as fh:
+                    st = os.fstat(fh.fileno())
                     rec = json.load(fh)
             except (OSError, ValueError):
                 continue  # absent, or caught mid-rewrite
+            key = (st.st_dev, st.st_ino)
+            if key in seen:
+                continue
             if isinstance(rec, dict) and alive(rec.get("pid")):
+                seen.add(key)
                 out.append(rec)
     return out
 

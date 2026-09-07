@@ -514,12 +514,15 @@ print("%d live sessions, %d with a socket, %d without" % (live, sock, live - soc
 Checks 2 and 3 prove a name can be seen. This one proves a name is **not enough**, and
 that a *ledger* with nothing to prove it by is refused rather than trusted — the two
 halves of the guarantee the whole skill now rests on. Hermetic: one fixture profile,
-five fixture ledgers, nothing spawned.
+six fixture ledgers, nothing spawned.
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-mkdir -p "$D/sessions" "$D/spawn-agent"
+# `$D/home` is a fake HOME, and it is what keeps this check hermetic. owned.py
+# sweeps `~/.claude` and every `~/.claude-*` as well as CLAUDE_CONFIG_DIR, so
+# without it these fixtures would read the machine's real profiles.
+mkdir -p "$D/sessions" "$D/spawn-agent" "$D/home/.claude-other/sessions"
 # pid 1 is permanently "alive" for the reason check 3 gives, and it is the only pid
 # these records need -- what is being faked is the REGISTRY, not the process table.
 printf '{"pid":1,"name":"smoke-own-probe","cwd":"/","sessionId":"11111111-1111-1111-1111-111111111111","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/1.json"
@@ -536,9 +539,13 @@ printf 'smoke-own-dup\tL1\tL2\tspawned\t33333333-3333-3333-3333-333333333333\t1\
 # Six columns, no host, sidecar present -- what a mid-upgrade supervisor writes. It
 # must still resolve, because only the markdown enforces the width.
 printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'        > "$D/spawn-agent/led-nohost.tsv"
+# The cross-profile case: this record sits under a profile CLAUDE_CONFIG_DIR does
+# NOT name, which is where a spawned worker's record really lands.
+printf '{"pid":1,"name":"smoke-own-cross","cwd":"/","sessionId":"44444444-4444-4444-4444-444444444444","messagingSocketPath":"/tmp/cc-socks/4.sock"}\n' > "$D/home/.claude-other/sessions/4.json"
+printf 'smoke-own-cross\tL1\tL2\tspawned\t44444444-4444-4444-4444-444444444444\t1\tcmux\n'  > "$D/spawn-agent/led-crossprofile.tsv"
 # Five of the six get a sidecar. Without one they would all stop at the sidecar
 # check and never reach the assertion they exist to make.
-for f in ok foreign legacy ambiguous nohost; do
+for f in ok foreign legacy ambiguous nohost crossprofile; do
   printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-$f.owner"
 done
 ```
@@ -555,28 +562,33 @@ O="<plugin root>/skills/spawn-agent/lib/owned.py"
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
 for f in ok foreign legacy nosidecar nohost; do
-  CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
-  printf '  %-9s -> exit=%s\n' "$f" "$?"
+  CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
+  printf '  %-12s -> exit=%s\n' "$f" "$?"
 done
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ambiguous.tsv" smoke-own-dup >/dev/null 2>&1
-printf '  %-9s -> exit=%s\n' ambiguous "$?"
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ok.tsv" no-row-for-this >/dev/null 2>&1
-printf '  %-9s -> exit=%s\n' norow "$?"
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "" smoke-own-probe >/dev/null 2>&1
-printf '  %-9s -> exit=%s\n' noledger "$?"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ambiguous.tsv" smoke-own-dup >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' ambiguous "$?"
+# The address matters here, not just the code: exit 0 with the WRONG socket would
+# mean it resolved something other than the record under the unnamed profile.
+a=$(CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-crossprofile.tsv" smoke-own-cross 2>/dev/null)
+printf '  %-12s -> exit=%s %s\n' crossprofile "$?" "$a"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ok.tsv" no-row-for-this >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' norow "$?"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "" smoke-own-probe >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' noledger "$?"
 ```
 
 PASS on exactly:
 
 ```
-  ok        -> exit=0
-  foreign   -> exit=3
-  legacy    -> exit=3
-  nosidecar -> exit=5
-  nohost    -> exit=0
-  ambiguous -> exit=4
-  norow     -> exit=2
-  noledger  -> exit=2
+  ok           -> exit=0
+  foreign      -> exit=3
+  legacy       -> exit=3
+  nosidecar    -> exit=5
+  nohost       -> exit=0
+  ambiguous    -> exit=4
+  crossprofile -> exit=0 uds:/tmp/cc-socks/4.sock
+  norow        -> exit=2
+  noledger     -> exit=2
 ```
 
 **The padding is not decoration.** This block is read under a heading that says
@@ -613,6 +625,37 @@ that enforces seven is the markdown at the setup block. That is what makes the u
 survivable in the direction that matters: a mid-upgrade supervisor keeps resolving its
 own workers for its whole life, and it is the *next* session in that slot that refuses
 the file loudly, at check 2's gate, rather than acting on rows it cannot attribute.
+
+**`crossprofile` is the only case here that fails against the code as it shipped
+before 2026-09-07, and that is what makes it worth having.** Its record sits under
+`$D/home/.claude-other`, a profile `CLAUDE_CONFIG_DIR` does not name — which is where a
+spawned worker's record really lands, because a worker does not register in its
+supervisor's profile. `owned.py` used to read `CLAUDE_CONFIG_DIR` and fall back to
+`~/.claude` only when it was unset, so it searched one profile while `peer.py`
+deliberately searched them all; this row answered **exit 1**, and a readiness loop
+built on that reports a healthy, addressable worker as one that never started. Run it
+against the old `registry_roots` and it returns 1; against the current one, 0 and the
+socket under the unnamed profile. **Assert the address, not just the code** — exit 0
+with any other socket means it resolved something that is not this record.
+
+**The `$D/home` fake `HOME` is load-bearing for every fixture above it, not just that
+one.** Once `owned.py` sweeps `~/.claude` and `~/.claude-*`, a check that did not
+override `HOME` would read the machine's real profiles, and "hermetic" in this check's
+first paragraph would stop being true. It is also what lets the cross-profile record
+exist at all without writing a stray profile into the operator's home directory, where
+it would outlive the run and be swept by every later `peer.py` call.
+
+**Widening the search could have broken `ambiguous`, and the shape of the dedupe is
+why it did not.** More than one live session answering is exit 4, a hard stop, so any
+change that lets one session be seen twice converts a healthy worker into a refusal to
+proceed. Constructed deliberately: a second profile whose `sessions/` is a **symlink**
+to another's survives `peer.roots()`'s dedupe, which compares profile directories and
+not what is under them. Without a record-level guard `ok` returns
+`exit=4, 2 live sessions answer (pids 1, 1)` — measured. `owned.py` therefore dedupes
+on **file identity** (`st_dev`, `st_ino`), which collapses one file reached by two
+paths and leaves two distinct files alone. That distinction is exactly what these
+fixtures need: `2.json` and `3.json` below are **byte-identical**, and they must still
+count as two.
 
 **`ambiguous` is the one HARD STOP that nothing else here reaches.** Two registry
 records, one name, one minted id between them — the state measured on 2026-08-13 when
