@@ -1423,18 +1423,37 @@ own surviving pane leaves `terminal_id` matching *and* `agent_session` empty, so
 herdr witnesses say proceed and only `occupant.py` says stop. If the occupant block
 above did not run, this check has proved nothing about ownership.
 
-**Read the directory in the dialog before you press anything.** It must be the scratch
-repo. The gate is answered by `enter` **alone**, because option 1 is already selected:
+**Read the dialog before you press anything — both the directory it names and which row
+carries the `❯`.** The directory must be the scratch repo. The `❯` row decides the
+keystroke, and **there is no keystroke you can know before you read it.** `SKILL.md`'s
+folder-trust section records this dialog rendering two different ways on this machine,
+and on CLI 2.1.260 it came up unnumbered with the destructive option selected:
+
+```
+❯ No, exit
+  Yes, I trust this folder
+```
+
+**A live run of this suite met that rendering again on 2026-09-07.** An earlier version
+of this check told you the gate "is answered by `enter` alone, because option 1 is
+already selected". Against that screen `enter` alone kills the worker mid-suite, and the
+run survived only because its operator followed `SKILL.md` instead of this paragraph.
+Neither the ordering nor the numbering is stable — that variant labels nothing — so the
+`❯` row is the only thing here that is load-bearing.
+
+Derive the sequence; do not recall it. If `❯` already sits on the trusting option,
+`enter` is the whole answer:
 
 ```bash
 cmux send-key --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" enter
 herdr pane send-keys "$L1" enter
 ```
 
-**Do not send `down` first.** On the plain variant of that dialog option 2 is
-"No, exit", so the reflexive rescue sequence terminates the worker it was meant to
-save. Count the `❯` row in the output you just read; if it is already on option 1,
-`enter` is the entire answer.
+If it does not, send one `down`, **re-read the screen and confirm the `❯` actually
+moved**, and only then `enter` — which is exactly what the 2026-09-07 run did. What is
+forbidden is the memorised `down`-then-`enter` sent without that second read: on the
+numbered variant option 2 is "No, exit", so the reflexive rescue sequence terminates the
+worker it was meant to save.
 
 On herdr, also record the negative control if you have time: `esc` on that gate
 cancels and exits `claude` cleanly without trusting anything (measured 2026-08-12).
@@ -2028,13 +2047,20 @@ message rendered rather than held, and the block was a real
 `Bash command / ls /usr/share/dict / Do you want to proceed?` dialog. Confirm the dialog
 is on screen and is the one you provoked.
 
-**That dialog has three options, and it is not the trust gate.** Measured on both hosts:
-`1. Yes`, `2. Yes, allow reading from dict/ from this project`, `3. No`, with `❯` already
-on 1. So `enter` alone is still the whole answer and the "never send `down` first" rule
-from 7e still holds — but for a different reason. On the trust gate option 2 is
-"No, exit"; here option 2 grants a *standing* permission you did not intend. Both are
-wrong to land on, which is why the rule is "read the screen and count the `❯` row"
-rather than a memorised keystroke.
+**This is not the trust gate, and its option count is not an invariant either.**
+Measured 2026-08-12 on both hosts it had three — `1. Yes`, `2. Yes, allow reading from
+dict/ from this project`, `3. No`. Measured again 2026-09-07 it had **four**, with a new
+third entry: `1. Yes`, `2. Yes, allow reading from dict/ from this project`, `3. Yes, and
+switch to auto mode`, `4. No`. `❯` was on 1 both times, so `enter` was the right
+keystroke both times — read that as a reading that has held, not as a rule you may rely
+on. Count the `❯` row here exactly as in 7e.
+
+The reason to care differs from the trust gate's. There the wrong row exits; here it
+grants something. Option 2 grants a *standing* permission you did not intend, and the
+option that appeared in 2026-09-07 switches the worker to auto mode for the rest of its
+life — a worse thing to land on than either, and it arrived without warning in a dialog
+this file had called stable. That is why the rule is "read the screen and count the `❯`
+row" rather than a memorised keystroke.
 
 On herdr, wait on it directly as well — faster than polling, and evidence *alongside*
 the watcher line rather than instead of it (`SKILL.md`, "A host that publishes its own
@@ -2058,6 +2084,8 @@ substitute for the registry read.
 
 Clear 11a's prompt first. **Read the screen before pressing anything**, exactly as 7e
 insists — a permission dialog's second option is not always harmless:
+
+With `❯` confirmed on option 1 by the read you just did — not assumed:
 
 ```bash
 cmux send-key --workspace "$CMUX_WORKSPACE_ID" --surface "<NAME2's ref>" enter

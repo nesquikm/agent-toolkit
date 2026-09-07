@@ -1740,8 +1740,10 @@ one *worker* signal fired.
 
 Three ways out, and the third is the one worth knowing:
 
-- **`enter` alone** answers option 1 on both gates, which are pre-selected there.
-  Read the screen and count the `❯` row first anyway.
+- **`enter` alone** answers whichever row already carries the `❯` — which on the
+  bypass gate, and on the trust gate *when it renders numbered*, is option 1. That is a
+  reading, not a property: see the reversal above, where `❯` sat on "No, exit". Count
+  the row first, every time, and let the count pick the keystroke.
 - **Do not replay a `down`-then-`enter` sequence here.** On the trust gate that extra
   `down` moves the selection to option 2, which in the plain variant is **"No, exit"**
   — so the keystroke meant to rescue a parked worker terminates it instead, leaving a
