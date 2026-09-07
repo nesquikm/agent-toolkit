@@ -48,6 +48,12 @@ import re
 import signal
 import string
 import sys
+
+# The profile list is `peer.py`'s, not a second copy of it — see `registry_dirs`.
+# Imported by path because this file is run as a script from anywhere, and
+# sys.path[0] is only the lib directory when the interpreter was pointed at it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import peer  # noqa: E402
 import time
 
 USAGE = "usage: watch-workers.py <ledger.tsv> [poll_seconds]"
@@ -205,25 +211,89 @@ def registry_dirs():
 
     Both halves are needed: the record is read out of `sessions/`, and the
     transcript that answers "was that an ending or a question" lives beside it
-    under `projects/` in the same profile.
+    under `projects/` in the same profile — which is why this cannot simply
+    return `peer.roots()` the way `owned.py` does. The root list is still
+    peer.py's; only the pair shape is built here, because forking the list is
+    how this drifted apart in the first place.
+
+    It used to read CLAUDE_CONFIG_DIR and fall back to `~/.claude` only when it
+    was unset, so it watched ONE profile. A spawned worker does not register
+    where its supervisor watches — measured 2026-09-07, supervisor under
+    `~/.claude-st`, worker's record in `~/.claude/sessions/`, roots
+    `['/Users/ns/.claude-st']`, worker visible to the watcher: **False**. The
+    watcher armed, emitted its 30 s deafness WARN, and then nothing, ever, for a
+    worker that was replying normally the whole time.
+
+    That failure is worse than it sounds, and worse than it used to be. While
+    `owned.py` was narrow too the run died loudly at readiness — "never became
+    addressable" — and somebody investigated. Fix only that half and the
+    supervisor resolves its worker, calls it healthy, and is then simply never
+    notified again. The deafness WARN does not cover it: it fires once, around
+    30 s, during exactly the window when a worker still on its trust gate
+    legitimately matches nothing, which is the line an operator learns to ignore.
     """
-    raw = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    return [(d, os.path.join(d, "sessions")) for d in raw.split(":") if d]
+    return [(d, os.path.join(d, "sessions")) for d in peer.roots()]
 
 
 def wanted(ledger):
-    """Names this run owns, or None when the ledger cannot be read at all.
+    """{name: (minted session id, pinned pid)} this run owns, or None.
 
-    Missing/short lines are skipped, not fatal. The None matters: returning an
-    empty set for an unreadable ledger makes "the path is wrong" look exactly
-    like "no workers yet", and both then look like a healthy quiet watcher.
-    Only main() has the context to say which, so hand it the difference.
+    None when the ledger cannot be read at all. That matters: returning an empty
+    mapping for an unreadable ledger makes "the path is wrong" look exactly like
+    "no workers yet", and both then look like a healthy quiet watcher. Only
+    main() has the context to say which, so hand it the difference.
+
+    Missing or short lines are skipped, not fatal, and a row that carries neither
+    identifier still yields an entry — the name alone is what this watched before
+    ownership existed, and a legacy ledger must keep working.
+
+    The two extra columns are carried because `registry_dirs` now sweeps every
+    profile, and a name is only unique among the live sessions of one instant.
+    `snapshot` joins on them; see the note there for why that is not optional.
     """
+    out = {}
     try:
         with open(ledger) as fh:
-            return {ln.split("\t")[0].strip() for ln in fh if ln.strip()}
+            for ln in fh:
+                if not ln.strip():
+                    continue
+                cols = ln.rstrip("\n").split("\t")
+                name = cols[0].strip()
+                if not name:
+                    continue
+                out[name] = (
+                    cols[4].strip() if len(cols) >= 5 else "",
+                    cols[5].strip() if len(cols) >= 6 else "",
+                )
     except OSError:
         return None
+    return out
+
+
+def is_ours(rec, ident):
+    """Does this registry record belong to the ledger row that claims the name?
+
+    Widening `registry_dirs` to every profile made this necessary, and the risk
+    it answers is *substitution*, not duplication: the watcher keys everything by
+    name, so one session found twice collapses to one entry harmlessly, but a
+    STRANGER session in another profile that happens to carry a worker's name
+    would previously have been invisible and is now in range. Reporting its
+    states as our worker's is the failure to prevent.
+
+    So join the way `owned.py` does, on the session id this run MINTED, which
+    nobody else can produce. The pid fallback is not decoration: `/clear` rotates
+    a session's id in place, and without it a worker that cleared its context
+    would stop matching, be reported `GONE`, and never be heard from again — a
+    likelier event than a cross-profile name collision, so a strict id-only join
+    would trade one silent loss for another. A row with neither identifier is a
+    legacy row and is accepted on its name, exactly as before.
+    """
+    minted, pinned = ident
+    if not minted and not pinned:
+        return True
+    if minted and (rec.get("sessionId") or "").lower() == minted.lower():
+        return True
+    return bool(pinned) and str(rec.get("pid")) == pinned
 
 
 def alive(pid):
@@ -514,6 +584,8 @@ def snapshot(names, paths):
             name = rec.get("name")
             if name not in names or not alive(rec.get("pid")):
                 continue
+            if not is_ours(rec, names[name]):
+                continue  # same name, another profile, not our session
             fresh[path] = name
             sources[name] = (config_dir, rec.get("cwd"), rec.get("sessionId"))
             status = rec.get("status")

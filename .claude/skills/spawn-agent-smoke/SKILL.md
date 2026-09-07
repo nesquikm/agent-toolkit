@@ -486,8 +486,10 @@ check runs:
 
 ```bash
 python3 -c '
-import glob, json, os
-roots = [d for d in os.environ.get("CLAUDE_CONFIG_DIR", "").split(":") if d] or [os.path.expanduser("~/.claude")]
+import glob, json, os, sys
+sys.path.insert(0, "<plugin root>/skills/spawn-agent/lib")
+import peer
+roots = peer.roots()
 live = sock = 0
 for d in roots:
     for p in glob.glob(os.path.join(d, "sessions", "*.json")):
@@ -1129,6 +1131,14 @@ A fresh pid per run means a fresh path, so the gate fires every time. It also me
 profile accumulates one trust record per smoke run; they are inert, and clearing them is
 optional housekeeping, not part of this procedure.
 
+**`$CLPID` is per SESSION, not per run, and a second run in the same session lands back
+on the pre-trusted path.** Observed 2026-09-07 on a second pass: the path was already
+marked `hasTrustDialogAccepted`, so the gate did not fire and 7d and 7e had nothing to
+clear — the same silent retirement a fixed path causes, reached by re-running rather
+than by re-machining. If you are re-running inside one session, suffix the path
+(`.../$CLPID/smoke repo pass2`) and **say in the report that you did**, because the path
+is what the cwd assertion at the end of 7e compares against.
+
 **The pid sits on the run directory rather than on the repo name, and that is doing a
 second job.** Every scratch artifact this procedure writes — the check 2 and 4 ledger
 fixtures, check 3's `fixture-profile/`, check 5's deaf ledger, this repo — lives under
@@ -1675,11 +1685,18 @@ python3 "$P" "<NAME>" cwd
 ```
 
 ```bash
-python3 - "<the sessionId>" "<the cwd>" <<'PY'
+python3 - "<plugin root>" "<the sessionId>" "<the cwd>" <<'PY'
 import json, os, re, sys
-sid, cwd = sys.argv[1], sys.argv[2]
+sid, cwd = sys.argv[2], sys.argv[3]
 esc = re.sub(r'[^a-zA-Z0-9]', '-', cwd)
-roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [os.path.expanduser('~/.claude')]
+# The plugin's own profile list, not a fourth copy of it. This line used to read
+# CLAUDE_CONFIG_DIR and fall back to ~/.claude only when unset, and then reported
+# "no transcript ... under ['/Users/ns/.claude-st']" for a healthy worker whose
+# transcript sat in ~/.claude -- the detector reproducing the very defect the
+# watcher had.
+sys.path.insert(0, os.path.join(sys.argv[1], 'skills', 'spawn-agent', 'lib'))
+import peer
+roots = peer.roots()
 path = next((p for p in (os.path.join(r, 'projects', esc, sid + '.jsonl') for r in roots)
              if os.path.exists(p)), None)
 if not path:
@@ -1980,8 +1997,9 @@ a live worker cannot be talked into fire as well.
 **11a to 11c run before teardown and use their own worker.** Before, because every line
 they produce comes from the run's watcher and teardown stops it. Their own worker,
 because 11c deliberately kills one, and killing the worker checks 7–10 rest on would
-destroy their evidence. **11d and 11e need neither** — both are synthetic harnesses
-against `watch-workers.py` and may be run at any point, including after teardown.
+destroy their evidence. **11d, 11e and 11f need none of it** — all three are synthetic harnesses
+against `watch-workers.py`, hermetic through a fake `HOME`, and may be run at any point,
+including after teardown.
 
 **Write its ledger row before you launch it**, exactly as 7b requires. This worker is as
 real as any other and check 12 must find it.
@@ -2229,14 +2247,18 @@ redundant with this.
 ```bash
 W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
 
-D=$(mktemp -d) && mkdir -p "$D/sessions"
+D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/home"
 printf 'route-probe\tL1\tL2\tspawned\tsid\t1\n' > "$D/led.tsv"
-CLAUDE_CONFIG_DIR="$D" WATCHER="$W" LEDGER="$D/led.tsv" REC="$D/sessions" python3 - <<'PY'
+CLAUDE_CONFIG_DIR="$D" WATCHER="$W" LEDGER="$D/led.tsv" REC="$D/sessions" D="$D" python3 - <<'PY'
 import json, os, subprocess, sys, time
 
 rec_path = os.path.join(os.environ["REC"], "%d.json" % os.getpid())
+# HOME is overridden for the same reason 3b overrides it: the watcher sweeps
+# ~/.claude and every ~/.claude-*, so without a fake home this check would read
+# the machine's real profiles and stop being hermetic.
 w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], os.environ["LEDGER"], "0.2"],
-                     stdout=subprocess.PIPE, text=True)
+                     stdout=subprocess.PIPE, text=True,
+                     env=dict(os.environ, HOME=os.path.join(os.environ["D"], "home")))
 
 def step(status, waiting_for=None):
     rec = {"pid": os.getpid(), "name": "route-probe", "sessionId": "sid", "status": status}
@@ -2323,7 +2345,7 @@ brings a matching negative that must stay a `DONE`.
 ```bash
 W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
 
-D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/repo"
+D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/repo" "$D/home"
 WATCHER="$W" SCRATCH="$D" python3 - <<'PY'
 import json, os, string, subprocess, sys, time
 
@@ -2360,7 +2382,7 @@ def step(status, waiting_for=None):
 
 w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], ledger, "0.2"],
                      stdout=subprocess.PIPE, text=True,
-                     env=dict(os.environ, CLAUDE_CONFIG_DIR=D))
+                     env=dict(os.environ, CLAUDE_CONFIG_DIR=D, HOME=os.path.join(D, "home")))
 
 step("busy")                                          # first sight, silent
 
@@ -2522,6 +2544,108 @@ for as long as the harness runs and there is nothing to clean up. The transcript
 appended to with a `system` record after each assistant record, because that is what
 Claude Code really writes — the last line of a real transcript is not the assistant's,
 and a reader that only looked at the final record would find nothing.
+
+### 11f. The watcher must look where workers actually register — *synthetic*
+
+**The half of the profile-scoping defect that fails silently.** `owned.py` and the
+watcher were both scoped to one profile, and while both were broken the run died loudly
+at readiness — "never became addressable" — so somebody investigated. Fix only
+`owned.py` and the supervisor resolves its worker, calls it healthy, and is then never
+notified of anything it does again. Measured live 2026-09-07: `owned.py` answered
+`status idle, exit 0` for a worker the watcher's roots (`['/Users/ns/.claude-st']`)
+could not see at all, and that run's first watcher emitted its 30 s deafness `WARN` and
+then nothing, ever. Re-armed with a colon-joined `CLAUDE_CONFIG_DIR`, every signal
+arrived.
+
+Synthetic, and hermetic through a fake `HOME` for the same reason 3b and 11e are: the
+watcher now sweeps `~/.claude` and every `~/.claude-*`, so a check that did not override
+`HOME` would read the operator's real profiles.
+
+```bash
+W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
+
+D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/home/.claude-other/sessions"
+WATCHER="$W" SCRATCH="$D" python3 - <<'PY'
+import json, os, subprocess, sys, time
+
+D = os.environ["SCRATCH"]
+HOME = os.path.join(D, "home")
+SID = "aaaaaaaa-1111-2222-3333-444444444444"
+# The worker's record goes in a profile CLAUDE_CONFIG_DIR does NOT name -- which is
+# where a spawned worker's record really lands. $D/sessions stays empty on purpose.
+rec_path = os.path.join(HOME, ".claude-other", "sessions", "%d.json" % os.getpid())
+ledger = os.path.join(D, "led.tsv")
+open(ledger, "w").write("cross-probe\tL1\tL2\tspawned\t%s\t%d\tcmux\n" % (SID, os.getpid()))
+
+# A STRANGER in a third profile: same name, different session, permanently blocked.
+# It exists to be ignored -- if the widened watcher matched on name alone it would
+# report this one's ASK and lose our worker's DONE.
+stranger = os.path.join(HOME, ".claude-stranger", "sessions")
+os.makedirs(stranger)
+open(os.path.join(stranger, "1.json"), "w").write(json.dumps(
+    {"pid": 1, "name": "cross-probe", "sessionId": "99999999-9-9-9-9",
+     "status": "waiting", "waitingFor": "input needed"}))
+
+w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], ledger, "0.2"],
+                     stdout=subprocess.PIPE, text=True,
+                     env=dict(os.environ, CLAUDE_CONFIG_DIR=D, HOME=HOME))
+
+def step(status, sid=SID):
+    open(rec_path + ".tmp", "w").write(json.dumps(
+        {"pid": os.getpid(), "name": "cross-probe", "sessionId": sid,
+         "cwd": D, "status": status}))
+    os.replace(rec_path + ".tmp", rec_path)
+    time.sleep(0.6)
+
+step("busy")                                          # first sight, silent
+step("idle")                                          # 1 -> DONE  across the profile line
+step("busy", "bbbbbbbb-1111-2222-3333-444444444444")  # /clear rotated the session id
+step("idle", "bbbbbbbb-1111-2222-3333-444444444444")  # 2 -> DONE  still tracked, by pid
+
+w.terminate()
+print(w.stdout.read(), end="")
+PY
+rm -rf "$D"
+```
+
+PASS on **exactly these two lines**:
+
+```
+DONE cross-probe
+DONE cross-probe
+```
+
+**Run it against the previous `registry_dirs` and it prints nothing at all** — that is
+the whole point, and it is the only assertion here that could not have been made before
+2026-09-07. Silence is the shipped-yesterday behaviour, not a harness fault.
+
+Three assertions ride on those two lines:
+
+- **The transition crosses the profile boundary** — line 1. The record is in
+  `~/.claude-other`, `CLAUDE_CONFIG_DIR` names `$D`, and `$D/sessions` is empty.
+- **A stranger sharing the name is ignored** — there is no `ASK` line. The stranger sits
+  permanently in `waiting` / `input needed`, so a watcher that matched on name alone
+  would print `ASK  cross-probe` and never print our worker's `DONE` at all. Measured
+  with the identity join removed: exactly that, `['ASK  cross-probe']` and nothing else.
+  This is the *substitution* risk that widening introduces, and it is worse than the
+  deafness it cures, because a name is unique only among the live sessions of one
+  instant.
+- **`/clear` does not lose the worker** — line 2, emitted after the session id rotates.
+  The join is on the minted id first and the ledger's pinned pid second, exactly as
+  `owned.py` does it; an id-only join would report this worker `GONE` and go quiet,
+  trading one silent loss for another.
+
+**No file-identity dedupe here, and the asymmetry with `owned.py` is deliberate.** There
+the count *is* the signal — more than one answering is exit 4, a hard stop — so one
+session reached through two roots had to be collapsed. Here everything is keyed by name,
+so a duplicate record writes the same entry twice and collapses on its own. Verified
+against a profile whose `sessions/` is a symlink to another's: one `DONE`, not two. The
+danger widening introduces here is substitution, not duplication, and the identity join
+is what answers it.
+
+**Cost, since it now globs several profiles per poll:** measured across both real
+profiles on this machine, 28 registry files, a full sweep takes **0.30 ms** against a
+default poll interval of 2000 ms.
 
 ## 12. Teardown, and proof that nothing leaked
 
