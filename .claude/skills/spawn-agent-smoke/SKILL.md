@@ -66,10 +66,17 @@ print("repo         :", top)
 print("plugin root  :", root)
 print("version      :", json.load(open(manifest))["version"])
 
-# Does any profile actually load from here?
+# Does any profile actually load from here? EVERY profile, not the active one:
+# this was an `or`, so a set CLAUDE_CONFIG_DIR short-circuited the glob and the
+# check examined exactly one profile while its verdict claimed "at least one".
+# Deliberately NOT peer.roots(): that filters on a `sessions/` directory, which a
+# profile that loads a plugin need never have.
 profiles = [d for d in os.environ.get("CLAUDE_CONFIG_DIR","").split(":") if d] \
-           or sorted(glob.glob(os.path.expanduser("~/.claude")) +
-                     glob.glob(os.path.expanduser("~/.claude-*")))
+           + sorted(glob.glob(os.path.expanduser("~/.claude")) +
+                    glob.glob(os.path.expanduser("~/.claude-*")))
+seen = set()
+profiles = [d for d in profiles
+            if not (os.path.realpath(d) in seen or seen.add(os.path.realpath(d)))]
 agree = 0
 for p in profiles:
     km = os.path.join(p, "plugins", "known_marketplaces.json")
@@ -89,6 +96,22 @@ print("ROOT:", "PASS - at least one profile loads this tree directly" if agree
       else "FAIL - no profile loads this tree; you would be testing bytes nobody runs")
 PY
 ```
+
+**It reads every profile, and the `or` that used to make it read one was a real
+defect rather than a tidiness point.** With `CLAUDE_CONFIG_DIR` set — which it is in
+every session that runs this — the glob was short-circuited, so the check examined the
+active profile and then announced "at least one profile loads this tree". Measured
+2026-09-07: it printed one line for `.claude-st` and never looked at `~/.claude`, which
+registers this same tree as a `directory` source and is the profile every spawned worker
+registers in. Invert the machine — a `github` source on the active profile, a
+`directory` source on the other — and it fires its own FAIL, "no profile loads this
+tree; you would be testing bytes nobody runs", on a healthy checkout.
+
+**It builds that list itself rather than importing `peer.roots()`, and that is
+deliberate.** `peer.roots()` keeps only profiles that have a `sessions/` directory,
+which is right for "where might a session be registered" and wrong here: a profile can
+load a plugin without ever having run a messaging session, and dropping it would
+under-report the thing this check exists to prove.
 
 **A `github` source here is a FAIL, not a footnote.** Under a `directory` source
 Claude Code loads the plugin from this working tree, so an edit is live in the next
