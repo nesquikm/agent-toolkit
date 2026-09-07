@@ -66,10 +66,17 @@ print("repo         :", top)
 print("plugin root  :", root)
 print("version      :", json.load(open(manifest))["version"])
 
-# Does any profile actually load from here?
+# Does any profile actually load from here? EVERY profile, not the active one:
+# this was an `or`, so a set CLAUDE_CONFIG_DIR short-circuited the glob and the
+# check examined exactly one profile while its verdict claimed "at least one".
+# Deliberately NOT peer.roots(): that filters on a `sessions/` directory, which a
+# profile that loads a plugin need never have.
 profiles = [d for d in os.environ.get("CLAUDE_CONFIG_DIR","").split(":") if d] \
-           or sorted(glob.glob(os.path.expanduser("~/.claude")) +
-                     glob.glob(os.path.expanduser("~/.claude-*")))
+           + sorted(glob.glob(os.path.expanduser("~/.claude")) +
+                    glob.glob(os.path.expanduser("~/.claude-*")))
+seen = set()
+profiles = [d for d in profiles
+            if not (os.path.realpath(d) in seen or seen.add(os.path.realpath(d)))]
 agree = 0
 for p in profiles:
     km = os.path.join(p, "plugins", "known_marketplaces.json")
@@ -89,6 +96,22 @@ print("ROOT:", "PASS - at least one profile loads this tree directly" if agree
       else "FAIL - no profile loads this tree; you would be testing bytes nobody runs")
 PY
 ```
+
+**It reads every profile, and the `or` that used to make it read one was a real
+defect rather than a tidiness point.** With `CLAUDE_CONFIG_DIR` set — which it is in
+every session that runs this — the glob was short-circuited, so the check examined the
+active profile and then announced "at least one profile loads this tree". Measured
+2026-09-07: it printed one line for `.claude-st` and never looked at `~/.claude`, which
+registers this same tree as a `directory` source and is the profile every spawned worker
+registers in. Invert the machine — a `github` source on the active profile, a
+`directory` source on the other — and it fires its own FAIL, "no profile loads this
+tree; you would be testing bytes nobody runs", on a healthy checkout.
+
+**It builds that list itself rather than importing `peer.roots()`, and that is
+deliberate.** `peer.roots()` keeps only profiles that have a `sessions/` directory,
+which is right for "where might a session be registered" and wrong here: a profile can
+load a plugin without ever having run a messaging session, and dropping it would
+under-report the thing this check exists to prove.
 
 **A `github` source here is a FAIL, not a footnote.** Under a `directory` source
 Claude Code loads the plugin from this working tree, so an edit is live in the next
@@ -486,8 +509,10 @@ check runs:
 
 ```bash
 python3 -c '
-import glob, json, os
-roots = [d for d in os.environ.get("CLAUDE_CONFIG_DIR", "").split(":") if d] or [os.path.expanduser("~/.claude")]
+import glob, json, os, sys
+sys.path.insert(0, "<plugin root>/skills/spawn-agent/lib")
+import peer
+roots = peer.roots()
 live = sock = 0
 for d in roots:
     for p in glob.glob(os.path.join(d, "sessions", "*.json")):
@@ -514,12 +539,15 @@ print("%d live sessions, %d with a socket, %d without" % (live, sock, live - soc
 Checks 2 and 3 prove a name can be seen. This one proves a name is **not enough**, and
 that a *ledger* with nothing to prove it by is refused rather than trusted — the two
 halves of the guarantee the whole skill now rests on. Hermetic: one fixture profile,
-five fixture ledgers, nothing spawned.
+six fixture ledgers, nothing spawned.
 
 ```bash
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
-mkdir -p "$D/sessions" "$D/spawn-agent"
+# `$D/home` is a fake HOME, and it is what keeps this check hermetic. owned.py
+# sweeps `~/.claude` and every `~/.claude-*` as well as CLAUDE_CONFIG_DIR, so
+# without it these fixtures would read the machine's real profiles.
+mkdir -p "$D/sessions" "$D/spawn-agent" "$D/home/.claude-other/sessions"
 # pid 1 is permanently "alive" for the reason check 3 gives, and it is the only pid
 # these records need -- what is being faked is the REGISTRY, not the process table.
 printf '{"pid":1,"name":"smoke-own-probe","cwd":"/","sessionId":"11111111-1111-1111-1111-111111111111","messagingSocketPath":"/tmp/cc-socks/1.sock"}\n' > "$D/sessions/1.json"
@@ -536,9 +564,13 @@ printf 'smoke-own-dup\tL1\tL2\tspawned\t33333333-3333-3333-3333-333333333333\t1\
 # Six columns, no host, sidecar present -- what a mid-upgrade supervisor writes. It
 # must still resolve, because only the markdown enforces the width.
 printf 'smoke-own-probe\tL1\tL2\tspawned\t11111111-1111-1111-1111-111111111111\t1\n'        > "$D/spawn-agent/led-nohost.tsv"
+# The cross-profile case: this record sits under a profile CLAUDE_CONFIG_DIR does
+# NOT name, which is where a spawned worker's record really lands.
+printf '{"pid":1,"name":"smoke-own-cross","cwd":"/","sessionId":"44444444-4444-4444-4444-444444444444","messagingSocketPath":"/tmp/cc-socks/4.sock"}\n' > "$D/home/.claude-other/sessions/4.json"
+printf 'smoke-own-cross\tL1\tL2\tspawned\t44444444-4444-4444-4444-444444444444\t1\tcmux\n'  > "$D/spawn-agent/led-crossprofile.tsv"
 # Five of the six get a sidecar. Without one they would all stop at the sidecar
 # check and never reach the assertion they exist to make.
-for f in ok foreign legacy ambiguous nohost; do
+for f in ok foreign legacy ambiguous nohost crossprofile; do
   printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-$f.owner"
 done
 ```
@@ -555,28 +587,33 @@ O="<plugin root>/skills/spawn-agent/lib/owned.py"
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
 for f in ok foreign legacy nosidecar nohost; do
-  CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
-  printf '  %-9s -> exit=%s\n' "$f" "$?"
+  CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-$f.tsv" smoke-own-probe >/dev/null 2>&1
+  printf '  %-12s -> exit=%s\n' "$f" "$?"
 done
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ambiguous.tsv" smoke-own-dup >/dev/null 2>&1
-printf '  %-9s -> exit=%s\n' ambiguous "$?"
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "$D/spawn-agent/led-ok.tsv" no-row-for-this >/dev/null 2>&1
-printf '  %-9s -> exit=%s\n' norow "$?"
-CLAUDE_CONFIG_DIR="$D" python3 "$O" "" smoke-own-probe >/dev/null 2>&1
-printf '  %-9s -> exit=%s\n' noledger "$?"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ambiguous.tsv" smoke-own-dup >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' ambiguous "$?"
+# The address matters here, not just the code: exit 0 with the WRONG socket would
+# mean it resolved something other than the record under the unnamed profile.
+a=$(CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-crossprofile.tsv" smoke-own-cross 2>/dev/null)
+printf '  %-12s -> exit=%s %s\n' crossprofile "$?" "$a"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ok.tsv" no-row-for-this >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' norow "$?"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "" smoke-own-probe >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' noledger "$?"
 ```
 
 PASS on exactly:
 
 ```
-  ok        -> exit=0
-  foreign   -> exit=3
-  legacy    -> exit=3
-  nosidecar -> exit=5
-  nohost    -> exit=0
-  ambiguous -> exit=4
-  norow     -> exit=2
-  noledger  -> exit=2
+  ok           -> exit=0
+  foreign      -> exit=3
+  legacy       -> exit=3
+  nosidecar    -> exit=5
+  nohost       -> exit=0
+  ambiguous    -> exit=4
+  crossprofile -> exit=0 uds:/tmp/cc-socks/4.sock
+  norow        -> exit=2
+  noledger     -> exit=2
 ```
 
 **The padding is not decoration.** This block is read under a heading that says
@@ -613,6 +650,37 @@ that enforces seven is the markdown at the setup block. That is what makes the u
 survivable in the direction that matters: a mid-upgrade supervisor keeps resolving its
 own workers for its whole life, and it is the *next* session in that slot that refuses
 the file loudly, at check 2's gate, rather than acting on rows it cannot attribute.
+
+**`crossprofile` is the only case here that fails against the code as it shipped
+before 2026-09-07, and that is what makes it worth having.** Its record sits under
+`$D/home/.claude-other`, a profile `CLAUDE_CONFIG_DIR` does not name — which is where a
+spawned worker's record really lands, because a worker does not register in its
+supervisor's profile. `owned.py` used to read `CLAUDE_CONFIG_DIR` and fall back to
+`~/.claude` only when it was unset, so it searched one profile while `peer.py`
+deliberately searched them all; this row answered **exit 1**, and a readiness loop
+built on that reports a healthy, addressable worker as one that never started. Run it
+against the old `registry_roots` and it returns 1; against the current one, 0 and the
+socket under the unnamed profile. **Assert the address, not just the code** — exit 0
+with any other socket means it resolved something that is not this record.
+
+**The `$D/home` fake `HOME` is load-bearing for every fixture above it, not just that
+one.** Once `owned.py` sweeps `~/.claude` and `~/.claude-*`, a check that did not
+override `HOME` would read the machine's real profiles, and "hermetic" in this check's
+first paragraph would stop being true. It is also what lets the cross-profile record
+exist at all without writing a stray profile into the operator's home directory, where
+it would outlive the run and be swept by every later `peer.py` call.
+
+**Widening the search could have broken `ambiguous`, and the shape of the dedupe is
+why it did not.** More than one live session answering is exit 4, a hard stop, so any
+change that lets one session be seen twice converts a healthy worker into a refusal to
+proceed. Constructed deliberately: a second profile whose `sessions/` is a **symlink**
+to another's survives `peer.roots()`'s dedupe, which compares profile directories and
+not what is under them. Without a record-level guard `ok` returns
+`exit=4, 2 live sessions answer (pids 1, 1)` — measured. `owned.py` therefore dedupes
+on **file identity** (`st_dev`, `st_ino`), which collapses one file reached by two
+paths and leaves two distinct files alone. That distinction is exactly what these
+fixtures need: `2.json` and `3.json` below are **byte-identical**, and they must still
+count as two.
 
 **`ambiguous` is the one HARD STOP that nothing else here reaches.** Two registry
 records, one name, one minted id between them — the state measured on 2026-08-13 when
@@ -1086,6 +1154,14 @@ A fresh pid per run means a fresh path, so the gate fires every time. It also me
 profile accumulates one trust record per smoke run; they are inert, and clearing them is
 optional housekeeping, not part of this procedure.
 
+**`$CLPID` is per SESSION, not per run, and a second run in the same session lands back
+on the pre-trusted path.** Observed 2026-09-07 on a second pass: the path was already
+marked `hasTrustDialogAccepted`, so the gate did not fire and 7d and 7e had nothing to
+clear — the same silent retirement a fixed path causes, reached by re-running rather
+than by re-machining. If you are re-running inside one session, suffix the path
+(`.../$CLPID/smoke repo pass2`) and **say in the report that you did**, because the path
+is what the cwd assertion at the end of 7e compares against.
+
 **The pid sits on the run directory rather than on the repo name, and that is doing a
 second job.** Every scratch artifact this procedure writes — the check 2 and 4 ledger
 fixtures, check 3's `fixture-profile/`, check 5's deaf ledger, this repo — lives under
@@ -1423,18 +1499,37 @@ own surviving pane leaves `terminal_id` matching *and* `agent_session` empty, so
 herdr witnesses say proceed and only `occupant.py` says stop. If the occupant block
 above did not run, this check has proved nothing about ownership.
 
-**Read the directory in the dialog before you press anything.** It must be the scratch
-repo. The gate is answered by `enter` **alone**, because option 1 is already selected:
+**Read the dialog before you press anything — both the directory it names and which row
+carries the `❯`.** The directory must be the scratch repo. The `❯` row decides the
+keystroke, and **there is no keystroke you can know before you read it.** `SKILL.md`'s
+folder-trust section records this dialog rendering two different ways on this machine,
+and on CLI 2.1.260 it came up unnumbered with the destructive option selected:
+
+```
+❯ No, exit
+  Yes, I trust this folder
+```
+
+**A live run of this suite met that rendering again on 2026-09-07.** An earlier version
+of this check told you the gate "is answered by `enter` alone, because option 1 is
+already selected". Against that screen `enter` alone kills the worker mid-suite, and the
+run survived only because its operator followed `SKILL.md` instead of this paragraph.
+Neither the ordering nor the numbering is stable — that variant labels nothing — so the
+`❯` row is the only thing here that is load-bearing.
+
+Derive the sequence; do not recall it. If `❯` already sits on the trusting option,
+`enter` is the whole answer:
 
 ```bash
 cmux send-key --workspace "$CMUX_WORKSPACE_ID" --surface "<SURF>" enter
 herdr pane send-keys "$L1" enter
 ```
 
-**Do not send `down` first.** On the plain variant of that dialog option 2 is
-"No, exit", so the reflexive rescue sequence terminates the worker it was meant to
-save. Count the `❯` row in the output you just read; if it is already on option 1,
-`enter` is the entire answer.
+If it does not, send one `down`, **re-read the screen and confirm the `❯` actually
+moved**, and only then `enter` — which is exactly what the 2026-09-07 run did. What is
+forbidden is the memorised `down`-then-`enter` sent without that second read: on the
+numbered variant option 2 is "No, exit", so the reflexive rescue sequence terminates the
+worker it was meant to save.
 
 On herdr, also record the negative control if you have time: `esc` on that gate
 cancels and exits `claude` cleanly without trusting anything (measured 2026-08-12).
@@ -1613,11 +1708,18 @@ python3 "$P" "<NAME>" cwd
 ```
 
 ```bash
-python3 - "<the sessionId>" "<the cwd>" <<'PY'
+python3 - "<plugin root>" "<the sessionId>" "<the cwd>" <<'PY'
 import json, os, re, sys
-sid, cwd = sys.argv[1], sys.argv[2]
+sid, cwd = sys.argv[2], sys.argv[3]
 esc = re.sub(r'[^a-zA-Z0-9]', '-', cwd)
-roots = [d for d in os.environ.get('CLAUDE_CONFIG_DIR','').split(':') if d] or [os.path.expanduser('~/.claude')]
+# The plugin's own profile list, not a fourth copy of it. This line used to read
+# CLAUDE_CONFIG_DIR and fall back to ~/.claude only when unset, and then reported
+# "no transcript ... under ['/Users/ns/.claude-st']" for a healthy worker whose
+# transcript sat in ~/.claude -- the detector reproducing the very defect the
+# watcher had.
+sys.path.insert(0, os.path.join(sys.argv[1], 'skills', 'spawn-agent', 'lib'))
+import peer
+roots = peer.roots()
 path = next((p for p in (os.path.join(r, 'projects', esc, sid + '.jsonl') for r in roots)
              if os.path.exists(p)), None)
 if not path:
@@ -1918,8 +2020,9 @@ a live worker cannot be talked into fire as well.
 **11a to 11c run before teardown and use their own worker.** Before, because every line
 they produce comes from the run's watcher and teardown stops it. Their own worker,
 because 11c deliberately kills one, and killing the worker checks 7–10 rest on would
-destroy their evidence. **11d and 11e need neither** — both are synthetic harnesses
-against `watch-workers.py` and may be run at any point, including after teardown.
+destroy their evidence. **11d, 11e and 11f need none of it** — all three are synthetic harnesses
+against `watch-workers.py`, hermetic through a fake `HOME`, and may be run at any point,
+including after teardown.
 
 **Write its ledger row before you launch it**, exactly as 7b requires. This worker is as
 real as any other and check 12 must find it.
@@ -2028,13 +2131,20 @@ message rendered rather than held, and the block was a real
 `Bash command / ls /usr/share/dict / Do you want to proceed?` dialog. Confirm the dialog
 is on screen and is the one you provoked.
 
-**That dialog has three options, and it is not the trust gate.** Measured on both hosts:
-`1. Yes`, `2. Yes, allow reading from dict/ from this project`, `3. No`, with `❯` already
-on 1. So `enter` alone is still the whole answer and the "never send `down` first" rule
-from 7e still holds — but for a different reason. On the trust gate option 2 is
-"No, exit"; here option 2 grants a *standing* permission you did not intend. Both are
-wrong to land on, which is why the rule is "read the screen and count the `❯` row"
-rather than a memorised keystroke.
+**This is not the trust gate, and its option count is not an invariant either.**
+Measured 2026-08-12 on both hosts it had three — `1. Yes`, `2. Yes, allow reading from
+dict/ from this project`, `3. No`. Measured again 2026-09-07 it had **four**, with a new
+third entry: `1. Yes`, `2. Yes, allow reading from dict/ from this project`, `3. Yes, and
+switch to auto mode`, `4. No`. `❯` was on 1 both times, so `enter` was the right
+keystroke both times — read that as a reading that has held, not as a rule you may rely
+on. Count the `❯` row here exactly as in 7e.
+
+The reason to care differs from the trust gate's. There the wrong row exits; here it
+grants something. Option 2 grants a *standing* permission you did not intend, and the
+option that appeared in 2026-09-07 switches the worker to auto mode for the rest of its
+life — a worse thing to land on than either, and it arrived without warning in a dialog
+this file had called stable. That is why the rule is "read the screen and count the `❯`
+row" rather than a memorised keystroke.
 
 On herdr, wait on it directly as well — faster than polling, and evidence *alongside*
 the watcher line rather than instead of it (`SKILL.md`, "A host that publishes its own
@@ -2058,6 +2168,8 @@ substitute for the registry read.
 
 Clear 11a's prompt first. **Read the screen before pressing anything**, exactly as 7e
 insists — a permission dialog's second option is not always harmless:
+
+With `❯` confirmed on option 1 by the read you just did — not assumed:
 
 ```bash
 cmux send-key --workspace "$CMUX_WORKSPACE_ID" --surface "<NAME2's ref>" enter
@@ -2158,14 +2270,18 @@ redundant with this.
 ```bash
 W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
 
-D=$(mktemp -d) && mkdir -p "$D/sessions"
+D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/home"
 printf 'route-probe\tL1\tL2\tspawned\tsid\t1\n' > "$D/led.tsv"
-CLAUDE_CONFIG_DIR="$D" WATCHER="$W" LEDGER="$D/led.tsv" REC="$D/sessions" python3 - <<'PY'
+CLAUDE_CONFIG_DIR="$D" WATCHER="$W" LEDGER="$D/led.tsv" REC="$D/sessions" D="$D" python3 - <<'PY'
 import json, os, subprocess, sys, time
 
 rec_path = os.path.join(os.environ["REC"], "%d.json" % os.getpid())
+# HOME is overridden for the same reason 3b overrides it: the watcher sweeps
+# ~/.claude and every ~/.claude-*, so without a fake home this check would read
+# the machine's real profiles and stop being hermetic.
 w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], os.environ["LEDGER"], "0.2"],
-                     stdout=subprocess.PIPE, text=True)
+                     stdout=subprocess.PIPE, text=True,
+                     env=dict(os.environ, HOME=os.path.join(os.environ["D"], "home")))
 
 def step(status, waiting_for=None):
     rec = {"pid": os.getpid(), "name": "route-probe", "sessionId": "sid", "status": status}
@@ -2244,13 +2360,15 @@ record **and a synthetic transcript**, which is what the signal actually reads.
 **Both halves are asserted, and a one-sided check would be worse than no check.** A
 detector that fired on every turn-end would pass "GATE fires on a prose gate" perfectly
 while making the supervisor cry blocked on every finished worker — which is worse than
-the defect it replaced. So four of the eight transitions below must produce `DONE`, and
-they are the point of the check as much as the two `GATE`s are.
+the defect it replaced. So eight of the fourteen transitions below must produce `DONE`,
+and they are the point of the check as much as the five `GATE`s are. Three of the eight
+pay for the newest widening in particular: every phrase admitted as a request in words
+brings a matching negative that must stay a `DONE`.
 
 ```bash
 W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
 
-D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/repo"
+D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/repo" "$D/home"
 WATCHER="$W" SCRATCH="$D" python3 - <<'PY'
 import json, os, string, subprocess, sys, time
 
@@ -2287,7 +2405,7 @@ def step(status, waiting_for=None):
 
 w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], ledger, "0.2"],
                      stdout=subprocess.PIPE, text=True,
-                     env=dict(os.environ, CLAUDE_CONFIG_DIR=D))
+                     env=dict(os.environ, CLAUDE_CONFIG_DIR=D, HOME=os.path.join(D, "home")))
 
 step("busy")                                          # first sight, silent
 
@@ -2319,8 +2437,37 @@ step("busy")
 say(text("`skills/` is still untracked in dotfiles (`??`) -- nothing committed."))
 step("idle")                                          # 7 -> DONE   git's ?? is not a question
 
-step("waiting", "permission prompt")                  #   -> ATTN
-step("idle")                                          # 8 -> CLEAR  no turn ran, so no new prose
+step("busy")
+say(text("One line from you unblocks this:** if the ordering artifact doesn't count "
+         "as red, I'll push and open the PR immediately -- and which session URL to use."))
+step("idle")                                          # 8 -> GATE   a request, no question mark
+
+step("busy")
+say(text("Waiting on your **commit approval** before touching `/ship-milestone` or `/pr`."))
+step("idle")                                          # 9 -> GATE   the waiting-on-you arm
+
+step("busy")
+say(text("To proceed, just tell me directly here: push `chore/m138-m140-specs -u` "
+         "and open the PR non-draft. I'll stay idle until then."))
+step("idle")                                          # 10 -> GATE  trigger MID-line, after a
+                                                      #             comma and a connective
+
+step("busy")
+say(text("Round 2 dispatched, including an explicit invitation to tell me the two "
+         "declines are wrong. Holding."))
+step("idle")                                          # 11 -> DONE  unanchored "tell me"
+
+step("busy")
+say(text("No fix agents were dispatched, per your call."))
+step("idle")                                          # 12 -> DONE  unanchored "your call"
+
+step("busy")
+say(text("The remote branch still exists on GitHub (I only deleted the local one). "
+         "Say the word if you want it pruned."))
+step("idle")                                          # 13 -> DONE  "say the word" is not admitted
+
+step("waiting", "permission prompt")                  #    -> ATTN
+step("idle")                                          # 14 -> CLEAR no turn ran, so no new prose
 
 w.terminate()
 print(w.stdout.read(), end="")
@@ -2328,7 +2475,7 @@ PY
 rm -rf "$D"
 ```
 
-PASS on **exactly these nine lines, in this order**:
+PASS on **exactly these fifteen lines, in this order**:
 
 ```
 DONE gate-probe
@@ -2338,14 +2485,27 @@ GATE gate-probe -- "Proceed to the release ceremony [yes / no]"
 DONE gate-probe
 DONE gate-probe
 DONE gate-probe
+GATE gate-probe -- "One line from you unblocks this:** if the ordering artifact doesn't count as red, I'll push and open the PR immediately -- and which session URL to use."
+GATE gate-probe -- "Waiting on your **commit approval** before touching `/ship-milestone` or `/pr`."
+GATE gate-probe -- "To proceed, just tell me directly here: push `chore/m138-m140-specs -u` and open the PR non-draft. I'll stay idle until then."
+DONE gate-probe
+DONE gate-probe
+DONE gate-probe
 ATTN gate-probe
 CLEAR gate-probe
 ```
 
-That is nine lines for eight transitions plus the `ATTN`, and the count is the check as
-much as the content: a run that prints ten has a `GATE` where a `DONE` belongs.
+That is fifteen lines for fourteen transitions plus the `ATTN`. **Count first, then read
+the labels — and do not stop at the count.** It catches a lost or duplicated transition,
+which is the failure that is invisible line by line. It cannot catch a misplaced `GATE`:
+`GATE` *replaces* `DONE` on the same transition rather than adding a line, so a detector
+that has regressed into firing on everything still prints exactly fifteen. Measured — five
+mutant detectors, every one of them fifteen lines, two of them with `GATE`s where `DONE`s
+belong. An earlier version of this sentence said a run that prints one line too many has a
+`GATE` where a `DONE` belongs. That was false, and it was the kind of false that passes:
+someone counts, gets fifteen, and never reads.
 
-Five assertions ride on it, and the last three are the ones that break first:
+Eight assertions ride on it, and the last four are the ones that break first:
 
 - **`GATE` fires on the mandated form** — line 2, the shipped skill contract's literal
   `Apply commit "<subject>"? [y / n / edit]`, and the line carries the words back. This
@@ -2353,24 +2513,162 @@ Five assertions ride on it, and the last three are the ones that break first:
 - **`GATE` fires on a bracketed option list with no question mark** — line 4. It is the
   narrow square-bracket rule; a looser one that also accepted parentheses made
   `(Asia/Tbilisi)` and every markdown link a gate.
-- **`DONE` still means finished** — lines 1, 3, 5, 6, 7. Four different ways a turn can
-  end without a gate, and every one of them must stay a bare `DONE`. Run this against a
-  detector that greps the whole message for a question mark and line 3 turns into a
-  `GATE`; against one that walks back past the final assistant record, line 5 reports
-  the question from transition 4 as a gate that is not open; against one that does not
-  skip `isSidechain`, line 6 reports a sub-agent's question as the worker's own.
+- **`GATE` fires on a request phrased as a statement** — lines 8, 9 and 10, none of which
+  carries a question mark. Line 8 is the real missed line that bought this arm: a worker
+  held at a push-and-open-PR gate reported as finished, because terminal punctuation was
+  the sole discriminator. Flip its trailing `.` to a `?` and the old detector passes; the
+  category matters precisely because a worker told to report rather than decide is
+  steered away from question marks.
+- **Line 10 is the only fixture that defends the anchor's shape rather than its
+  presence** — its trigger sits mid-line, after a comma and the connective `just`. Both
+  other positives open at column 0, so without it a detector anchored to `^` alone, or one
+  that dropped the connective run, passes this whole check while the docstring records
+  that `^`-anchoring costs 39 hits of 45 and 17 of 22 on the real corpus. It was added
+  because that gap was found by mutation, not by reading.
+- **`DONE` still means finished** — lines 1, 3, 5, 6, 7, 11, 12, 13. Eight different ways
+  a turn can end without a gate, and every one of them must stay a bare `DONE`. Run this
+  against a detector that greps the whole message for a question mark and line 3 turns
+  into a `GATE`; against one that walks back past the final assistant record, line 5
+  reports the question from transition 4 as a gate that is not open; against one that does
+  not skip `isSidechain`, line 6 reports a sub-agent's question as the worker's own.
+- **Lines 11 and 12 pin the clause anchor; line 13 pins a refusal, and they are not the
+  same assertion.** Line 11 is prose about what the worker told a *sub-agent* ("an
+  invitation to tell me the two declines are wrong"); line 12 reports a decision the human
+  already made ("per your call"). Delete the anchor and both become `GATE`s. Line 13 is
+  different in kind: it is `say the word`, which is **anchor-invariant** — it stays `DONE`
+  under every anchor mutation and turns `GATE` only if someone re-admits the phrase. That
+  phrase was measured at 76 additional hits, the large majority post-completion courtesy
+  offers, and refused; line 13 is the only thing standing between a future maintainer and
+  re-admitting it. An earlier version of this bullet claimed all three pinned the anchor.
+  They do not, and mutation testing is what said so.
 - **A `?` inside git's `??` is not a question** — line 7. This is the exact string a
   bare `"?" in line` test fired on across the real transcripts on this machine.
-- **`CLEAR` never becomes a `GATE`** — line 9. The transcript is not consulted on a
+- **`CLEAR` never becomes a `GATE`** — line 15. The transcript is not consulted on a
   `waiting → idle` transition at all, because no turn ran and there is nothing new for
   the worker to have said. A `GATE` there would be the stale-question failure arriving
   by a second route.
+
+**What this fixture set actually kills.** Each mutant below was built by transforming the
+shipped `REQUEST` source, and each is killed by a *named* fixture — which is the property
+worth preserving when anyone edits this check:
+
+| mutant detector | killed by |
+| --- | --- |
+| clause anchor deleted | lines 11, 12 |
+| clause anchor narrowed to `^` only | **line 10 alone** |
+| connective run dropped | **line 10 alone** |
+| `say the word` admitted | **line 13 alone** |
+
+Three of the four rest on a single fixture. Delete that fixture and the mutant ships
+silently, so treat any of these lines as load-bearing rather than illustrative.
 
 **The record's pid is the driver's own**, exactly as in 11d, so the liveness check passes
 for as long as the harness runs and there is nothing to clean up. The transcript is
 appended to with a `system` record after each assistant record, because that is what
 Claude Code really writes — the last line of a real transcript is not the assistant's,
 and a reader that only looked at the final record would find nothing.
+
+### 11f. The watcher must look where workers actually register — *synthetic*
+
+**The half of the profile-scoping defect that fails silently.** `owned.py` and the
+watcher were both scoped to one profile, and while both were broken the run died loudly
+at readiness — "never became addressable" — so somebody investigated. Fix only
+`owned.py` and the supervisor resolves its worker, calls it healthy, and is then never
+notified of anything it does again. Measured live 2026-09-07: `owned.py` answered
+`status idle, exit 0` for a worker the watcher's roots (`['/Users/ns/.claude-st']`)
+could not see at all, and that run's first watcher emitted its 30 s deafness `WARN` and
+then nothing, ever. Re-armed with a colon-joined `CLAUDE_CONFIG_DIR`, every signal
+arrived.
+
+Synthetic, and hermetic through a fake `HOME` for the same reason 3b and 11e are: the
+watcher now sweeps `~/.claude` and every `~/.claude-*`, so a check that did not override
+`HOME` would read the operator's real profiles.
+
+```bash
+W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
+
+D=$(mktemp -d) && mkdir -p "$D/sessions" "$D/home/.claude-other/sessions"
+WATCHER="$W" SCRATCH="$D" python3 - <<'PY'
+import json, os, subprocess, sys, time
+
+D = os.environ["SCRATCH"]
+HOME = os.path.join(D, "home")
+SID = "aaaaaaaa-1111-2222-3333-444444444444"
+# The worker's record goes in a profile CLAUDE_CONFIG_DIR does NOT name -- which is
+# where a spawned worker's record really lands. $D/sessions stays empty on purpose.
+rec_path = os.path.join(HOME, ".claude-other", "sessions", "%d.json" % os.getpid())
+ledger = os.path.join(D, "led.tsv")
+open(ledger, "w").write("cross-probe\tL1\tL2\tspawned\t%s\t%d\tcmux\n" % (SID, os.getpid()))
+
+# A STRANGER in a third profile: same name, different session, permanently blocked.
+# It exists to be ignored -- if the widened watcher matched on name alone it would
+# report this one's ASK and lose our worker's DONE.
+stranger = os.path.join(HOME, ".claude-stranger", "sessions")
+os.makedirs(stranger)
+open(os.path.join(stranger, "1.json"), "w").write(json.dumps(
+    {"pid": 1, "name": "cross-probe", "sessionId": "99999999-9-9-9-9",
+     "status": "waiting", "waitingFor": "input needed"}))
+
+w = subprocess.Popen([sys.executable, "-u", os.environ["WATCHER"], ledger, "0.2"],
+                     stdout=subprocess.PIPE, text=True,
+                     env=dict(os.environ, CLAUDE_CONFIG_DIR=D, HOME=HOME))
+
+def step(status, sid=SID):
+    open(rec_path + ".tmp", "w").write(json.dumps(
+        {"pid": os.getpid(), "name": "cross-probe", "sessionId": sid,
+         "cwd": D, "status": status}))
+    os.replace(rec_path + ".tmp", rec_path)
+    time.sleep(0.6)
+
+step("busy")                                          # first sight, silent
+step("idle")                                          # 1 -> DONE  across the profile line
+step("busy", "bbbbbbbb-1111-2222-3333-444444444444")  # /clear rotated the session id
+step("idle", "bbbbbbbb-1111-2222-3333-444444444444")  # 2 -> DONE  still tracked, by pid
+
+w.terminate()
+print(w.stdout.read(), end="")
+PY
+rm -rf "$D"
+```
+
+PASS on **exactly these two lines**:
+
+```
+DONE cross-probe
+DONE cross-probe
+```
+
+**Run it against the previous `registry_dirs` and it prints nothing at all** — that is
+the whole point, and it is the only assertion here that could not have been made before
+2026-09-07. Silence is the shipped-yesterday behaviour, not a harness fault.
+
+Three assertions ride on those two lines:
+
+- **The transition crosses the profile boundary** — line 1. The record is in
+  `~/.claude-other`, `CLAUDE_CONFIG_DIR` names `$D`, and `$D/sessions` is empty.
+- **A stranger sharing the name is ignored** — there is no `ASK` line. The stranger sits
+  permanently in `waiting` / `input needed`, so a watcher that matched on name alone
+  would print `ASK  cross-probe` and never print our worker's `DONE` at all. Measured
+  with the identity join removed: exactly that, `['ASK  cross-probe']` and nothing else.
+  This is the *substitution* risk that widening introduces, and it is worse than the
+  deafness it cures, because a name is unique only among the live sessions of one
+  instant.
+- **`/clear` does not lose the worker** — line 2, emitted after the session id rotates.
+  The join is on the minted id first and the ledger's pinned pid second, exactly as
+  `owned.py` does it; an id-only join would report this worker `GONE` and go quiet,
+  trading one silent loss for another.
+
+**No file-identity dedupe here, and the asymmetry with `owned.py` is deliberate.** There
+the count *is* the signal — more than one answering is exit 4, a hard stop — so one
+session reached through two roots had to be collapsed. Here everything is keyed by name,
+so a duplicate record writes the same entry twice and collapses on its own. Verified
+against a profile whose `sessions/` is a symlink to another's: one `DONE`, not two. The
+danger widening introduces here is substitution, not duplication, and the identity join
+is what answers it.
+
+**Cost, since it now globs several profiles per poll:** measured across both real
+profiles on this machine, 28 registry files, a full sweep takes **0.30 ms** against a
+default poll interval of 2000 ms.
 
 ## 12. Teardown, and proof that nothing leaked
 

@@ -33,7 +33,7 @@ plugins/agent-toolkit/                   → The plugin (the only thing that shi
             └── herdr.md                 → the same, for herdr (needs no resolver script)
 .claude/skills/                          → this repo's own skills; NOT shipped
 ├── release/                             → /release — the release ceremony
-└── spawn-agent-smoke/                   → /spawn-agent-smoke — twelve checks against the working tree
+└── spawn-agent-smoke/                   → /spawn-agent-smoke — fourteen checks against the working tree
 ```
 
 ## Conventions
