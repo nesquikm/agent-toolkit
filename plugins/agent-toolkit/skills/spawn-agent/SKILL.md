@@ -1118,6 +1118,22 @@ task's own wording talked the worker out of the tool — see "Send the task" abo
 opposite fault, the ref wall, and its fix is the literal `uds:` address in the task
 text rather than any change to the prohibitions.
 
+**A worker's reply saying it asked you something is a claim, not an event — read its
+screen before you relay the question.** For everything else the reply is the best
+signal you have; it is the only one that carries what actually happened. A question is
+the exception, because it is the one thing a worker can believe it asked while nothing
+reached anyone: it ends its turn on a declarative request, the transition arrives as a
+bare `DONE`, and you relay to the user a question they were never shown. Both of you
+then wait on the other. This is the argument this file already makes about
+authorization, pointed the other way — a peer's claim that the user authorized
+something is not the user authorizing it, and a worker's claim that it asked the user
+is not the user having been asked. Note the boundary against "Read the quoted words and
+route the gate" below: that covers a question the **watcher read out of the transcript**
+and quoted back to you, which is machine-read and does not need confirming. This covers
+a question the **worker asserts in its own prose**, which nothing has verified. No
+measurement of this variant exists yet. The neighbouring one does: five prose gates in a
+single session on 2026-09-04, every one found only by reading a screen.
+
 ### The watcher — one Monitor, six worker signals
 
 ```bash
@@ -1308,15 +1324,30 @@ line of the last thing the session itself said**:
 | --- | --- |
 | contains a question mark that closes a word — `commit?`, `it?`, `(y)?` | `GATE` |
 | ends in a bracketed option list — `[y / n / edit]`, `[yes / no]` | `GATE` |
+| opens a clause with a request in words — `Tell me which`, `Waiting on your go-ahead`, `Your call` | `GATE` |
 | anything else, **including a question earlier in the report** | `DONE` |
 | the turn ended on a tool call and said nothing | `DONE` |
 | no transcript, no `cwd`, unreadable file, no assistant record in range | `DONE` |
 
-Six properties of that are deliberate, and each one is a false positive that was
-measured and removed rather than reasoned away. The corpus is the 611 transcripts
-on this machine, over which the shipped rule fires on **22, or 3.8%, every one of
-them a real question put to a human** — "Want me to push and open a draft PR?",
-"May I commit?", "Run it?":
+Seven properties of that are deliberate, and each one is a false positive that was
+measured and removed rather than reasoned away. The corpus is this machine's own
+transcripts, and it grows while you read it, so it is pinned by date rather than by
+a count that will not reproduce. On **2026-09-07**, across both profiles, the walk
+started from 4,829 `.jsonl` — but quote the effective number, not that one: 4,089 of
+them are `agent-*.jsonl` sub-agent transcripts the watcher can never address, so only
+**608 sessions** contributed, yielding **5,083 turn-ending closing lines**. Those are
+the exact strings the rule is handed, and the denominator of every rate here. Over
+them the question and bracket rules fire on **271, or 5.3%**, every one a real question
+put to a human — "Want me to push and open a draft PR?", "May I commit?", "Run it?" —
+and the request rule adds **66 more, for 337, or 6.6%**.
+
+All 66 were read by hand, and between a quarter and a third of them are invitations
+rather than live blocks: 19 where the worker says outright it is not waiting, 24 if
+lines merely parked on an event you will report are included, 14 on an independent
+count. They ship, because every guard built to remove them also stranded a real gate.
+(An earlier pin, "611 transcripts, 22 hits", measured the same corpus one closing line
+per file rather than one per turn ending; that shape reads 601 lines and 24 hits today.
+No count here is a constant — re-measure before quoting any of them.)
 
 - **Only the last line is tested, and the test stops there** rather than
   searching upwards. A report body is full of questions it answers itself; a gate
@@ -1333,11 +1364,36 @@ them a real question put to a human** — "Want me to push and open a draft PR?"
 - **The bracket rule is square-bracketed and narrow.** Written loosely enough to
   accept any parenthesised text containing a slash, it made `· resets 1pm
   (Asia/Tbilisi)` and every markdown link `](https://…)` a gate — seven of the
-  first run's 35 hits. It now fires on none of the 611 and is kept for the
-  mandated `[y / n / edit]` form rather than for anything it has caught.
+  first run's 35 hits. It now fires on 3 closing lines, all 3 of which also match the
+  question-mark rule — so it has never been the reason a `GATE` was reported, and it
+  is kept for the mandated `[y / n / edit]` form rather than for anything it has
+  uniquely caught.
+- **The request rule anchors every phrase to the head of a clause** — after sentence
+  punctuation, or at the start of the line, with at most two connectives in front.
+  That anchor is the whole of its precision, and it was chosen on the corpus rather
+  than by eye. Unanchored, `tell me` also matches "an explicit invitation to tell me
+  the two declines are wrong" and `your call` matches "No fix agents were dispatched,
+  per your call" — prose *about* a decision, not a request for one — while `confirm
+  which` matches "I'll confirm which it is", where the worker is the one confirming.
+  The anchor removes every one of those and still keeps 39 of 45 `tell me` hits and 17
+  of 22 `waiting on you` hits; strict start-of-line anchoring was tried and rejected,
+  because it keeps 6 of each. One candidate was measured and **refused outright**:
+  `say the word` added 76 hits, the large majority post-completion courtesy offers
+  ("say the word and I'll clean it up"), and anchoring does not separate them — 75 of
+  the 76 survive it, because the offers already sit at a clause start. The refusal
+  rests on the rate, not on a claim that a wrong `GATE` loses you the transition (it
+  does not — `GATE` *is* the `DONE`, with words attached). Roughly three quarters of
+  `say the word`'s hits are invitations against roughly a quarter to a third for the
+  arms above, and that gap is the whole line. What a false `GATE` costs is spent in
+  aggregate: enough of them and the signal stops discriminating. The refusal has a
+  real price — the genuine blocks among those 76 stay invisible, and no tightening was
+  found that keeps them.
 - **Every failure to read falls back to `DONE`.** A missing transcript, a moved
-  `cwd`, an unreadable file all produce exactly the pre-change line. This signal
-  can add information to a transition; it can never take a `DONE` away.
+  `cwd`, an unreadable file all produce exactly the pre-change line — and so does a
+  predicate that throws, which is caught rather than allowed to escape. It has to be:
+  the watcher has no broad handler above this, so an exception there would not lose one
+  `GATE`, it would kill the process and with it every signal for every worker in the
+  run. This signal can add information to a transition; it can never take a `DONE` away.
 
 It is polled the same way everything else here is, with one exception worth
 knowing: the transcript is opened **only on the transition**, never on a poll, so
@@ -1362,9 +1418,13 @@ transcript was the only thing that differed, and the watcher read it across a
 under `~/.claude-st`, and the transcript resolved because the path is built from the
 profile the record was found in rather than from the watcher's own.
 
-The smoke suite's check 11e is the reproducible version — eight transitions over a
+The smoke suite's check 11e is the reproducible version — fourteen transitions over a
 throwaway profile, asserting both that `GATE` fires on a prose gate and that it does
-**not** fire on four different ways of merely finishing.
+**not** fire on eight different ways of merely finishing. Two of those eight pin the
+request rule's clause anchor — they become gates the moment someone deletes it — and a
+third pins something else entirely: `say the word`, which is anchor-invariant and turns
+`GATE` only if the phrase is re-admitted. Mutation testing is what told those two
+assertions apart; reading could not.
 
 **A seventh line exists, and it is not a worker signal.** That distinction is the
 whole of how to read it: `WARN` names no worker and says nothing about any
@@ -1381,11 +1441,20 @@ worker's state. It is the watcher reporting on *itself*.
   `$CALLER_SLOT` that came out empty in the `Monitor`'s own shell is the usual
   cause), and that the rows are the current **seven**-column format, since an older,
   differently shaped ledger puts something that is not a name in column 1.
+- `WARN gate predicate raised, GATE degrades to DONE until fixed: <exception>` —
+  a different failure with the same shape. The watcher is aimed at something real
+  and is reporting transitions normally; what it has lost is the ability to tell a
+  gate from an ending, so every blocked worker from here on is reported as
+  finished. That degradation is deliberate — the alternative is an exception on
+  the only path that reads a transcript, which kills the process and takes every
+  `DONE`, `ASK`, `ATTN`, `CLEAR` and `GONE` with it — but it is exactly the kind
+  of failure that looks like a quiet week, so it says so once. Treat it as
+  "screen-read your blocked workers until this is fixed", not as a worker signal.
 
-It is emitted **at most once per run** and never at all once anything has
-matched, so silence after the first half-minute is the positive signal that the
-watcher is aimed at something real. Do not read a `WARN` as a worker in trouble,
-and do not wait for a second one.
+Each kind is emitted **at most once per run**. The deafness lines never fire at
+all once anything has matched, so silence after the first half-minute is the
+positive signal that the watcher is aimed at something real. Do not read a `WARN`
+as a worker in trouble, and do not wait for a second one of the same kind.
 
 Three things the filter already handles. Do not "simplify" them away:
 

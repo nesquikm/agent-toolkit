@@ -20,8 +20,13 @@ One line per state change, each becoming a chat notification:
                 file does not recognise, and the line then carries that
                 literal value so the next new one documents itself.
   DONE  <name>  went from working to idle, so a turn ended
-  GATE  <name>  the same transition, but the last thing the worker said reads as
-                a question for a human. The registry cannot see this: a worker
+  GATE  <name>  the same transition, but the last thing the worker said puts
+                something to a human — a question, or a request phrased as a
+                statement ("Tell me which", "Waiting on your go-ahead"). The
+                statement half matters more than it looks: a worker told to stop
+                and report rather than decide is steered away from question
+                marks, so punctuation alone would miss exactly the workers most
+                worth catching. The registry cannot see any of this: a worker
                 that asks in prose and ends its turn is byte-identical to one
                 that finished, so the discriminator is its transcript, and the
                 line carries the closing words so a supervisor can route the
@@ -29,8 +34,11 @@ One line per state change, each becoming a chat notification:
                 renderings of one transition and never both fire for it.
   CLEAR <name>  stopped being blocked without a turn running — nothing to collect
   GONE  <name>  its process is no longer running (clean exit, crash, or kill)
-  WARN  <text>  the watcher itself is deaf — it matches nothing, so it will
-                never report anything. Emitted at most once per run.
+  WARN  <text>  the watcher reporting on itself, never on a worker. Two kinds,
+                each emitted at most once per run: it is deaf — armed on a
+                ledger that matches nothing, so it will never report anything —
+                or its gate predicate raised and every GATE is degrading to a
+                bare DONE until it is fixed.
 """
 
 import glob
@@ -106,20 +114,90 @@ EXCERPT = 200
 # would build a path that does not exist and silently lose every GATE under it.
 SAFE = frozenset(string.ascii_letters + string.digits)
 
+# The three predicates below were each measured against this machine's own
+# transcripts, on 2026-09-07, across both profiles (`~/.claude` and
+# `~/.claude-st`). Quote the effective numbers, not the file count: the walk
+# started from 4,829 `.jsonl`, but 4,089 of those are `agent-*.jsonl` sub-agent
+# transcripts that `transcript_path` can never address and `final_assistant_text`
+# skips, so only **608 sessions** contributed anything. Those 608 yield **5,083
+# turn-ending closing lines** — the exact strings `gate_line` is handed, and the
+# denominator every rate below is over.
+#
+# The corpus also grows while you read it (4,829 at the start of the run, 4,845
+# a few minutes later), which is why this is pinned by date. An earlier pin of
+# "611 transcripts" named the per-transcript shape of the same corpus, one
+# closing line per file; that shape reads 601 lines today. No count here is a
+# constant. Re-measure before quoting any of them.
+
 # A question mark that closes a word, not any question mark anywhere. The
-# difference is measured: over the 611 transcripts on this machine, a bare `"?"
-# in line` test also fired on git's `??` shorthand inside backticks and on a URL
-# query string, and this form fires on neither.
+# difference is measured: a bare `"?" in line` test also fired on git's `??`
+# shorthand inside backticks and on a URL query string, and this form fires on
+# neither.
 QMARK = re.compile(r"[\w\"'’)\]]\?")
 
 # The other shape a prose gate takes: a trailing bracketed option list, as in
 # `Apply commit "…"? [y / n / edit]`. Deliberately narrow — square brackets only,
 # short word-ish tokens only. The loose first version accepted any parenthesised
 # text containing a slash, which made `· resets 1pm (Asia/Tbilisi)` and every
-# markdown link `](https://…)` a gate; this one fired on **zero** of those 611
-# transcripts, and it is kept for the mandated form above rather than for
-# anything it has caught.
+# markdown link `](https://…)` a gate; this one fires on **3** closing lines in
+# the corpus, and all 3 also match QMARK, so it has never been the reason a GATE
+# was reported. It is kept for the mandated form above rather than for anything
+# it has uniquely caught. (An earlier comment here claimed zero. It was wrong,
+# and it survived a re-measurement of every number around it.)
 CHOICE = re.compile(r"\[\s*\w[\w -]{0,11}(?:\s*[/|]\s*\w[\w -]{0,11}){1,4}\s*\]\s*$")
+
+# The third shape, and the one neither of the above can see: a request for the
+# operator's input written as a statement. Terminal punctuation was the sole
+# discriminator before this — flipping the "." to a "?" on the same sentence
+# turned a DONE into a GATE — and it is the wrong discriminator, because a
+# worker under instruction to report rather than decide avoids question marks.
+#
+# Every alternative is clause-anchored: it must open a clause, after sentence
+# punctuation or at the start of the line, with up to two connectives allowed
+# in front. That anchor is the whole precision, and it was chosen on the corpus
+# rather than by eye — unanchored, `tell me` also matches "an invitation to tell
+# me the declines are wrong" and `your call` matches "per your call", both of
+# which are prose *about* a decision already taken. Clause-anchoring keeps 39 of
+# 45 `tell me` hits and 17 of 22 `waiting` hits while killing every one of those.
+# Strict `^` anchoring was tried and rejected: it keeps only 6 of each.
+#
+# `[^A-Za-z0-9]{0,4}` at line start is load-bearing, not cosmetic — `gate_line`'s
+# own strip does not remove a leading "-", so a bullet arrives as
+# `- **Still waiting on you:`. The connectives are load-bearing too: without
+# `still` the two real `Still waiting on you` gates are lost, without `or`/`just`
+# so are `Or tell me plainly what's off` and `Just tell me what's on screen`.
+#
+# One candidate alternative was measured and **dropped outright**: `say the word`
+# added 76 hits, almost all post-completion courtesy offers ("say the word and
+# I'll clean it up"), and anchoring does not separate them from the genuine ones
+# — 75 of the 76 survive clause-anchoring, because the offers already sit at a
+# clause start. It was refused on its false-positive RATE, not on any claim that
+# a wrong GATE loses a transition: hand-read, roughly three quarters of its hits
+# are invitations, against roughly a quarter to a third for the arms above. That
+# gap is the line. The cost of the refusal is real and worth naming — of those 76
+# lines, the minority that are genuine blocks stay invisible, and no tightening
+# was found that keeps them.
+#
+# One known gap, measured and deliberately not closed: the anchor accepts an em
+# or en dash but not a spaced ASCII `--`. Across the 5,083 lines that costs
+# nothing — spaced ASCII dashes appear in 3 lines, none carrying a trigger — so
+# the pattern is left alone rather than widened for a case the corpus does not
+# contain.
+REQUEST = re.compile(
+    r"(?i)"
+    r"(?:^[^A-Za-z0-9]{0,4}|[.!?:;,—–]\s*)"
+    r"(?:(?:or|and|but|so|then|just|still|otherwise|instead|now)\s+){0,2}"
+    r"(?:tell me\b"
+    r"|let me know (?:whether|which|what|when|how)\b"
+    r"|your call\b"
+    r"|confirm(?: and| whether| which)\b"
+    r"|waiting (?:on|for) (?:you|your)\b"
+    r"|I need (?:a|your) (?:decision|answer|call|ruling)\b"
+    r"|(?:one line|a line|one word|a word) from you\b"
+    r"|(?:one line|a line|one word|a word|your (?:word|answer|go-?ahead|call|decision|sign-?off|reply))"
+    r"(?: from you)? unblocks? this\b"
+    r")"
+)
 
 
 def registry_dirs():
@@ -288,26 +366,56 @@ def final_assistant_text(records):
 
 
 def gate_line(text):
-    """The closing line, when it reads as a question for a human. Else None.
+    """The closing line, when it puts something to a human. Else None.
 
     Only the last non-empty line is ever tested, and the test stops there rather
     than searching upwards. A report body is full of questions it answers itself;
     a gate is the last thing on screen, and that asymmetry is the precision.
-    Measured over 611 transcripts: 22 hits, every one of them a real question put
-    to a human ("Want me to push and open a draft PR?", "May I commit?", "Run
-    it?"), and no clear false positive.
+
+    Measured over the corpus pinned above, on 2026-09-07: `QMARK` and `CHOICE`
+    together fire on 271 of 5,083 turn-ending lines (5.3%) — real questions put
+    to a human ("Want me to push and open a draft PR?", "May I commit?"). Adding
+    `REQUEST` brings 66 more, for 337 (6.6%). All 66 were read by hand. Every one
+    is a second-person request addressed to the operator, and none is a category
+    error — no prose about a sub-agent, nothing backward-looking, no line where
+    the subject of "tell me" is a machine.
+
+    A quarter to a third of them are invitations rather than live blocks, and the
+    spread is the honest part, because the boundary is a judgement and not a
+    measurement. Counting only lines where the worker says outright that it is not
+    waiting — "not blocking yet", "I'll keep driving unless", "otherwise I'll
+    relay when it lands", "tell me if you want that restored" — gives 19 of 66.
+    Including lines merely parked on an event the operator will report gives 24.
+    An independent hand-read of the same corpus put it at 14. Any of those is
+    several times the "six" this docstring first claimed, and the error ran in the
+    direction that flattered the change.
+
+    They ship anyway. Ten candidate guards were built and scored: the best removes
+    twelve of them and strands a real gate — a worker holding a PR open on
+    "Tell me if you'd rather hold `d3612af` out of #86". Exactly 7 corpus lines
+    are both question-mark gates and REQUEST matches, and the guards were caught
+    firing inside those too; they survive today only because they happen to carry
+    a question mark, which is the luck this predicate exists to stop depending on.
+    A handful of extra screen-reads is the cheaper error.
     """
     for raw in reversed(text.split("\n")):
         line = raw.strip().strip("*_`> ").strip()
         if not line:
             continue
-        return line if (QMARK.search(line) or CHOICE.search(line)) else None
+        if QMARK.search(line) or CHOICE.search(line) or REQUEST.search(line):
+            return line
+        return None
     return None
 
 
 def excerpt(line):
     clean = " ".join("".join(c if c.isprintable() else " " for c in line).split())
     return clean if len(clean) <= EXCERPT else clean[: EXCERPT - 3].rstrip() + "..."
+
+
+# Set once, by the guard in gate_excerpt, so its WARN fires on the first failure
+# rather than on every transition after it.
+_PREDICATE_WARNED = False
 
 
 def gate_excerpt(source):
@@ -317,6 +425,13 @@ def gate_excerpt(source):
     deliberate: a missing transcript, an unreadable one, a cwd that has moved, a
     file with no assistant record in range all fall back to exactly today's DONE.
     This can add information to a transition; it can never take a DONE away.
+
+    That last sentence is why `gate_line` is called inside a bare `except`. It is
+    the one frame here that runs a regex over arbitrary worker prose, and it sits
+    on the only path that reads a transcript at all: `main` has no broad handler,
+    so an exception raised here does not lose one GATE, it kills the watcher and
+    with it every DONE, ASK, ATTN, CLEAR and GONE for every worker in the run.
+    A predicate that throws must degrade to today's DONE, not to silence.
     """
     path = transcript_path(*source) if source else None
     if not path:
@@ -328,8 +443,25 @@ def gate_excerpt(source):
             return None
         text = final_assistant_text(records)
         if text is not None:
-            line = gate_line(text)
-            return excerpt(line) if line else None
+            try:
+                line = gate_line(text)
+                return excerpt(line) if line else None
+            except Exception as exc:
+                # Degrading to DONE is the right failure. Doing it *quietly* is
+                # not: a predicate that throws on most prose would turn every
+                # gate on this machine back into a completion, indefinitely, and
+                # look exactly like a week in which nobody happened to ask
+                # anything. So it says so once, through the line this file
+                # already reserves for reporting on itself.
+                global _PREDICATE_WARNED
+                if not _PREDICATE_WARNED:
+                    _PREDICATE_WARNED = True
+                    print(
+                        f"WARN gate predicate raised, GATE degrades to DONE "
+                        f"until fixed: {exc!r}",
+                        flush=True,
+                    )
+                return None
         if whole:
             break  # already read the entire file; a bigger window finds no more
     return None
@@ -426,6 +558,20 @@ def main():
     # from SIGPIPE like any other filter says the same thing silently.
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
+    # Every line this file prints can carry text it did not write — a GATE
+    # excerpt is the worker's own prose, an ATTN carries a registry value, a WARN
+    # carries a path — and on a stdout that cannot encode it, `print` raises.
+    # There is no handler above the poll loop, so that is not a mangled line, it
+    # is a dead watcher, and a dead watcher is indistinguishable from a healthy
+    # quiet one: there is no mid-run liveness check. Reproduced with
+    # PYTHONIOENCODING=ascii and a real GATE excerpt carrying an em-dash —
+    # UnicodeEncodeError at the GATE print, rc=1, and every later transition for
+    # every worker lost. A replacement character costs a supervisor nothing.
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, OSError):
+        pass  # a stdout that is not a reconfigurable text stream
+
     if len(sys.argv) < 2:
         sys.exit(USAGE)
     ledger = sys.argv[1]
@@ -509,10 +655,21 @@ def main():
                 # been reporting as a completion. GATE is that DONE with the
                 # question attached, never a second line about the same event —
                 # so a supervisor that sees GATE has been told the turn ended
-                # too, and loses nothing if the reading is wrong.
+                # too, and a wrong reading costs it no transition. What a wrong
+                # reading does cost is spent in aggregate: enough false GATEs and
+                # the line stops discriminating at all. That is why the
+                # predicates are graded on their false-positive rate rather than
+                # on the price of any single line.
                 gate = gate_excerpt(sources.get(name))
                 if gate:
-                    print(f'GATE {name} -- "{gate}"', flush=True)
+                    # The last-resort net under the reconfigure above. "It can
+                    # never take a DONE away" is a claim about this line, so it
+                    # is enforced on this line: whatever stops the excerpt from
+                    # reaching stdout, the transition is still reported.
+                    try:
+                        print(f'GATE {name} -- "{gate}"', flush=True)
+                    except Exception:
+                        print(f"DONE {name}", flush=True)
                 else:
                     print(f"DONE {name}", flush=True)
             elif state == "idle" and was in ("ask", "attn"):

@@ -2244,8 +2244,10 @@ record **and a synthetic transcript**, which is what the signal actually reads.
 **Both halves are asserted, and a one-sided check would be worse than no check.** A
 detector that fired on every turn-end would pass "GATE fires on a prose gate" perfectly
 while making the supervisor cry blocked on every finished worker — which is worse than
-the defect it replaced. So four of the eight transitions below must produce `DONE`, and
-they are the point of the check as much as the two `GATE`s are.
+the defect it replaced. So eight of the fourteen transitions below must produce `DONE`,
+and they are the point of the check as much as the five `GATE`s are. Three of the eight
+pay for the newest widening in particular: every phrase admitted as a request in words
+brings a matching negative that must stay a `DONE`.
 
 ```bash
 W="<plugin root>/skills/spawn-agent/lib/watch-workers.py"
@@ -2319,8 +2321,37 @@ step("busy")
 say(text("`skills/` is still untracked in dotfiles (`??`) -- nothing committed."))
 step("idle")                                          # 7 -> DONE   git's ?? is not a question
 
-step("waiting", "permission prompt")                  #   -> ATTN
-step("idle")                                          # 8 -> CLEAR  no turn ran, so no new prose
+step("busy")
+say(text("One line from you unblocks this:** if the ordering artifact doesn't count "
+         "as red, I'll push and open the PR immediately -- and which session URL to use."))
+step("idle")                                          # 8 -> GATE   a request, no question mark
+
+step("busy")
+say(text("Waiting on your **commit approval** before touching `/ship-milestone` or `/pr`."))
+step("idle")                                          # 9 -> GATE   the waiting-on-you arm
+
+step("busy")
+say(text("To proceed, just tell me directly here: push `chore/m138-m140-specs -u` "
+         "and open the PR non-draft. I'll stay idle until then."))
+step("idle")                                          # 10 -> GATE  trigger MID-line, after a
+                                                      #             comma and a connective
+
+step("busy")
+say(text("Round 2 dispatched, including an explicit invitation to tell me the two "
+         "declines are wrong. Holding."))
+step("idle")                                          # 11 -> DONE  unanchored "tell me"
+
+step("busy")
+say(text("No fix agents were dispatched, per your call."))
+step("idle")                                          # 12 -> DONE  unanchored "your call"
+
+step("busy")
+say(text("The remote branch still exists on GitHub (I only deleted the local one). "
+         "Say the word if you want it pruned."))
+step("idle")                                          # 13 -> DONE  "say the word" is not admitted
+
+step("waiting", "permission prompt")                  #    -> ATTN
+step("idle")                                          # 14 -> CLEAR no turn ran, so no new prose
 
 w.terminate()
 print(w.stdout.read(), end="")
@@ -2328,7 +2359,7 @@ PY
 rm -rf "$D"
 ```
 
-PASS on **exactly these nine lines, in this order**:
+PASS on **exactly these fifteen lines, in this order**:
 
 ```
 DONE gate-probe
@@ -2338,14 +2369,27 @@ GATE gate-probe -- "Proceed to the release ceremony [yes / no]"
 DONE gate-probe
 DONE gate-probe
 DONE gate-probe
+GATE gate-probe -- "One line from you unblocks this:** if the ordering artifact doesn't count as red, I'll push and open the PR immediately -- and which session URL to use."
+GATE gate-probe -- "Waiting on your **commit approval** before touching `/ship-milestone` or `/pr`."
+GATE gate-probe -- "To proceed, just tell me directly here: push `chore/m138-m140-specs -u` and open the PR non-draft. I'll stay idle until then."
+DONE gate-probe
+DONE gate-probe
+DONE gate-probe
 ATTN gate-probe
 CLEAR gate-probe
 ```
 
-That is nine lines for eight transitions plus the `ATTN`, and the count is the check as
-much as the content: a run that prints ten has a `GATE` where a `DONE` belongs.
+That is fifteen lines for fourteen transitions plus the `ATTN`. **Count first, then read
+the labels — and do not stop at the count.** It catches a lost or duplicated transition,
+which is the failure that is invisible line by line. It cannot catch a misplaced `GATE`:
+`GATE` *replaces* `DONE` on the same transition rather than adding a line, so a detector
+that has regressed into firing on everything still prints exactly fifteen. Measured — five
+mutant detectors, every one of them fifteen lines, two of them with `GATE`s where `DONE`s
+belong. An earlier version of this sentence said a run that prints one line too many has a
+`GATE` where a `DONE` belongs. That was false, and it was the kind of false that passes:
+someone counts, gets fifteen, and never reads.
 
-Five assertions ride on it, and the last three are the ones that break first:
+Eight assertions ride on it, and the last four are the ones that break first:
 
 - **`GATE` fires on the mandated form** — line 2, the shipped skill contract's literal
   `Apply commit "<subject>"? [y / n / edit]`, and the line carries the words back. This
@@ -2353,18 +2397,54 @@ Five assertions ride on it, and the last three are the ones that break first:
 - **`GATE` fires on a bracketed option list with no question mark** — line 4. It is the
   narrow square-bracket rule; a looser one that also accepted parentheses made
   `(Asia/Tbilisi)` and every markdown link a gate.
-- **`DONE` still means finished** — lines 1, 3, 5, 6, 7. Four different ways a turn can
-  end without a gate, and every one of them must stay a bare `DONE`. Run this against a
-  detector that greps the whole message for a question mark and line 3 turns into a
-  `GATE`; against one that walks back past the final assistant record, line 5 reports
-  the question from transition 4 as a gate that is not open; against one that does not
-  skip `isSidechain`, line 6 reports a sub-agent's question as the worker's own.
+- **`GATE` fires on a request phrased as a statement** — lines 8, 9 and 10, none of which
+  carries a question mark. Line 8 is the real missed line that bought this arm: a worker
+  held at a push-and-open-PR gate reported as finished, because terminal punctuation was
+  the sole discriminator. Flip its trailing `.` to a `?` and the old detector passes; the
+  category matters precisely because a worker told to report rather than decide is
+  steered away from question marks.
+- **Line 10 is the only fixture that defends the anchor's shape rather than its
+  presence** — its trigger sits mid-line, after a comma and the connective `just`. Both
+  other positives open at column 0, so without it a detector anchored to `^` alone, or one
+  that dropped the connective run, passes this whole check while the docstring records
+  that `^`-anchoring costs 39 hits of 45 and 17 of 22 on the real corpus. It was added
+  because that gap was found by mutation, not by reading.
+- **`DONE` still means finished** — lines 1, 3, 5, 6, 7, 11, 12, 13. Eight different ways
+  a turn can end without a gate, and every one of them must stay a bare `DONE`. Run this
+  against a detector that greps the whole message for a question mark and line 3 turns
+  into a `GATE`; against one that walks back past the final assistant record, line 5
+  reports the question from transition 4 as a gate that is not open; against one that does
+  not skip `isSidechain`, line 6 reports a sub-agent's question as the worker's own.
+- **Lines 11 and 12 pin the clause anchor; line 13 pins a refusal, and they are not the
+  same assertion.** Line 11 is prose about what the worker told a *sub-agent* ("an
+  invitation to tell me the two declines are wrong"); line 12 reports a decision the human
+  already made ("per your call"). Delete the anchor and both become `GATE`s. Line 13 is
+  different in kind: it is `say the word`, which is **anchor-invariant** — it stays `DONE`
+  under every anchor mutation and turns `GATE` only if someone re-admits the phrase. That
+  phrase was measured at 76 additional hits, the large majority post-completion courtesy
+  offers, and refused; line 13 is the only thing standing between a future maintainer and
+  re-admitting it. An earlier version of this bullet claimed all three pinned the anchor.
+  They do not, and mutation testing is what said so.
 - **A `?` inside git's `??` is not a question** — line 7. This is the exact string a
   bare `"?" in line` test fired on across the real transcripts on this machine.
-- **`CLEAR` never becomes a `GATE`** — line 9. The transcript is not consulted on a
+- **`CLEAR` never becomes a `GATE`** — line 15. The transcript is not consulted on a
   `waiting → idle` transition at all, because no turn ran and there is nothing new for
   the worker to have said. A `GATE` there would be the stale-question failure arriving
   by a second route.
+
+**What this fixture set actually kills.** Each mutant below was built by transforming the
+shipped `REQUEST` source, and each is killed by a *named* fixture — which is the property
+worth preserving when anyone edits this check:
+
+| mutant detector | killed by |
+| --- | --- |
+| clause anchor deleted | lines 11, 12 |
+| clause anchor narrowed to `^` only | **line 10 alone** |
+| connective run dropped | **line 10 alone** |
+| `say the word` admitted | **line 13 alone** |
+
+Three of the four rest on a single fixture. Delete that fixture and the mutant ships
+silently, so treat any of these lines as load-bearing rather than illustrative.
 
 **The record's pid is the driver's own**, exactly as in 11d, so the liveness check passes
 for as long as the harness runs and there is nothing to clean up. The transcript is
