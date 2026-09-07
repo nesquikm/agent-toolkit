@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.11.0 — "Ajar"** (the watcher could not tell a worker waiting on a prose approval gate from one that had finished — both register idle with an identical record — so it now reads the tail of the worker's transcript on a turn-end and reports GATE with the question it asked, tuned against all 611 transcripts on this machine and proved live both ways on one worker; also withdraws a folder-trust instruction that was inverted on CLI 2.1.260, where the prescribed enter selects "No, exit" and kills the worker)
+Latest: **v0.12.0 — "Earshot"** (a worker that asks in a statement rather than a question — "Tell me which", "Waiting on your go-ahead" — was reported as finished, because terminal punctuation was the only discriminator and a worker told to report rather than decide avoids question marks; the watcher now reads those too, clause-anchored and hand-checked over 5,083 turn-ending lines from 608 sessions. Underneath it, the three scripts that answer "where is my worker" each searched one profile while workers register in another, so a healthy worker was first called unreachable and then, once half of that was fixed, silently never reported at all)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
