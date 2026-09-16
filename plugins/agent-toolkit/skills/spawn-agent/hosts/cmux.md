@@ -159,13 +159,42 @@ the only thing that distinguishes four identical terminals.
 
 ## 4. Launch
 
+**Every variable in a launch line died with the placement call, so each of the four
+blocks below opens by re-binding and re-checking.** This is the one section that used to
+skip the preamble §5, §6 and §7 all carry, and the cost is not a failed launch — it is a
+launch aimed at you. `$SURF`, `$WS`, `$REPO`, `$NAME` and `$SID` are ordinary shell
+variables and none of them is in the process environment (only `$CMUX_*` survive, §1), so
+after the mandatory call boundary all five are empty. `--surface ""` **and**
+`--workspace ""` both fall back to the caller's own, so what `cmux send` then types is
+the degenerate string `cd "" && claude -n  --session-id` — and the trailing `\n` is an
+Enter, so it is submitted. Not into a shell: into **your own Claude Code input box**, as
+a prompt. Exit 0, nothing reports a fault, and no worker was launched.
+
+Read that as latent rather than observed: it is read out of this file, not out of an
+incident. `$SID` is guarded here even though the mint step already validated it, because
+the mint step ran in a different `Bash` call — and an empty one is not loud, it exits 0
+with a random uuid (`SKILL.md`), leaving a row naming an id no session will ever carry.
+The occupant check from §6 is deliberately **not** here: at launch the slot is empty by
+construction, and an occupant check in the pre-readiness path is a mistake this plugin
+has already shipped once.
+
 ```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+WS="$CMUX_WORKSPACE_ID"
+SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+[ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
+[ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID\n"
 ```
 
 With a permission class, on the same line:
 
 ```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+WS="$CMUX_WORKSPACE_ID"
+SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+[ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
+[ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --permission-mode manual\n"
 ```
 
@@ -178,10 +207,20 @@ whichever of the two lines above you are already sending — the same `$NAME` th
 the same string:
 
 ```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+WS="$CMUX_WORKSPACE_ID"
+SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+[ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
+[ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --remote-control \"$NAME\"\n"
 ```
 
 ```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+WS="$CMUX_WORKSPACE_ID"
+SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+[ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
+[ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --permission-mode manual --remote-control \"$NAME\"\n"
 ```
 

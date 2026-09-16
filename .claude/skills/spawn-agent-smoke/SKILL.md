@@ -1388,6 +1388,26 @@ occur, because `--cwd` is an argv element. Two different things must be true ins
   exits **2** with `unknown option: -n` and starts nothing. Record the exit code you
   got; a 2 here means you dropped the separator.
 
+**cmux, and this half is about the target rather than the payload:** a launch that
+reads perfectly can still be aimed at you. `--surface ""` and `--workspace ""` both fall
+back to the *caller's* own, and every variable in that line died with the placement
+call, so the failure mode is a launch line submitted into the supervisor's own input
+box. Assert the target before sending, not after:
+
+```bash
+S="<plugin root>/skills/spawn-agent/hosts/cmux-surface.py"
+SURF="<the surface ref §4 resolved, from ledger column 2>"
+[ -n "$SURF" ] || { echo "FAIL empty surface -- this launch would go to the caller"; exit 1; }
+[ "$(python3 "$S" "$SURF" id)" != "$CMUX_SURFACE_ID" ] || { echo "FAIL that is MY surface"; exit 1; }
+echo "  target ok: $SURF is not this session's slot"
+```
+
+PASS is the `target ok` line. Both refusals are reachable and neither is theoretical:
+the first is what an unbound `$SURF` produces, the second is what happens when the
+placement step hands back the caller's own slot. Nothing else in this suite asserts
+that a launch is aimed somewhere other than here — 7c's payload check passes on a
+launch line typed into this very session.
+
 ### 7d. Readiness, and the failures that look identical — *core, with a host twist*
 
 Run the skill's readiness loop, but bound it at 20 rather than 60 — you are expecting
