@@ -1732,6 +1732,43 @@ it reports `total=2 bridged=0 plain=2` and exits 1; against a tree whose plain l
 were given the flag it reports `bridged=4 plain=0` and exits 1. A check that cannot
 fail is not a check, and this one fails on each defect separately.
 
+### 7h. Every shebang script is executable — *static*
+
+The only assertion over a file mode anywhere in this suite, and it exists because
+nothing else would notice: a patch applied without mode bits, a zip-based install, or a
+refactor that recreates a file drops the bit while every other check stays green.
+
+```bash
+R=plugins/agent-toolkit
+bad=0
+for f in $(find "$R" -name '*.py' -not -path '*__pycache__*' | sort); do
+  head -1 "$f" | grep -q '^#!' || continue
+  m=$(git ls-files -s "$f" | awk '{print $1}')
+  [ "$m" = 100755 ] || { echo "  FAIL $f is $m, expected 100755"; bad=1; }
+done
+echo "  checked $(find "$R" -name '*.py' -not -path '*__pycache__*' | wc -l | tr -d ' ') scripts"
+exit $bad
+```
+
+PASS is the count line with no `FAIL` above it, and seven is the count today. **It reads
+git's index, not the filesystem**, because the index is what an install copies and what a
+patch either carries or drops; `ls -l` would pass on a working tree whose bit git never
+recorded. `core.fileMode` is `true` in this repo, so the two agree on a healthy clone —
+which is exactly why the weaker of the two is the wrong one to assert.
+
+One consequence worth knowing before you call it a bug: a `chmod` that has not been
+staged still reads `FAIL` here, because the index has not learned it yet. That is the
+check answering correctly — an unrecorded bit is exactly what does not survive to a
+consumer — and `git add` is the fix, not an edit to this block.
+
+**It is keyed on the shebang, not on a list of filenames**, so a script added later is
+covered the day it lands rather than the day someone remembers to extend this block.
+
+Falsifiable against the tree it replaces: five of the seven were `100644` on `main` at
+0fbf2b9 — `owned.py`, `peer.py`, `me.py`, `occupant.py` and `cmux-surface.py`, i.e. every
+script that answers a lookup, while the watcher and the guard hook were already
+executable. Running this block there prints five `FAIL` lines and exits 1.
+
 ### 7g. Every fence binds what it spends — *static*
 
 The second check here that needs no worker and no host, and it exists because the
