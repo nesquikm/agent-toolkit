@@ -1882,6 +1882,80 @@ Raise the expected number only with a reason written beside it, and never by edi
 number alone: the failure this catches never announces itself, so the count is the only
 thing standing between a silent empty capture and a supervisor acting on it.
 
+### 7i. The input-box emptiness probe — *static*
+
+No worker, no host, no network: it builds the three prompt lines that matter and checks
+the shipped probe answers each correctly. It exists because the naive test this replaced
+was wrong for a full release cycle and nothing could have noticed — it fails by reporting
+a box occupied, so a chain stalls rather than corrupts, and a stall reads as a worker
+being slow.
+
+```bash
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$$-boxprobe"; mkdir -p "$D"
+printf '\u276f\u00a0     \n' > "$D/empty-nbsp.txt"
+printf '\u276f      \n'       > "$D/empty-plain.txt"
+printf '\u276f\u00a0/some-slash-command arg\n' > "$D/occupied.txt"
+: > "$D/nothing.txt"
+P='import sys,unicodedata
+raw = sys.stdin.read().splitlines()
+if not raw: print("NO CAPTURE"); sys.exit(2)
+line = raw[-1]
+body = line.split("\u276f", 1)[1] if "\u276f" in line else line
+vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
+print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
+for f in empty-nbsp empty-plain occupied nothing; do
+  printf '  %-12s -> %s\n' "$f" "$(python3 -c "$P" < "$D/$f.txt")"
+done
+# and the naive pattern must not be PRESCRIBED -- i.e. must not appear inside a fence.
+# Naming it in prose as the thing that does not work is the point, so scan fences only.
+python3 - <<'FENCE'
+import glob, re
+hits = []
+for path in glob.glob("plugins/agent-toolkit/skills/spawn-agent/**/*.md", recursive=True):
+    inside = False
+    for i, line in enumerate(open(path, encoding="utf-8"), 1):
+        if line.startswith("```"):
+            inside = not inside
+            continue
+        if inside and re.search(r"\u276f \*\$", line):
+            hits.append(f"{path}:{i}")
+print("  FAIL naive pattern prescribed: " + ", ".join(hits) if hits
+      else "  naive pattern: named in prose only (correct)")
+FENCE
+rm -rf "$D"
+```
+
+PASS on exactly:
+
+```
+  empty-nbsp   -> EMPTY
+  empty-plain  -> EMPTY
+  occupied     -> OCCUPIED '/some-slash-commandarg'
+  nothing      -> NO CAPTURE
+  naive pattern: named in prose only (correct)
+```
+
+**`empty-nbsp` is the whole point.** cmux draws U+00A0 after the `❯`, so
+`grep -qE "❯ *$"` answers NO-MATCH on a box that is genuinely empty — measured
+2026-09-16 against a capture of the real line. Run that pattern against this fixture and
+it fails; run the shipped probe and it does not.
+
+**`empty-plain` must pass too, and it is not redundant.** A probe that keyed on U+00A0
+specifically would answer this one wrong, and an ordinary space is what every other
+terminal draws. The shipped form classifies by Unicode category `Zs`, which covers both —
+and U+202F and U+2007, the next two candidates.
+
+**`nothing` is distinct from `EMPTY` on purpose.** A read that returned nothing is not a
+box that is empty, and collapsing the two would let a saturated or failed capture read as
+a clean box.
+
+**Do not "simplify" this to a grep.** Which characters `[[:space:]]` covers, and whether
+`-P` exists, depend on which `grep` is installed: measured the same day, this machine's
+`grep` is ugrep 7.8.4, where `[[:space:]]` matches U+00A0 even under `LC_ALL=C` and `-P`
+works — and BSD and GNU `grep` do not agree with it or each other. A guard repaired
+against the `grep` you happen to have is the same defect with a longer fuse, which is why
+the fix went to `python3`, this repo's only scripting dependency.
+
 ## 8. The task, the address, and the reply — *core*
 
 Send the task as a `SendMessage` to the address `python3 "$P" "<NAME>"` printed, with

@@ -1659,6 +1659,50 @@ suggested-follow-up ghost text in the prompt exactly like real input, and a queu
 peer message sits there too. Neither is pending user input, and pressing `enter`
 on either submits it. Judge from the dialog, not from the prompt line.
 
+**Where there is no dialog, prove the box is empty before you type NEW text into a
+worker** — a task, a chain step, a slash command. Never before *answering* a dialog:
+a `SendMessage` to a blocked worker returns `success: true` and then sits in that same
+box as queued text, so an emptiness precondition applied there would forbid the `enter`
+that unblocks it, and this skill would lose the ability to unstick workers at all.
+
+**The obvious test is broken, and it fails in the direction that stalls a chain.**
+cmux draws a **non-breaking space (U+00A0)** after the `❯`, so a guard written
+`grep -qE "❯ *$"` never matches a box that is in fact empty — reproduced 2026-09-16
+against a capture of the real prompt line: NO-MATCH on the empty box, MATCH on the same
+line with an ordinary space. It reports occupied, you decline to send, and nothing
+anywhere reports a fault.
+
+**Do not reach for a different `grep` pattern.** Which characters `[[:space:]]` covers,
+and whether `-P` exists at all, depend on *which* `grep` is installed: measured the same
+day on this machine, `grep` is ugrep 7.8.4, where `[[:space:]]` matches U+00A0 even under
+`LC_ALL=C` and `-P` is available — and BSD and GNU `grep` answer differently. A guard
+that looks repaired on the machine you tested is the same defect with a longer fuse.
+
+**Classify by Unicode category instead**, which is implementation-independent and needs
+only `python3`. Pipe your host file's read command into this:
+
+```bash
+| python3 -c 'import sys,unicodedata
+raw = sys.stdin.read().splitlines()
+if not raw: print("NO CAPTURE"); sys.exit(2)
+line = raw[-1]
+body = line.split("❯", 1)[1] if "❯" in line else line
+vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
+print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
+```
+
+Three things about that shape are deliberate. `Zs` covers U+0020 and U+00A0 alike — and
+U+202F and U+2007, the next two surprises — so it is proof against the *class* rather
+than against the one character that has bitten so far. It reads the **last line of the
+capture**, not the last line containing a `❯`, because the chevron is also every dialog's
+selection marker and a saturated read may not carry the prompt line at all. And
+`NO CAPTURE` is distinct from `EMPTY`, because a read that returned nothing is not a box
+that is empty.
+
+**Emptiness is not readiness.** A worker blocked on an open dialog can have an empty
+box; this answers "would `enter` submit something", never "is this worker free". The
+dialog rule above is still the one that decides that.
+
 ## Chain stages
 
 Same session, next task — context carries over, so use this when the next stage

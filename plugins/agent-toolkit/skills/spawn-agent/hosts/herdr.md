@@ -472,6 +472,25 @@ herdr agent read "$NAME" --source recent-unwrapped --lines 200
 herdr pane read  "$L1"   --source recent-unwrapped --lines 200
 ```
 
+**Is the input box empty?** `SKILL.md` has the rule and why the obvious `grep` cannot
+answer it; this is the read that feeds it. Use the **pane** form and `--source visible`,
+per the rule above that `$L1` cannot drift while `"$NAME"` is a lookup in a registry the
+whole machine writes to:
+
+```bash
+herdr pane read "$L1" --source visible | python3 -c 'import sys,unicodedata
+raw = sys.stdin.read().splitlines()
+if not raw: print("NO CAPTURE"); sys.exit(2)
+line = raw[-1]
+body = line.split("❯", 1)[1] if "❯" in line else line
+vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
+print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
+```
+
+`EMPTY` means `enter` would submit nothing. `OCCUPIED` prints what it found. Note
+`visible` carries herdr's own `agent_not_idle` caveat documented below — a busy worker's
+viewport is a moving target, so read it when you are about to type, not minutes before.
+
 Sources: `visible` is the rendered viewport, `recent` is recent output including soft
 wraps, `recent-unwrapped` joins soft wraps (prefer it for logs and transcripts), and
 `detection` is the plain-text snapshot herdr's own agent classifier reads. Add

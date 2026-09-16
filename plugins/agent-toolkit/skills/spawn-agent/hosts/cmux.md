@@ -324,6 +324,29 @@ REF=$(python3 "$S" "$l1" ref)
 cmux read-screen --workspace "$WS" --surface "$REF"
 ```
 
+**Is the input box empty?** `SKILL.md` has the rule and why the obvious `grep` cannot
+answer it; this is the read that feeds it. Use `visible` — the rendered viewport is what
+holds the prompt line:
+
+```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+WS="$CMUX_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
+REF=$(python3 "$S" "$l1" ref)
+[ -n "$REF" ] || { echo "that surface is gone" >&2; exit 1; }
+cmux read-screen --workspace "$WS" --surface "$REF" | python3 -c 'import sys,unicodedata
+raw = sys.stdin.read().splitlines()
+if not raw: print("NO CAPTURE"); sys.exit(2)
+line = raw[-1]
+body = line.split("❯", 1)[1] if "❯" in line else line
+vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
+print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
+```
+
+`EMPTY` means `enter` would submit nothing. `OCCUPIED` prints what it found, so you can
+see whether it is ghost text, a queued peer message, or the command you just sent and
+have not pressed `enter` on yet — three states this cannot tell apart for you, and the
+last of which you must not clear.
+
 **Resolve `$l1` here rather than reusing `$SURF`.** `$SURF` was assigned in the
 placement call, in a different `Bash` call, and shell state does not survive one —
 so by the time you read a screen it is empty, and an empty `--surface` is the
