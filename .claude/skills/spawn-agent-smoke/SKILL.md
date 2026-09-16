@@ -151,15 +151,26 @@ Subagents are the one part of the old model left standing: they inherit their ho
 text, so re-running this inside a `Task` refreshes nothing. That was verified
 2026-08-09 and has not been re-measured since.
 
-**Only `SKILL.md` is snapshotted.** Everything else the skill ships — `lib/*.py`,
-`hosts/*.md`, `hosts/*.py` — is opened at use time, by `Read` or by `python3`, so it is
-always the current bytes on disk. Their mtimes are deliberately excluded below;
-including them would fail sessions that are perfectly current, and the gate would then
-be wrong in the *safe* direction, which is still wrong.
+**Only `SKILL.md` goes through the roster at all.** Everything else the skill ships —
+`lib/*.py`, `hosts/*.md`, `hosts/*.py` — is opened at use time, by `Read` or by
+`python3`, so it is always the current bytes on disk with no refresh in between. Their
+mtimes are deliberately excluded from the clock below; including them would fail sessions
+that are perfectly current, and the gate would then be wrong in the *safe* direction,
+which is still wrong.
 
-That split is worth holding onto when you are iterating: an edit to a **host file**
-takes effect in the session you are already in, while an edit to **`SKILL.md`** needs a
-new `claude`.
+**Both halves reach the session you are already in; they differ only in when.** A host
+file or a script is current the instant you read it. An existing `SKILL.md` is current
+after the next roster refresh, which happens on its own while the session runs and
+announces nothing — so an edit you just made is normally served, and grepping the text
+you were handed for a marker you wrote is how you know rather than guess. The one case
+that genuinely waits is a **brand-new** skill, which answers `Unknown skill` until the
+roster next picks it up.
+
+The sentence that used to sit here said an edit to `SKILL.md` "needs a new `claude`".
+That is the falsified premise this section opens by retiring, and it survived thirty
+lines below its own correction — which is the more useful lesson than either version of
+the rule: when a measurement reverses a rule, the rule is usually written down in more
+than one place.
 
 ```bash
 python3 - "<the plugin root check 0a printed>" $$ <<'PY'
