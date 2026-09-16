@@ -340,6 +340,10 @@ join is the controlling terminal — the host names the tty, `ps` names the proc
 
 ```bash
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 python3 "$OC" "<the slot's tty>" "$LEDGER" "$NAME" || exit 1   # 0 is the only pass
 ```
 
@@ -797,6 +801,10 @@ doing is the difference between a watcher and a post-mortem.
 
 ```bash
 O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 n=0
 until python3 "$O" "$LEDGER" "$NAME" >/dev/null; do
   s=$?
@@ -1110,6 +1118,11 @@ reply and it has not come.** Before re-sending, ask whether the worker is idle a
 look at what it actually did:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 python3 "$O" "$LEDGER" "$NAME" status     # idle, with no reply in hand, is the signature
 ```
 
@@ -1830,6 +1843,12 @@ When the last stage is reported, the ledger rows are spent slots. Resolve each
 one, then **offer** — cleanup is a proposal, never a side effect of finishing:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+
 # Re-derive the host here. $SPAWN_HOST died with the setup block's shell, exactly like
 # $CALLER_SLOT -- and the comparison's other side must come from the process
 # environment, never from the file, or the check compares the ledger against itself.

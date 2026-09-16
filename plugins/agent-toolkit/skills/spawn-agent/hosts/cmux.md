@@ -102,6 +102,8 @@ Never reach for `focus-pane` or `focus-panel` to tidy up afterwards — they ste
 the user's keyboard mid-keystroke. Place the surface correctly instead.
 
 ```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 # Reuse this run's agents pane. UUIDs are the durable key; refs are per-call.
 # Every distinct pane this run owns, newest first -- not just the last row's. If the
 # newest worker's tab was closed and it was that pane's last surface, the tail row
@@ -146,6 +148,7 @@ could reach another host's resolver by a *scan* rather than at teardown.
 Then resolve both locators for the ledger row (`SKILL.md`, "Spawn one agent", step 2):
 
 ```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 L1=$(python3 "$S" "$SURF" id)
 L2=$(python3 "$S" "$SURF" pane_id)
 ```
@@ -226,8 +229,17 @@ which is the measurement that matters here: a warning is demonstrably not a cont
 **Verify instead of trusting:**
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 python3 "$O" "$LEDGER" "$NAME" cwd        # must print $REPO
 ```
+
+**Re-bind here, as everywhere.** `$O` and `$LEDGER` were bound in earlier blocks and
+died with them, and an unbound pair does not fail loudly: `python3 "" …` prints nothing
+on stdout, so a check whose whole output is a path comes back empty — which looks like
+a worker with no cwd rather than like a check that never ran. `$NAME` is the one this
+block cannot re-derive for you; carry it from the row you are verifying.
 
 **And the verification is self-concealing in the same way the bug is.** It has power
 only when `$REPO` differs from the caller's own cwd. On the third occurrence it
@@ -338,6 +350,8 @@ resolve the ref into a variable, refuse an empty one, and run the occupant check
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 REF=$(python3 "$S" "$l1" ref)
 [ -n "$REF" ] || { echo "that worker's surface is gone; not sending keys" >&2; exit 1; }
 python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
@@ -402,6 +416,8 @@ straight into `--surface`.**
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 REF=$(python3 "$S" "$l1" ref)
 [ -n "$REF" ] || { echo "that worker's surface is gone; not sending keys" >&2; exit 1; }
 python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
@@ -449,6 +465,8 @@ For a slash command, text then Enter, as two calls:
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 REF=$(python3 "$S" "$l1" ref)
 [ -n "$REF" ] || { echo "that worker's surface is gone" >&2; exit 1; }
 python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
@@ -470,6 +488,15 @@ classes.
 ## 7. Close what the run opened
 
 ```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+WS="$CMUX_WORKSPACE_ID"
+CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || { echo "no surface id" >&2; exit 1; }
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+[ -f "$S" ] && [ -f "$O" ] || {
+  echo "resolver/registry path unbound -- cannot tell a closed tab from a lost variable; not closing, not pruning" >&2
+  exit 1; }
 ref=$(python3 "$S" "$l1" ref)
 reg=$(python3 "$O" "$LEDGER" "$name" status)
 [ -n "$ref" ] || [ -z "$reg" ] || {
@@ -494,6 +521,27 @@ cmux close-surface --workspace "$WS" --surface "$ref"
   the worker still answers — that row is broken or cmux restarted, and it is not a
   finished worker. The original `exit 0` survives underneath it, for the case that
   really is a closed tab.
+- **There are at least seven causes, not four, and three of them are the resolver
+  failing before it ever looks at a surface.** `cmux-surface.py` also prints and exits 1
+  when `CMUX_WORKSPACE_ID` is unset, when it is given the wrong number of arguments, and
+  when `cmux tree` itself fails — a daemon that is down, a workspace that was deleted.
+  Each returns an empty capture that is byte-identical to "the tab is gone".
+- **The seventh is this block's own doing, and until 2026-09-16 it was the likeliest.**
+  `$S` and `$O` are bound in *earlier* blocks and variables die with the `Bash` call, so
+  this fence used to open with neither — `python3 "" …` twice, two empty captures, and
+  `[ -n "$ref" ] || [ -z "$reg" ]` short-circuits true on the second term, so the
+  refusal never runs and control reaches `already gone; closing nothing`. Reproduced:
+  a leaked slot reported as a clean finish, with nothing in the transcript naming a
+  fault. The bindings at the top of the fence are the fix; the `[ -f "$S" ]` pair is the
+  backstop, and it is `-f` rather than `-x` because these scripts are run through
+  `python3` and a mode test would be answering a different question.
+- **The discriminator you already have is the stderr next to the empty capture.** A
+  command substitution swallows stdout, never stderr, so in a `Bash` call every one of
+  those causes has already printed its own reason — `CMUX_WORKSPACE_ID is not set`, a
+  usage line, a `cmux tree` error, or `can't find '__main__' module` for the unbound
+  path. Read it before concluding anything from the empty string. Only the genuinely
+  closed surface is silent, which is exactly the discrimination the empty value cannot
+  make on its own.
 - **This close is not reachable from a supervisor that is not in cmux, and that is why
   `SKILL.md`'s teardown table refuses a `cmux` row read from herdr.** Every command in
   this section passes `--workspace "$WS"`, bound from `$CMUX_WORKSPACE_ID` — which

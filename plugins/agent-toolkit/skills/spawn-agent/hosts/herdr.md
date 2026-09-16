@@ -223,8 +223,16 @@ your syntax, exit 1 is *herdr understood you and refused*. Never retry an exit 1
 verifies its `cd` — the flag is easy to omit and nothing else catches it:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 python3 "$O" "$LEDGER" "$NAME" cwd        # must be $REPO
 ```
+
+**Re-bind here, as everywhere.** `$O` and `$LEDGER` died with the block that bound
+them, and an unbound pair prints nothing rather than failing — a check whose entire
+output is a path then comes back empty, which reads as a worker with no cwd instead of
+as a check that never ran.
 
 Compare as paths, not strings: on macOS `$TMPDIR` carries a trailing slash and `/var`
 is a symlink to `/private/var`, so a healthy run prints two visibly different strings.
@@ -364,6 +372,8 @@ so, and it is the one that works before the worker has registered anything:
 
 ```bash
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 SHPID=$(herdr pane process-info --pane "$l1" | python3 -c '
 import json,sys
 print(json.load(sys.stdin)["result"]["process_info"]["shell_pid"])')
@@ -602,6 +612,10 @@ column 7 — for a cmux locator handed to it by a cross-host run. Ask the regist
 is host-independent, before you believe it:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+[ -f "$O" ] || { echo "registry path unbound -- not closing, not pruning" >&2; exit 1; }
 reg=$(python3 "$O" "$LEDGER" "$name" status)
 herdr pane get "$l1" >/dev/null 2>&1 || [ -z "$reg" ] || {
   echo "$name: tagged herdr, pane_not_found for $l1, and the registry still answers '$reg' -- a broken row or a restarted server, not a finished worker. Not closing, not pruning." >&2

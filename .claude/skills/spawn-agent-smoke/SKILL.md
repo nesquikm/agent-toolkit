@@ -1683,6 +1683,67 @@ it reports `total=2 bridged=0 plain=2` and exits 1; against a tree whose plain l
 were given the flag it reports `bridged=4 plain=0` and exits 1. A check that cannot
 fail is not a check, and this one fails on each defect separately.
 
+### 7g. Every fence binds what it spends — *static*
+
+The second check here that needs no worker and no host, and it exists because the
+failure it catches is **silent**. A `Bash` call gets a fresh shell, so a fence that
+consumes `$O`, `$OC`, `$S` or `$LEDGER` without binding them first runs
+`python3 "" …`, which prints nothing on stdout and exits 1. Every caller in this plugin
+reads an empty capture as an *answer*: teardown reads it as "the tab is already gone"
+and reports a leaked slot as a clean finish; the cwd verification reads it as a worker
+with no cwd; the readiness loop gets `owned.py` exit 2, which sits **below** its
+`-ge 3` stop threshold, so it spins all sixty iterations and blames the worker.
+
+```bash
+python3 - <<'EOF'
+import re, sys
+root = "plugins/agent-toolkit/skills/spawn-agent"
+files = [f"{root}/SKILL.md", f"{root}/hosts/cmux.md", f"{root}/hosts/herdr.md"]
+VARS = ("O", "OC", "S", "LEDGER")
+bad = []
+for path in files:
+    lines = open(path, encoding="utf-8").read().split("\n")
+    inside, start, buf = False, 0, []
+    for i, line in enumerate(lines, 1):
+        if line.startswith("```"):
+            if not inside:
+                inside, start, buf = True, i, []
+            else:
+                inside = False
+                body = "\n".join(buf)
+                uses = {v for v in VARS if re.search(r"\$\{?" + v + r'[}"\s/]', body)}
+                binds = {v for v in uses if re.search(r"^\s*" + v + r"=", body, re.M)}
+                if uses - binds:
+                    bad.append(f"{path}:{start} spends {sorted(uses - binds)} without binding")
+            continue
+        if inside:
+            buf.append(line)
+for b in bad:
+    print(" ", b)
+print("unbound fences:", len(bad))
+sys.exit(0 if len(bad) == 2 else 1)
+EOF
+```
+
+**PASS is exactly two**, and both are named rather than tolerated:
+
+- the `owned.py` usage examples under "Address workers by `uds:`" — `$LEDGER` there is a
+  placeholder in a block whose purpose is to show the argument shape, and the exit-code
+  table directly beneath it is where an empty one is explained;
+- the mint block, whose `$LEDGER` is spent as `>> "$LEDGER"`. That one fails **loudly** —
+  measured, `bash: : No such file or directory`, exit 1 — so it is not in this check's
+  class. The class is a silent empty capture, not a redirect that refuses.
+
+**Falsifiable against the tree it replaces.** Run against `main` at 0fbf2b9 it reports
+**sixteen** — measured 2026-09-16 in a throwaway worktree — and fourteen of those are
+blocks a supervisor is told to run verbatim, including cmux teardown §7 (which spent all
+four), both hosts' cwd verification, herdr's pane-vs-registry check, the readiness loop,
+the "am I owed a reply" probe and the teardown loop that drives the host close section.
+
+Raise the expected number only with a reason written beside it, and never by editing the
+number alone: the failure this catches never announces itself, so the count is the only
+thing standing between a silent empty capture and a supervisor acting on it.
+
 ## 8. The task, the address, and the reply — *core*
 
 Send the task as a `SendMessage` to the address `python3 "$P" "<NAME>"` printed, with
