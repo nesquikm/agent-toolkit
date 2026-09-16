@@ -1180,8 +1180,39 @@ command.
 
 Arm **one** of these right after the first spawn — always, including for a run of
 exactly one worker. It covers every worker in the run, including ones spawned
-later, because it re-reads the ledger on every poll. Pass `persistent: true` for a
-run that may outlast a single Monitor timeout.
+later, because it re-reads the ledger on every poll.
+
+**Arm it with `timeout_ms: 1800000`, and expect expiry on any run longer than half an
+hour.** That is the ceiling: the tool caps anything larger, so a bigger number is not a
+longer watch, it is the same watch written misleadingly. `timeout_ms` is also the
+parameter this tool takes — it is required and there is no `persistent`, so an arm that
+names the wrong key is a rejected call rather than a watcher with a different lifetime.
+Expiry is not a fault: you are notified, and you re-arm and keep going.
+
+**A re-armed watcher starts with no memory of any worker, and that costs you exactly the
+signals worth having.** A worker still blocked is reported again, because first sight of
+`ask` or `attn` prints. A worker that is merely `busy` or `idle` is re-learned in
+silence — so a turn that *ended* during the gap yields no line at all, neither a late
+`DONE` nor the `GATE` that would have carried its question, and a worker that *died* in
+the gap never gets a `GONE`, because absence is computed only over workers this process
+has already seen alive.
+
+That is the anti-fabrication property below working as designed, and it is why the
+watcher is not the recovery path — **the ledger is.** On every re-arm, read the rows you
+have not yet reported:
+
+```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+awk -F'\t' -v c=4 '$c!="reported"' "$LEDGER"
+```
+
+Reconcile each of those against that worker's own reply, or against its screen where no
+reply came, rather than waiting for a line that will never arrive. **Do this before
+teardown step 3**, which deletes the ledger — the recovery path and the thing being
+recovered from are the same file.
 
 **That block is the `Monitor` tool's `command` — never a `Bash` call.** It is
 written in shell, so backgrounding it with `Bash(run_in_background: true)` looks
@@ -1980,10 +2011,9 @@ agent from an earlier session.
 
 ### Finish the run — four steps, in this order
 
-Closing the slots is not the end. The watcher is a *process*, and a `Monitor`
-armed with `persistent: true` runs until `TaskStop` or the end of the session that
-armed it — and **if you are yourself a spawned agent, your session ending does not
-reap it.** Observed: an agent finished, its slot was closed, and its watcher was
+Closing the slots is not the end. The watcher is a *process*, and a `Monitor` runs
+until `TaskStop` or until its `timeout_ms` expires, whichever comes first — and **if you
+are yourself a spawned agent, your session ending does not reap it.** Observed: an agent finished, its slot was closed, and its watcher was
 still polling.
 
 **Stop it first, before you close anything.** Once every worker has been reported the

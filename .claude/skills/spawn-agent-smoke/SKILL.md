@@ -1171,6 +1171,35 @@ Both green runs on 2026-08-12, one on cmux and one on herdr, chose 180 s indepen
 and both saw the single line at about 30 s, leaving two full minutes of quiet as
 evidence rather than as an unmeasured gap.
 
+**And assert the shipped arm block names the parameter that exists.** Static, no worker,
+no `Monitor` — it reads the text a supervisor is about to follow:
+
+```bash
+K=plugins/agent-toolkit/skills/spawn-agent/SKILL.md
+grep -c 'timeout_ms' "$K"
+grep -c 'persistent: true' "$K"
+```
+
+PASS is a non-zero first number and a **zero** second one. Both halves are the assertion.
+`Monitor`'s schema is `required: ["description","timeout_ms"]` with
+`additionalProperties: false` and no `persistent` anywhere — re-read off the loaded tool
+on 2026-09-16 — so a skill that told you to pass `persistent: true` was naming a key that
+makes the call *rejected*, and naming no key for the one thing that governs how long the
+watch lives. It shipped that way for long enough that the 30-minute expiry it produces
+was being read as a watcher that died.
+
+Note what this check deliberately does **not** do: it does not re-measure the cap. The
+tool documents `1800000` as the ceiling and clamps anything above it silently, so a
+check that armed a `Monitor` for longer and timed how long it lived would take half an
+hour to tell you something the schema states.
+
+**The run's own watcher takes a timeout too, and the suite used to name one only here.**
+This check's 180 s belongs to the *deaf* watcher; checks 7 and 9 arm the real one and
+stated no timeout at all, which is how a run of this suite could never observe the
+expiry that the field hit. Arm that one at `1800000` — the same value the skill now
+tells a supervisor to use — so the suite exercises the shipped instruction rather than a
+shorter one written only for the deaf case.
+
 Keep the task id. Checks 11 and 12 both need it -- 11 reads its lines, 12 stops it.
 
 ## 6. Rails for everything below this line
