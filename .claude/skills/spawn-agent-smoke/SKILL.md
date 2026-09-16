@@ -1698,6 +1698,37 @@ cosmetics and warns that "the trap is the fixing"; the trap here is the mirror i
 an equality assertion that turns the one check proving this plugin's most-repeated bug
 is fixed into a guaranteed FAIL on every machine with a `$TMPDIR`.
 
+**Then assert column 6 is a digit — this is the half a rescued worker used to lose.**
+
+```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot"; exit 1; }
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+awk -F'\t' -v c=6 -v k=1 -v want="<NAME>" '$k==want {print "  col6=[" $c "]"}' "$LEDGER"
+```
+
+PASS is `col6=[<some digits>]`. A `col6=[-]` is the defect: the worker this check just
+rescued cleared its gate, registered, and is answering — and its row still says nobody
+pinned it.
+
+**Why the gate path is the only one that reaches it.** The pin lives at the end of the
+readiness block behind `[ -n "$PID" ]`, and a worker parked on the folder-trust gate has
+registered nothing, so `owned.py` exits 1, the pid is empty and the pin is skipped. Every
+worker that clears readiness normally is pinned and never sees this. 7e is the one check
+in the suite that deliberately produces a gated worker, which makes it the only place the
+assertion can be made at all.
+
+**What the `-` costs is a three-way disagreement, and it is why this is worth a line.**
+`-` is truthy, so the row takes the minted-id path; after a `/clear` rotates the session
+id, `owned.py` answers exit 3 on the run's own worker — the stop that forbids sending,
+keying and closing it — the `SendMessage` guard hook misses on the same column and starts
+asking on every message, while `occupant.py` joins on argv, which `/clear` does not
+touch, and keeps answering 0. Check 11f's `/clear` fixture cannot catch any of it: it
+writes `os.getpid()` into column 6, so it only ever exercises the pinned path.
+
+Falsifiable against the tree it replaces: before 2026-09-16 nothing re-pinned after the
+gate cleared, so this block printed `col6=[-]` on every run that took the gate branch.
+
 ### 7f. Remote control is opt-in — both sides, all four sites — *static*
 
 The one check in this file that needs no worker, no host and no network: it reads the
@@ -1754,7 +1785,7 @@ R=plugins/agent-toolkit
 bad=0
 for f in $(find "$R" -name '*.py' -not -path '*__pycache__*' | sort); do
   head -1 "$f" | grep -q '^#!' || continue
-  m=$(git ls-files -s "$f" | awk '{print $1}')
+  m=$(git ls-files -s "$f" | awk -v c=1 '{print $c}')   # -v c, never a bare dollar-one
   [ "$m" = 100755 ] || { echo "  FAIL $f is $m, expected 100755"; bad=1; }
 done
 echo "  checked $(find "$R" -name '*.py' -not -path '*__pycache__*' | wc -l | tr -d ' ') scripts"

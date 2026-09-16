@@ -300,11 +300,21 @@ def is_ours(rec, ident):
     can falsify.
 
     Note also that `-` is TRUTHY, so an unpinned row takes the minted-id path
-    rather than the legacy one and its worker would stop matching if it later ran
-    `/clear`. That is unreachable rather than handled — a row is unpinned only
-    until its worker registers, and a rotation cannot precede that — but `-`
-    reads as "no pid" to everyone who meets it, so it is written down here rather
-    than left to be re-derived.
+    rather than the legacy one and its worker stops matching if it later runs
+    `/clear`. That is RARE rather than unreachable, and the difference was a
+    measured mistake: this said "a row is unpinned only until its worker
+    registers, and a rotation cannot precede that", which holds for every worker
+    that clears readiness and for no other. A worker parked on the folder-trust
+    gate registers nothing, so the pin at the end of the readiness block is
+    skipped on its empty pid, and until 2026-09-16 nothing re-pinned it -- the
+    rescue procedure sent a keystroke and never came back to column 6. Such a row
+    carries `-` for the life of the run, and a `/clear` after that is the ordinary
+    reachable case, not an impossible one.
+
+    SKILL.md now re-pins at the end of the gate-clearing procedure, which makes it
+    rare again. Do not read that as restoring the old claim: the re-pin is
+    advisory by design (an unregistered worker is simply not pinned yet), so a
+    row can still reach here unpinned and this join must keep handling it.
     """
     minted, pinned = ident
     if not minted and not pinned:

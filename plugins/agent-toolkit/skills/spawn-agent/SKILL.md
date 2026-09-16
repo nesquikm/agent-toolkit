@@ -1825,6 +1825,55 @@ no transcript file at all — zero turns. Three failures in one call, and the ca
 returned success. This is exactly what the registry-based readiness loop prevents, and
 why it is not optional on any host.
 
+**A worker rescued off a gate has never been pinned — pin it now.** The pid lands in
+column 6 inside the readiness block, guarded by `[ -n "$PID" ]`, and a worker parked on a
+gate has registered nothing, so `owned.py` exits 1, `$PID` is empty and the pin is
+skipped. Nothing anywhere re-pins it: the row carries `-` for the rest of the run. Re-run
+the same rewrite once the gate is cleared and the worker has registered — it is the block
+from the readiness step, unchanged, with its bindings re-pasted:
+
+```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+PID=$(python3 "$O" "$LEDGER" "$NAME" pid)
+[ -n "$PID" ] && python3 - "$LEDGER" "$NAME" "$PID" <<'PIN'
+import sys
+led, name, pid = sys.argv[1:4]
+rows = [l.rstrip("\n").split("\t") for l in open(led)]
+for r in rows:
+    if r and r[0] == name and len(r) >= 6:
+        r[5] = pid
+open(led, "w").write("".join("\t".join(r) + "\n" for r in rows if r != [""]))
+PIN
+```
+
+**It is advisory, and it must stay advisory.** The `[ -n "$PID" ]` guard is the whole of
+the error handling: a worker that still has not registered simply is not pinned yet, and
+turning that into a stop would make the rescue path unrecoverable — worse than the defect
+it closes. Run it again later if you like; the rewrite matches the name as a whole field
+and rewrites every row, so repeating it is free.
+
+**What an unpinned row costs is not cosmetic, and it is silent until it is not.** Column
+6 is how a row survives `/clear`, which rotates the worker's session id in about 400 ms
+while its pid, name and socket stay put. With a digit there, the pid re-attaches the row.
+With `-` there is nothing to re-attach by — and `-` is *truthy*, so the row takes the
+minted-id path, the minted id no longer matches, and three shipped readers then disagree
+about one live worker at one instant:
+
+- `owned.py` finds a live session holding the name that it cannot prove is ours, and
+  answers **exit 3** — the hard stop meaning do not send to it, do not key it, do not
+  close it. Your own rescued worker, refused for the rest of the run.
+- the `SendMessage` guard hook does the same re-attach on the same column, misses for the
+  same reason, and returns `ask` on every message to that worker from then on.
+- `occupant.py` falls through to the argv join, which `/clear` does not touch, so it goes
+  on answering **0** for the very same worker.
+
+A guard that refuses and a guard that passes, disagreeing about one worker, is worse than
+either verdict alone.
+
 ## Read a worker's output
 
 Normally you don't have to: the worker's reply carries its findings. When you

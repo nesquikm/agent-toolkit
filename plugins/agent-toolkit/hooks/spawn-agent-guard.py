@@ -305,6 +305,16 @@ def allowed_ids(my_id, sessions):
                     # Column 6, the pid pinned at readiness, re-attaches a worker
                     # whose session id was rotated by /clear. The name must still
                     # agree, so a recycled pid cannot inherit the row.
+                    #
+                    # An UNPINNED row (column 6 == "-") has nothing to re-attach
+                    # by, so a worker rescued off the folder-trust gate -- which
+                    # registers nothing, so the readiness pin is skipped on its
+                    # empty pid -- starts getting `ask` on every send the moment
+                    # it runs /clear. That is this hook agreeing with owned.py's
+                    # exit 3 and disagreeing with occupant.py, which joins on
+                    # argv and does not notice. SKILL.md re-pins at the end of
+                    # the gate-clearing procedure to keep the state rare; it is
+                    # advisory there, so this miss stays reachable by design.
                     pid = cols[5].strip() if len(cols) >= 6 else ""
                     rec = by_pid.get(pid)
                     if rec is not None and rec.get("name") == cols[0].strip():
