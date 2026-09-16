@@ -110,6 +110,7 @@ produce unusably narrow columns, which caps a pane fan-out at two or three; tabs
 no such cap. And the user reads a fan-out by its labels either way.
 
 ```bash
+WS="$HERDR_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
 # One tab per worker. --cwd and --label are both load-bearing; see below.
 OUT=$(herdr tab create --workspace "$WS" --cwd "$REPO" --label "$NAME" --no-focus)
 L1=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')

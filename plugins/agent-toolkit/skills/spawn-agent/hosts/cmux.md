@@ -102,6 +102,7 @@ Never reach for `focus-pane` or `focus-panel` to tidy up afterwards — they ste
 the user's keyboard mid-keystroke. Place the surface correctly instead.
 
 ```bash
+WS="$CMUX_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
 CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 # Reuse this run's agents pane. UUIDs are the durable key; refs are per-call.
@@ -149,9 +150,20 @@ Then resolve both locators for the ledger row (`SKILL.md`, "Spawn one agent", st
 
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+SURF="<paste the ref the placement call printed>"
+[ -n "$SURF" ] || { echo "no surface ref to resolve" >&2; exit 1; }
 L1=$(python3 "$S" "$SURF" id)
 L2=$(python3 "$S" "$SURF" pane_id)
+[ -n "$L1" ] && [ -n "$L2" ] || { echo "surface did not resolve; do not write a row" >&2; exit 1; }
 ```
+
+**`$SURF` is the one value on this page you cannot re-derive, so it is pasted rather
+than re-bound.** Every other block here rebuilds its variables from the process
+environment or from the ledger row; this one runs before any row exists, and the only
+thing that names the surface just created is the string the placement call printed.
+Carry it literally. Left unbound it resolves to nothing, both locators come back empty,
+and the guard above is what stops an empty pair being written into a row that teardown
+would later read as "already gone".
 
 A new surface lands **after the selected tab**, not at the end, so never infer which
 worker is which from tab order. The tab title is the name (`⠂ audit-api`), which is
@@ -306,6 +318,7 @@ not choose — which is the join key. Spawn terminals.
 
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+WS="$CMUX_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
 REF=$(python3 "$S" "$l1" ref)
 [ -n "$REF" ] || { echo "that surface is gone" >&2; exit 1; }
 cmux read-screen --workspace "$WS" --surface "$REF"
@@ -356,6 +369,9 @@ f="--scrollback --lines 200"
 cmux read-screen --workspace "$WS" --surface "$REF" $f   # Error: unexpected arguments
 ```
 
+(That block is an illustration of a quoting failure, not a recipe — `$WS` and `$REF`
+would need the usual preamble before it could run at all.)
+
 **zsh does not word-split an unquoted parameter expansion**; bash does. So `$f` arrives
 as a *single* argv word — the literal string `--scrollback --lines 200` — which cmux is
 right to reject. Reproduced deliberately 2026-08-27: exit 1 with that exact message,
@@ -389,6 +405,7 @@ resolve the ref into a variable, refuse an empty one, and run the occupant check
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+WS="$CMUX_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
 CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 REF=$(python3 "$S" "$l1" ref)
@@ -455,6 +472,7 @@ straight into `--surface`.**
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+WS="$CMUX_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
 CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 REF=$(python3 "$S" "$l1" ref)
@@ -504,6 +522,7 @@ For a slash command, text then Enter, as two calls:
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+WS="$CMUX_WORKSPACE_ID"
 CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
 LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 REF=$(python3 "$S" "$l1" ref)
@@ -512,8 +531,30 @@ python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
 cmux send --workspace "$WS" --surface "$REF" "/spec-write <what to write up>"
 ```
 ```bash
+S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
+OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+WS="$CMUX_WORKSPACE_ID"
+CALLER_SLOT="$CMUX_SURFACE_ID"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+REF=$(python3 "$S" "$l1" ref)
+[ -n "$REF" ] || { echo "that worker's surface is gone" >&2; exit 1; }
+python3 "$OC" "$(python3 "$S" "$l1" tty)" "$LEDGER" "$NAME" || exit 1
 cmux send-key --workspace "$WS" --surface "$REF" enter
 ```
+
+**The second block repeats all eight lines, and until 2026-09-16 it repeated none of
+them.** It is a separate `Bash` call by requirement — one `send-key` per call — so
+`$WS` and `$REF` are both empty in it, and both flags then take their documented
+default of the **caller's own**. That made this the one worked example in the file
+whose keystroke is an irreversible *submit*: an Enter into the supervisor's own Claude
+Code session, submitting whatever was sitting in its input box. Every other keystroke
+block here already carried the preamble; this was the exception, 21 lines below the rule
+that covers it.
+
+`$WS` is the half that is easy to drop from the repeat. It is bound once at the top of
+this file from `$CMUX_WORKSPACE_ID` and dies with that shell like anything else, so a
+four-line repeat that restores `$REF` and forgets `$WS` still sends into the caller's
+workspace.
 
 **`cmux send` delivers work, so it needs the same ownership check `SendMessage`
 gets — and it will not get one for free.** A `PreToolUse` hook on `SendMessage` does

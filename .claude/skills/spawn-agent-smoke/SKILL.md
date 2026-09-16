@@ -1706,20 +1706,28 @@ fail is not a check, and this one fails on each defect separately.
 ### 7g. Every fence binds what it spends — *static*
 
 The second check here that needs no worker and no host, and it exists because the
-failure it catches is **silent**. A `Bash` call gets a fresh shell, so a fence that
-consumes `$O`, `$OC`, `$S` or `$LEDGER` without binding them first runs
-`python3 "" …`, which prints nothing on stdout and exits 1. Every caller in this plugin
-reads an empty capture as an *answer*: teardown reads it as "the tab is already gone"
-and reports a leaked slot as a clean finish; the cwd verification reads it as a worker
-with no cwd; the readiness loop gets `owned.py` exit 2, which sits **below** its
-`-ge 3` stop threshold, so it spins all sixty iterations and blames the worker.
+failure it catches is **silent on both halves**. A `Bash` call gets a fresh shell, so a
+fence that spends a helper path, the ledger or a host target without binding it first is
+running against empty strings.
+
+Spent on a *script*, an empty value prints nothing on stdout and exits 1 — and every
+caller in this plugin reads an empty capture as an **answer**. Teardown reads it as "the
+tab is already gone" and reports a leaked slot as a clean finish. The cwd verification
+reads it as a worker with no cwd. The readiness loop gets `owned.py` exit 2, which sits
+*below* its own `-ge 3` stop threshold, so it spins all sixty iterations and blames the
+worker.
+
+Spent on a **host flag** it is worse, because there the value is not treated as empty at
+all: `--workspace ""` and `--surface ""` both take their documented default of the
+*caller's own*. The command succeeds, exits 0, and lands on the supervisor — which is
+how a launch line gets submitted into the session that was trying to spawn a worker.
 
 ```bash
 python3 - <<'EOF'
 import re, sys
 root = "plugins/agent-toolkit/skills/spawn-agent"
 files = [f"{root}/SKILL.md", f"{root}/hosts/cmux.md", f"{root}/hosts/herdr.md"]
-VARS = ("O", "OC", "S", "LEDGER")
+VARS = ("O", "OC", "S", "LEDGER", "WS", "REF", "SURF")
 bad = []
 for path in files:
     lines = open(path, encoding="utf-8").read().split("\n")
@@ -1741,24 +1749,26 @@ for path in files:
 for b in bad:
     print(" ", b)
 print("unbound fences:", len(bad))
-sys.exit(0 if len(bad) == 2 else 1)
+sys.exit(0 if len(bad) == 3 else 1)
 EOF
 ```
 
-**PASS is exactly two**, and both are named rather than tolerated:
-
-- the `owned.py` usage examples under "Address workers by `uds:`" — `$LEDGER` there is a
-  placeholder in a block whose purpose is to show the argument shape, and the exit-code
-  table directly beneath it is where an empty one is explained;
-- the mint block, whose `$LEDGER` is spent as `>> "$LEDGER"`. That one fails **loudly** —
-  measured, `bash: : No such file or directory`, exit 1 — so it is not in this check's
-  class. The class is a silent empty capture, not a redirect that refuses.
+**PASS is exactly three**, and each one is named rather than tolerated. Two are
+illustrations whose whole purpose is the argument shape, and both say so in the line
+beneath them: the `owned.py` usage examples under "Address workers by `uds:`", and
+`cmux.md`'s unquoted-`$f` block, which exists to show the error message an unquoted
+option string produces and is not a recipe. The third is the mint block, whose `$LEDGER`
+is spent as `>> "$LEDGER"` — that one fails **loudly**, measured as
+`bash: : No such file or directory`, exit 1 — and this check's class is the silent empty
+capture, not a redirect that refuses.
 
 **Falsifiable against the tree it replaces.** Run against `main` at 0fbf2b9 it reports
-**sixteen** — measured 2026-09-16 in a throwaway worktree — and fourteen of those are
-blocks a supervisor is told to run verbatim, including cmux teardown §7 (which spent all
-four), both hosts' cwd verification, herdr's pane-vs-registry check, the readiness loop,
-the "am I owed a reply" probe and the teardown loop that drives the host close section.
+**twenty-four** — measured 2026-09-16 in a throwaway worktree — and all but three are
+blocks a supervisor is told to run verbatim: cmux teardown §7 (which spent four without
+binding one), all four §4 launch lines, the orphaned `send-key … enter` that submits a
+slash command, both hosts' cwd verification, herdr's pane-vs-registry check, the
+readiness loop, the "am I owed a reply" probe and the teardown loop that drives the host
+close section.
 
 Raise the expected number only with a reason written beside it, and never by editing the
 number alone: the failure this catches never announces itself, so the count is the only
