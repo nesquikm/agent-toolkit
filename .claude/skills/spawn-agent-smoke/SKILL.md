@@ -705,6 +705,50 @@ design and the value in the file is never compared. `ok` therefore tests that a
 *present* sidecar does not block — which is exactly the property `nosidecar` is
 paired against.
 
+### `me.py` must sweep the same profiles — *core*
+
+Every assertion above has a precondition none of them states: `owned.py`'s exit 3 for an
+**owner mismatch** runs only where `me.py` can resolve this session, and until
+2026-09-16 `me.py` was the one script here that looked in a different set of places —
+`CLAUDE_CONFIG_DIR`'s segments, or `~/.claude` when that was unset, and never the
+`~/.claude-*` glob that `peer.py`, `owned.py`, the watcher and the guard hook all sweep.
+A supervisor whose own record sits in a profile `CLAUDE_CONFIG_DIR` does not name
+resolved nothing, and that hard stop went quietly inert.
+
+It reuses 3b's fixture profile and needs one thing none of the rows above do: `me.py`
+resolves its own `claude` ancestor, so no record keyed to the fixture's pid 1 can ever
+match it. The record has to carry the **real** pid.
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+M="<plugin root>/skills/spawn-agent/lib/me.py"
+printf '{"pid":%s,"name":"smoke-me-cross","cwd":"/","sessionId":"55555555-5555-5555-5555-555555555555","messagingSocketPath":"/tmp/cc-socks/5.sock"}\n' "$CLPID" \
+  > "$D/home/.claude-other/sessions/$CLPID.json"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$M" sessionId
+printf '  %-12s -> exit=%s\n' me-cross "$?"
+```
+
+PASS on exactly:
+
+```
+55555555-5555-5555-5555-555555555555
+  me-cross     -> exit=0
+```
+
+**The asymmetry is the assertion, so do not "fix" a failure by pointing
+`CLAUDE_CONFIG_DIR` at the profile holding the record.** `$D` deliberately has a
+`sessions/` directory of its own and no record for this pid; the one that answers is
+under `$D/home/.claude-other`, which the variable never names. That is the shape
+`owned.py` and the watcher were both widened for on 2026-09-07, measured on a live
+worker — and it is reached without a worker at all here.
+
+**It is falsifiable against the version it replaces, which is what makes it worth
+running.** The pre-2026-09-16 `me.py` prints `me: no session record for claude pid
+<CLPID> under <D>` and exits 1 on this exact fixture — measured 2026-09-16, both
+versions, same fixture, one run. Check 3b's own nine lines are untouched by it: this
+writes a new record under a pid that is not 1 and reads a field none of them read.
+
 ### The enforcement layer — it ships, so its absence is a FAIL
 
 A `PreToolUse` hook on `SendMessage` gates sends independently of the skill, and it is

@@ -985,9 +985,12 @@ one and two extra shell levels); it refuses rather than printing an empty string
 because `sessions/<pid>.json` is keyed by pid and pids are recycled into exactly the
 range wrapper shells are born in — the old inline form handed pid 19143 printed
 `bin-09 uds:/tmp/cc-socks/19143.sock`, a complete, plausible, wrong answer naming a
-live session belonging to somebody else's run; and it honours every colon-separated
-segment of `CLAUDE_CONFIG_DIR`, since a second profile really does exist on this
-machine.
+live session belonging to somebody else's run; and it sweeps **every** profile on this
+machine — `CLAUDE_CONFIG_DIR`'s segments, `~/.claude`, and every `~/.claude-*` — through
+the same list `owned.py`, the watcher and the guard hook all read. Honouring
+`CLAUDE_CONFIG_DIR` was never the sufficient half: the case that bites is a record in a
+profile that variable does **not** name, which is the ordinary shape here, and searching
+only the named one is the fork that shipped in three scripts and was closed in each.
 
 **The `[ -n "$ME" ]` line is what turns a refusal into a stop** rather than a task sent
 with an empty address in it — which would send the worker back to addressing you by
