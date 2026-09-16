@@ -403,9 +403,13 @@ is yours and cannot prove it — which is the next paragraph.
 **And `owned.py` now says so rather than handing you an address.** A ledger with no
 `.owner` beside it exits 5 and names the sidecar; it used to resolve happily, which
 sent a blocked supervisor to a tool reporting nothing wrong. That state is not a
-stranger's session — it is what a supervisor **mid-upgrade** produces: skill text is
-snapshotted at session start while `lib/*.py` is read fresh on every call, so text
-from before the sidecar existed writes correctly shaped rows and no sidecar at all.
+stranger's session — it is what a supervisor **mid-upgrade** produces: `lib/*.py` is
+opened at use time and is always current, while this text is served from a skill roster
+that refreshes asynchronously and announces nothing, so a session can be running
+pre-sidecar instructions against post-sidecar scripts and write correctly shaped rows
+with no sidecar at all. The window is what matters here, not its length; the older
+wording said the text was pinned at session start, which this repo measured false on
+2026-09-04.
 The workers really are yours, and ownership is still unprovable. Exit 5 prints the
 repair with the real paths filled in:
 
@@ -1183,8 +1187,10 @@ exactly one worker. It covers every worker in the run, including ones spawned
 later, because it re-reads the ledger on every poll.
 
 **Arm it with `timeout_ms: 1800000`, and expect expiry on any run longer than half an
-hour.** That is the ceiling: the tool caps anything larger, so a bigger number is not a
-longer watch, it is the same watch written misleadingly. `timeout_ms` is also the
+hour.** That is the ceiling in practice, and the two ways past it fail differently: up to
+the schema's `maximum` of 3600000 a larger number is silently **capped** back to
+1800000 — the same watch, written misleadingly — and above 3600000 the call is **rejected**
+outright, which is a watcher you never armed rather than one that expires early. `timeout_ms` is also the
 parameter this tool takes — it is required and there is no `persistent`, so an arm that
 names the wrong key is a rejected call rather than a watcher with a different lifetime.
 Expiry is not a fault: you are notified, and you re-arm and keep going.
@@ -1913,6 +1919,7 @@ for r in rows:
         r[5] = pid
 open(led, "w").write("".join("\t".join(r) + "\n" for r in rows if r != [""]))
 PIN
+:
 ```
 
 **It is advisory, and it must stay advisory.** The `[ -n "$PID" ]` guard is the whole of
@@ -1920,6 +1927,15 @@ the error handling: a worker that still has not registered simply is not pinned 
 turning that into a stop would make the rescue path unrecoverable — worse than the defect
 it closes. Run it again later if you like; the rewrite matches the name as a whole field
 and rewrites every row, so repeating it is free.
+
+**That trailing `:` is the same fix teardown step 4 carries, and this block needed it
+more.** `[ -n "$PID" ] && python3 …` takes the status of the guard when the guard is
+false, so the block exits 1 in *precisely* the case the paragraph above calls normal and
+expected — a not-yet-registered worker — and the `Bash` call reports a failure for the
+advisory path. The readiness pin has carried that shape since before this branch and is
+harmless there, because an empty pid at readiness is the timeout branch and the caller is
+already reading a screen. Copying it into a block whose documented-normal path is the
+failing one is what made it worth a line.
 
 **What an unpinned row costs is not cosmetic, and it is silent until it is not.** Column
 6 is how a row survives `/clear`, which rotates the worker's session id in about 400 ms

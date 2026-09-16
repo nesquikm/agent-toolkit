@@ -654,8 +654,11 @@ wrong. Exit 0 here is that bug, restored.
 
 **`nohost` must exit 0, and its passing is the assertion.** It is `ok` with column 7
 removed — the shape a supervisor serving pre-upgrade skill text writes into its own
-ledger, since skill text is snapshotted at session start while `lib/*.py` is read fresh
-on every call. Every reader in this plugin indexes the ledger with a length guard and
+ledger, since `lib/*.py` is opened at use time and is always current while this text is
+served from a roster that refreshes asynchronously, so pre-upgrade instructions and
+post-upgrade scripts can be live at once. (The older wording here said the text was
+pinned at session start; check 0b retired that premise and this was the third copy of
+it.) Every reader in this plugin indexes the ledger with a length guard and
 none checks the column count, so ownership is unaffected by the width; the only thing
 that enforces seven is the markdown at the setup block. That is what makes the upgrade
 survivable in the direction that matters: a mid-upgrade supervisor keeps resolving its
@@ -749,6 +752,7 @@ CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$M" sessionId > "$D/spawn-agent/l
 CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ok.tsv" smoke-own-probe >/dev/null 2>&1
 printf '  %-12s -> exit=%s\n' ownermatch "$?"
 printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-ok.owner"   # put it back
+rm -f "$D/home/.claude-other/sessions/$CLPID.json"                             # and put THIS back
 ```
 
 PASS on exactly:
@@ -760,11 +764,19 @@ PASS on exactly:
   ownermatch   -> exit=0
 ```
 
-**Run this sub-check after 3b's matrix, never before.** It is the one block here that
-makes this session resolvable under the fixture profile, and that is precisely what
-flips `led-ok.tsv` from `ok -> exit=0` to `ownermismatch -> exit=3`. Both readings are
-correct for their own precondition; run them in the other order and the nine lines above
-will not match.
+**Run this sub-check after 3b's matrix, never before, and note that it cleans up after
+itself.** It is the one block here that makes this session resolvable under the fixture
+profile, and that is precisely what flips `led-ok.tsv` from `ok -> exit=0` to
+`ownermismatch -> exit=3`. Both readings are correct for their own precondition.
+
+**The two `put it back` lines are what make a re-run honest, and leaving them out was
+measured on 2026-09-16.** Ordering advice covers one pass; it does not cover running the
+matrix again, which is an ordinary thing to do while debugging. With this session's record
+left behind under the fixture profile, a second pass of 3b's matrix answers `ok -> exit=3`
+instead of 0, `nohost -> exit=3`, `ambiguous -> exit=3` instead of 4, `norow -> exit=3`
+instead of 2, and `crossprofile -> exit=3` **with its asserted address gone** — five of
+nine lines false-FAIL, all pointing at code that is fine. A fixture a check mutates is a
+fixture that check has to restore.
 
 **`ownermismatch` is a branch no fixture reached before 2026-09-16.** `foreign`'s exit 3
 comes from the *name-collision* arm — a live session holding the name that this run did
@@ -1200,9 +1212,11 @@ watch lives. It shipped that way for long enough that the 30-minute expiry it pr
 was being read as a watcher that died.
 
 Note what this check deliberately does **not** do: it does not re-measure the cap. The
-tool documents `1800000` as the ceiling and clamps anything above it silently, so a
-check that armed a `Monitor` for longer and timed how long it lived would take half an
-hour to tell you something the schema states.
+schema states it — `minimum: 1000`, `maximum: 3600000`, with anything above 1800000
+clamped to 1800000 — so a check that armed a `Monitor` for longer and timed how long it
+lived would take half an hour to confirm a documented number. Keep the two failures
+apart when reading a bad arm: 1800001–3600000 is a silent clamp, above 3600000 is a
+rejected call.
 
 **The run's own watcher takes a timeout too, and the suite used to name one only here.**
 This check's 180 s belongs to the *deaf* watcher; checks 7 and 9 arm the real one and
@@ -1811,7 +1825,7 @@ Falsifiable against the tree it replaces: five of the seven were `100644` on `ma
 script that answers a lookup, while the watcher and the guard hook were already
 executable. Running this block there prints five `FAIL` lines and exits 1.
 
-### 7g. Every fence binds what it spends — *static*
+### 7g. Every fence binds the values it can re-derive — *static*
 
 The second check here that needs no worker and no host, and it exists because the
 failure it catches is **silent on both halves**. A `Bash` call gets a fresh shell, so a
@@ -1863,12 +1877,25 @@ EOF
 
 **PASS is exactly three**, and each one is named rather than tolerated. Two are
 illustrations whose whole purpose is the argument shape, and both say so in the line
-beneath them: the `owned.py` usage examples under "Address workers by `uds:`", and
-`cmux.md`'s unquoted-`$f` block, which exists to show the error message an unquoted
-option string produces and is not a recipe. The third is the mint block, whose `$LEDGER`
-is spent as `>> "$LEDGER"` — that one fails **loudly**, measured as
-`bash: : No such file or directory`, exit 1 — and this check's class is the silent empty
-capture, not a redirect that refuses.
+beneath them: the `owned.py` usage examples under "**The peer registry is a directory of
+JSON files**" — the fence itself carries no disclaimer, the exit-code table directly
+under it is what explains an empty one — and `cmux.md`'s unquoted-`$f` block, which shows
+the error an unquoted option string produces and is not a recipe. The third is the mint
+block, whose `$LEDGER` is spent as `>> "$LEDGER"` — that one fails **loudly**, measured
+as `bash: : No such file or directory`, exit 1 — and this check's class is the silent
+empty capture, not a redirect that refuses.
+
+**`VARS` is a closed list on purpose, and the heading says "can re-derive" for that
+reason.** Every name in it is something a fence can rebuild from the process environment
+or from the plugin root: the four helper paths, the ledger, and the two host targets. The
+**caller-supplied** class — `$l1`, `$L1`, `$NAME`, `$SID`, `$REPO` — is deliberately out
+of scope, because those are values an operator writes in from the row it just created, so
+the convention for them is an explicit `<placeholder>` line rather than a binding, and no
+scan can tell a missing placeholder from a deliberate one. Measured 2026-09-16: adding
+`l1`/`L1` takes this check from 3 to 20, and adding `NAME`/`SID` takes it to 38 — almost
+every fence in the tree, which is what a check that flags the whole convention looks
+like. If that class is ever worth policing it wants its own check and its own rule, not a
+wider tuple here.
 
 **Falsifiable against the tree it replaces.** Run against `main` at 0fbf2b9 it reports
 **twenty-four** — measured 2026-09-16 in a throwaway worktree — and all but three are

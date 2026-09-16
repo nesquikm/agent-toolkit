@@ -166,12 +166,20 @@ gets written, and every later `herdr agent … "$NAME"` in §5–§8 resolves to
 pane**. `agent get` exits 1 with `agent_not_found` when the name is genuinely free.
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID"
 ```
 
 With a permission class, after the same separator:
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --permission-mode manual
 ```
 
@@ -184,10 +192,18 @@ the same `$NAME` the `-n` flag carries, so the herdr agent, the ledger row and t
 remote card all read one string:
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --remote-control "$NAME"
 ```
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --permission-mode manual --remote-control "$NAME"
 ```
 
@@ -478,6 +494,8 @@ per the rule above that `$L1` cannot drift while `"$NAME"` is a lookup in a regi
 whole machine writes to:
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+[ -n "$L1" ] || { echo "no pane id; not reading" >&2; exit 1; }
 herdr pane read "$L1" --source visible | python3 -c 'import sys, unicodedata
 raw = sys.stdin.read().splitlines()
 if not raw: print("NO CAPTURE"); sys.exit(2)

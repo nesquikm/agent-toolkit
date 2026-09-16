@@ -182,6 +182,16 @@ the degenerate string `cd "" && claude -n  --session-id` — and the trailing `\
 Enter, so it is submitted. Not into a shell: into **your own Claude Code input box**, as
 a prompt. Exit 0, nothing reports a fault, and no worker was launched.
 
+**Two of those five are written in, not re-derived, and `$l1` is the one this section
+adds.** `$l1` is column 2 of the row you just wrote — the same placeholder shape §3 uses
+for `$SURF`, and it is spelled out rather than left free so that "resolve the locator" is
+not an instruction with a hole in it. It is still *resolved* rather than pasted straight
+into `--surface`, and that is deliberate: `cmux-surface.py` returning empty is how §2
+defines "that surface is gone", so pasting a ref directly would make the guard below
+vacuous and throw away the liveness proof. `$REPO`, `$NAME` and `$SID` are bound by the
+calling procedure in `SKILL.md` and died with its shell like everything else; carry their
+values in.
+
 Read that as latent rather than observed: it is read out of this file, not out of an
 incident. `$SID` is guarded here even though the mint step already validated it, because
 the mint step ran in a different `Bash` call — and an empty one is not loud, it exits 0
@@ -193,7 +203,8 @@ has already shipped once.
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 WS="$CMUX_WORKSPACE_ID"
-SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+l1="<column 2 of the row you just wrote>"
+SURF=$(python3 "$S" "$l1" ref)
 [ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
 [ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID\n"
@@ -204,7 +215,8 @@ With a permission class, on the same line:
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 WS="$CMUX_WORKSPACE_ID"
-SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+l1="<column 2 of the row you just wrote>"
+SURF=$(python3 "$S" "$l1" ref)
 [ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
 [ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --permission-mode manual\n"
@@ -221,7 +233,8 @@ the same string:
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 WS="$CMUX_WORKSPACE_ID"
-SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+l1="<column 2 of the row you just wrote>"
+SURF=$(python3 "$S" "$l1" ref)
 [ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
 [ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --remote-control \"$NAME\"\n"
@@ -230,7 +243,8 @@ cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME -
 ```bash
 S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 WS="$CMUX_WORKSPACE_ID"
-SURF=$(python3 "$S" "$l1" ref)     # $l1 is column 2 of the row you just wrote
+l1="<column 2 of the row you just wrote>"
+SURF=$(python3 "$S" "$l1" ref)
 [ -n "$WS" ] && [ -n "$SURF" ] || { echo "no workspace or no surface; not launching" >&2; exit 1; }
 [ -n "$REPO" ] && [ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty REPO, NAME or SID; not launching" >&2; exit 1; }
 cmux send --workspace "$WS" --surface "$SURF" "cd \"$REPO\" && claude -n $NAME --session-id $SID --permission-mode manual --remote-control \"$NAME\"\n"
