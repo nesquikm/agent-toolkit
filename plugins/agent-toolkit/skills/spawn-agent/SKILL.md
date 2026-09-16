@@ -1682,22 +1682,43 @@ that looks repaired on the machine you tested is the same defect with a longer f
 only `python3`. Pipe your host file's read command into this:
 
 ```bash
-| python3 -c 'import sys,unicodedata
+| python3 -c 'import sys, unicodedata
 raw = sys.stdin.read().splitlines()
 if not raw: print("NO CAPTURE"); sys.exit(2)
-line = raw[-1]
-body = line.split("❯", 1)[1] if "❯" in line else line
+i = next((k for k in range(len(raw) - 1, -1, -1) if "❯" in raw[k]), -1)
+if i < 0: print("NO PROMPT LINE (searched %d rows)" % len(raw)); sys.exit(3)
+body = raw[i].split("❯", 1)[1]
 vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
-print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
+print("EMPTY (row %d of %d)" % (i + 1, len(raw)) if not vis
+      else "OCCUPIED (row %d of %d) %s" % (i + 1, len(raw), repr("".join(vis))))'
 ```
 
 Three things about that shape are deliberate. `Zs` covers U+0020 and U+00A0 alike — and
 U+202F and U+2007, the next two surprises — so it is proof against the *class* rather
-than against the one character that has bitten so far. It reads the **last line of the
-capture**, not the last line containing a `❯`, because the chevron is also every dialog's
-selection marker and a saturated read may not carry the prompt line at all. And
-`NO CAPTURE` is distinct from `EMPTY`, because a read that returned nothing is not a box
-that is empty.
+than against the one character that has bitten so far. It **scans upward from the end for
+the chevron** rather than reading the last line. And it distinguishes four answers, not
+two: `NO CAPTURE` for a read that returned nothing, and `NO PROMPT LINE` for a capture
+with no chevron anywhere in it — a plain shell, or a viewport that saturated before the
+box — neither of which is a box that is empty.
+
+**Reading the last line was measured wrong on 2026-09-16, and it is worth knowing why,
+because the wrong version looked more careful.** Claude Code always draws chrome *below*
+the input box — a rule, the status line, `⏵⏵ auto mode on`, the agent row. Measured on a
+live 55-row `cmux read-screen`: the box was row 52, genuinely empty (`❯` + U+00A0 and
+nothing else), and rows 53-55 were chrome. Reading the last line answered
+`OCCUPIED '⏵⏵automodeon…'` on a healthy empty box — so the rule above would have forbidden
+every chain step and every keyed slash command, which is the stall this section exists to
+prevent, reached from the other side. It failed the opposite way too: an occupied box in a
+capture ending in a blank line answered `EMPTY`, and the `enter` after that submits
+whatever was already there.
+
+**What this probe does *not* do is tell an input box from a dialog's selection row**, and
+an earlier version of this paragraph claimed the last-line rule avoided that. It did not —
+on a dialog capture it simply read the last *option* instead. Scanning upward reads the
+selection row, which is closer to honest but still not an input box. Nothing here can make
+that distinction, which is why the rule at the top of this section is scoped to *where
+there is no dialog*, and why the row number is printed: a prompt line four rows above a
+55-row capture's end is the box, and one in the middle of a dialog is not.
 
 **Emptiness is not readiness.** A worker blocked on an open dialog can have an empty
 box; this answers "would `enter` submit something", never "is this worker free". The

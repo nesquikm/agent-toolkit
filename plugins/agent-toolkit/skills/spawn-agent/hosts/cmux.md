@@ -333,13 +333,15 @@ S="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/hosts/cmux-surface.py"
 WS="$CMUX_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
 REF=$(python3 "$S" "$l1" ref)
 [ -n "$REF" ] || { echo "that surface is gone" >&2; exit 1; }
-cmux read-screen --workspace "$WS" --surface "$REF" | python3 -c 'import sys,unicodedata
+cmux read-screen --workspace "$WS" --surface "$REF" | python3 -c 'import sys, unicodedata
 raw = sys.stdin.read().splitlines()
 if not raw: print("NO CAPTURE"); sys.exit(2)
-line = raw[-1]
-body = line.split("❯", 1)[1] if "❯" in line else line
+i = next((k for k in range(len(raw) - 1, -1, -1) if "❯" in raw[k]), -1)
+if i < 0: print("NO PROMPT LINE (searched %d rows)" % len(raw)); sys.exit(3)
+body = raw[i].split("❯", 1)[1]
 vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
-print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
+print("EMPTY (row %d of %d)" % (i + 1, len(raw)) if not vis
+      else "OCCUPIED (row %d of %d) %s" % (i + 1, len(raw), repr("".join(vis))))'
 ```
 
 `EMPTY` means `enter` would submit nothing. `OCCUPIED` prints what it found, so you can

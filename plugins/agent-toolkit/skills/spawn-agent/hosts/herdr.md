@@ -478,13 +478,15 @@ per the rule above that `$L1` cannot drift while `"$NAME"` is a lookup in a regi
 whole machine writes to:
 
 ```bash
-herdr pane read "$L1" --source visible | python3 -c 'import sys,unicodedata
+herdr pane read "$L1" --source visible | python3 -c 'import sys, unicodedata
 raw = sys.stdin.read().splitlines()
 if not raw: print("NO CAPTURE"); sys.exit(2)
-line = raw[-1]
-body = line.split("❯", 1)[1] if "❯" in line else line
+i = next((k for k in range(len(raw) - 1, -1, -1) if "❯" in raw[k]), -1)
+if i < 0: print("NO PROMPT LINE (searched %d rows)" % len(raw)); sys.exit(3)
+body = raw[i].split("❯", 1)[1]
 vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
-print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
+print("EMPTY (row %d of %d)" % (i + 1, len(raw)) if not vis
+      else "OCCUPIED (row %d of %d) %s" % (i + 1, len(raw), repr("".join(vis))))'
 ```
 
 `EMPTY` means `enter` would submit nothing. `OCCUPIED` prints what it found. Note

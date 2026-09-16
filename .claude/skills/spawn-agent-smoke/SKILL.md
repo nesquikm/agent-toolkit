@@ -1884,77 +1884,120 @@ thing standing between a silent empty capture and a supervisor acting on it.
 
 ### 7i. The input-box emptiness probe — *static*
 
-No worker, no host, no network: it builds the three prompt lines that matter and checks
-the shipped probe answers each correctly. It exists because the naive test this replaced
-was wrong for a full release cycle and nothing could have noticed — it fails by reporting
-a box occupied, so a chain stalls rather than corrupts, and a stall reads as a worker
-being slow.
+No worker, no host, no network. It extracts the probe **out of the shipped skill text**
+and runs that, against fixtures cut to the shape of a real capture — chrome below the box
+included, because that is the shape every real screen has and the shape the first version
+of this check did not have.
 
 ```bash
-D="${TMPDIR:-/tmp}/spawn-agent-smoke/$$-boxprobe"; mkdir -p "$D"
-printf '\u276f\u00a0     \n' > "$D/empty-nbsp.txt"
-printf '\u276f      \n'       > "$D/empty-plain.txt"
-printf '\u276f\u00a0/some-slash-command arg\n' > "$D/occupied.txt"
-: > "$D/nothing.txt"
-P='import sys,unicodedata
-raw = sys.stdin.read().splitlines()
-if not raw: print("NO CAPTURE"); sys.exit(2)
-line = raw[-1]
-body = line.split("\u276f", 1)[1] if "\u276f" in line else line
-vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
-print("EMPTY" if not vis else "OCCUPIED " + repr("".join(vis)))'
-for f in empty-nbsp empty-plain occupied nothing; do
-  printf '  %-12s -> %s\n' "$f" "$(python3 -c "$P" < "$D/$f.txt")"
-done
-# and the naive pattern must not be PRESCRIBED -- i.e. must not appear inside a fence.
-# Naming it in prose as the thing that does not work is the point, so scan fences only.
-python3 - <<'FENCE'
-import glob, re
-hits = []
-for path in glob.glob("plugins/agent-toolkit/skills/spawn-agent/**/*.md", recursive=True):
-    inside = False
-    for i, line in enumerate(open(path, encoding="utf-8"), 1):
+python3 - <<'EOF'
+import re, subprocess, sys
+
+R = "plugins/agent-toolkit/skills/spawn-agent"
+
+def fences(path):
+    out, buf, inside = [], [], False
+    for line in open(path, encoding="utf-8").read().split("\n"):
         if line.startswith("```"):
-            inside = not inside
+            if inside: out.append("\n".join(buf))
+            inside, buf = not inside, []
             continue
-        if inside and re.search(r"\u276f \*\$", line):
-            hits.append(f"{path}:{i}")
-print("  FAIL naive pattern prescribed: " + ", ".join(hits) if hits
-      else "  naive pattern: named in prose only (correct)")
-FENCE
-rm -rf "$D"
+        if inside: buf.append(line)
+    return out
+
+def probe(path):
+    hits = [b for b in fences(path) if "unicodedata" in b]
+    if len(hits) != 1:
+        sys.exit("  FAIL %s: expected exactly 1 probe fence, found %d" % (path, len(hits)))
+    m = re.match(r"^.*?\|\s*python3 -c '(.*)'$", hits[0].strip(), re.S)
+    if not m:
+        sys.exit("  FAIL %s: probe fence is not the documented | python3 -c '...' shape" % path)
+    return m.group(1)
+
+src = probe(R + "/SKILL.md")
+for host in ("cmux", "herdr"):
+    if probe(R + "/hosts/" + host + ".md") != src:
+        sys.exit("  FAIL hosts/%s.md probe has drifted from SKILL.md's" % host)
+print("  shipped probe extracted, 3 copies identical")
+
+BOX_EMPTY    = "\u276f\u00a0"
+BOX_BUSY     = "\u276f\u00a0/some-slash-command arg"
+CHROME       = ["\u2500" * 40,
+                "  [ST] \u279c agent-toolkit git:(main) Opus 5 (1M context) 39%",
+                "  \u23f5\u23f5 auto mode on (shift+tab to cycle) \u00b7 \u2190 for agents"]
+
+CASES = [
+    ("real-empty",   ["work output", "\u2500" * 40, BOX_EMPTY] + CHROME),
+    ("real-busy",    ["work output", "\u2500" * 40, BOX_BUSY]  + CHROME),
+    ("empty-nbsp",   [BOX_EMPTY]),
+    ("empty-plain",  ["\u276f      "]),
+    ("busy-blankend",[BOX_BUSY, "", ""]),   # two, so splitlines() really yields a trailing blank
+    ("dialog",       ["Do you trust this folder?", "\u276f 1. Yes, I trust", "  2. No, exit"]),
+    ("shell-only",   ["  \u279c  agent-toolkit git:(main)"]),
+    ("nothing",      []),
+]
+for name, rows in CASES:
+    r = subprocess.run([sys.executable, "-c", src], input="\n".join(rows),
+                       capture_output=True, text=True)
+    # A probe that CRASHES prints nothing, and a blank line beside a fixture name is
+    # not a readable failure -- say rc and the last stderr line instead.
+    said = r.stdout.strip() or "CRASHED rc=%d %s" % (
+        r.returncode, (r.stderr.strip().splitlines() or [""])[-1])
+    print("  %-14s -> %s" % (name, said))
+EOF
 ```
 
 PASS on exactly:
 
 ```
-  empty-nbsp   -> EMPTY
-  empty-plain  -> EMPTY
-  occupied     -> OCCUPIED '/some-slash-commandarg'
-  nothing      -> NO CAPTURE
-  naive pattern: named in prose only (correct)
+  shipped probe extracted, 3 copies identical
+  real-empty     -> EMPTY (row 3 of 6)
+  real-busy      -> OCCUPIED (row 3 of 6) '/some-slash-commandarg'
+  empty-nbsp     -> EMPTY (row 1 of 1)
+  empty-plain    -> EMPTY (row 1 of 1)
+  busy-blankend  -> OCCUPIED (row 1 of 2) '/some-slash-commandarg'
+  dialog         -> OCCUPIED (row 2 of 3) '1.Yes,Itrust'
+  shell-only     -> NO PROMPT LINE (searched 1 rows)
+  nothing        -> NO CAPTURE
 ```
 
-**`empty-nbsp` is the whole point.** cmux draws U+00A0 after the `❯`, so
-`grep -qE "❯ *$"` answers NO-MATCH on a box that is genuinely empty — measured
-2026-09-16 against a capture of the real line. Run that pattern against this fixture and
-it fails; run the shipped probe and it does not.
+**`real-empty` and `real-busy` are the two the first version of this check could not
+express, and they are why it was written again.** Both put the box where a real capture
+puts it — three rows of chrome below — and the probe this branch first shipped read the
+*last* line, so `real-empty` answered `OCCUPIED '⏵⏵automodeon…'` on a healthy empty box
+and `busy-blankend` answered `EMPTY` on an occupied one. The fixtures it shipped with all
+put the prompt line last, which made the last-line rule right by construction. **A fixture
+set that can only be satisfied by the implementation you happen to have is not coverage**,
+and the shape to copy is the real capture, not the convenient one.
 
-**`empty-plain` must pass too, and it is not redundant.** A probe that keyed on U+00A0
-specifically would answer this one wrong, and an ordinary space is what every other
-terminal draws. The shipped form classifies by Unicode category `Zs`, which covers both —
-and U+202F and U+2007, the next two candidates.
+**It runs the SHIPPED text, not a transcription, and that is the larger half of the
+repair.** The first version pasted an inline copy of the probe, so mutating
+`plugins/agent-toolkit/skills/spawn-agent/SKILL.md` could not move this check — it printed
+all its expected lines on `main`, where the probe does not exist at all. Extraction is
+therefore checked rather than assumed: a fence that has been renamed, reshaped, or
+duplicated fails here with `FAIL`, because an extractor that silently finds nothing is the
+same unfalsifiable check wearing a different coat.
 
-**`nothing` is distinct from `EMPTY` on purpose.** A read that returned nothing is not a
-box that is empty, and collapsing the two would let a saturated or failed capture read as
-a clean box.
+**The three copies must agree.** `SKILL.md`, `hosts/cmux.md` and `hosts/herdr.md` each
+carry the probe so each fence runs standalone, which is the convention here — and three
+copies of anything drift. The extractor compares them and fails on the first difference,
+so a fix applied to one host is caught the next time this runs.
 
-**Do not "simplify" this to a grep.** Which characters `[[:space:]]` covers, and whether
-`-P` exists, depend on which `grep` is installed: measured the same day, this machine's
-`grep` is ugrep 7.8.4, where `[[:space:]]` matches U+00A0 even under `LC_ALL=C` and `-P`
-works — and BSD and GNU `grep` do not agree with it or each other. A guard repaired
-against the `grep` you happen to have is the same defect with a longer fuse, which is why
-the fix went to `python3`, this repo's only scripting dependency.
+**`dialog` and `shell-only` are documentation, not aspiration.** The probe cannot tell an
+input box from a dialog's selection row — scanning upward reads the selection row rather
+than a stray option, which is closer to honest but is still not a box — so `dialog`
+records what it actually answers. `shell-only` pins the case a capture with no chevron
+must produce: `NO PROMPT LINE`, distinct from `EMPTY`, because a surface holding a shell
+is not a worker with an empty box.
+
+**Do not "simplify" any of this to a grep.** Which characters `[[:space:]]` covers, and
+whether `-P` exists, depend on which `grep` you get — and inside a `Bash` call you do not
+get the system one. Measured 2026-09-16: `grep` in this environment resolves to an
+injected `ugrep` 7.8.4 where `-P` works and `[[:space:]]` matches U+00A0 even under
+`LC_ALL=C`, while `/usr/bin/grep` on the same machine is BSD 2.6.0 with no `-P` at all. A
+shell *script* gets the second one. That gap is why the test is `python3` + `unicodedata`,
+this repo's only scripting dependency, and why a guard that looked repaired interactively
+would have shipped broken.
 
 ## 8. The task, the address, and the reply — *core*
 
