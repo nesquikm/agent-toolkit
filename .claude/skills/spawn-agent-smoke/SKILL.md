@@ -723,10 +723,21 @@ match it. The record has to carry the **real** pid.
 CLPID="<the session pid check 0b printed>"
 D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
 M="<plugin root>/skills/spawn-agent/lib/me.py"
+O="<plugin root>/skills/spawn-agent/lib/owned.py"
 printf '{"pid":%s,"name":"smoke-me-cross","cwd":"/","sessionId":"55555555-5555-5555-5555-555555555555","messagingSocketPath":"/tmp/cc-socks/5.sock"}\n' "$CLPID" \
   > "$D/home/.claude-other/sessions/$CLPID.json"
 CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$M" sessionId
 printf '  %-12s -> exit=%s\n' me-cross "$?"
+# With this session now resolvable under the fixture, the owner-MISMATCH branch is
+# reachable for the first time: led-ok's sidecar names 2222…, which is not us.
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ok.tsv" smoke-own-probe >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' ownermismatch "$?"
+# And a sidecar that DOES name us returns the same row to 0, which is what proves
+# the line above came from the comparison and not from some other refusal.
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$M" sessionId > "$D/spawn-agent/led-ok.owner"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ok.tsv" smoke-own-probe >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' ownermatch "$?"
+printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-ok.owner"   # put it back
 ```
 
 PASS on exactly:
@@ -734,7 +745,23 @@ PASS on exactly:
 ```
 55555555-5555-5555-5555-555555555555
   me-cross     -> exit=0
+  ownermismatch -> exit=3
+  ownermatch   -> exit=0
 ```
+
+**Run this sub-check after 3b's matrix, never before.** It is the one block here that
+makes this session resolvable under the fixture profile, and that is precisely what
+flips `led-ok.tsv` from `ok -> exit=0` to `ownermismatch -> exit=3`. Both readings are
+correct for their own precondition; run them in the other order and the nine lines above
+will not match.
+
+**`ownermismatch` is a branch no fixture reached before 2026-09-16.** `foreign`'s exit 3
+comes from the *name-collision* arm — a live session holding the name that this run did
+not spawn — while this one comes from the sidecar comparison, and the two share an exit
+code without sharing a line of reasoning. Until this pair existed, the arm that answers
+"whose ledger is this" was asserted nowhere, and the smoke suite recorded its inertness
+under the fixture profile as expected behaviour, which pinned the gap open instead of
+closing it.
 
 **The asymmetry is the assertion, so do not "fix" a failure by pointing
 `CLAUDE_CONFIG_DIR` at the profile holding the record.** `$D` deliberately has a

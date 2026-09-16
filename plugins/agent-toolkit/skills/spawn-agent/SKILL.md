@@ -1853,7 +1853,17 @@ and they differ for a measured reason.
 **A foreign row is always this run's own deliberate cross-host spawn.** A ledger this
 run may act on at all is one it owns — the sidecar checks in the setup block and
 `owned.py`'s exit 3 and 5 guarantee it — so the row was written by this supervisor at a
-moment when it had the other host file in context. There is no stranger's-row case to
+moment when it had the other host file in context.
+
+**Exit 5 is unconditional; exit 3 has a precondition, and it says so out loud.** The
+owner *mismatch* is found by comparing the sidecar against this session's own id, so it
+can only fire where this session can be resolved. Where it cannot — a `claude` that has
+not registered, a lookup that timed out — `owned.py` resolves the rows anyway rather
+than stranding the run, and prints one `INERT` line on stderr naming the sidecar it
+could not check against. Read that line as *the ownership half of this paragraph is not
+in force right now*; it used to fall through in silence, which is byte-identical to a
+clean match. A **missing** sidecar is the other case and is never inert: exit 5 needs
+nothing about this session to refuse the whole file. There is no stranger's-row case to
 design for, which is exactly why "close it" is on the table at all.
 
 **Report foreign rows under their own heading, never mixed into the "close these?"
