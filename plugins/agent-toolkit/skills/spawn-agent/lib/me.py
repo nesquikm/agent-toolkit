@@ -45,6 +45,16 @@ import os
 import subprocess
 import sys
 
+# `peer.py` owns the profile list, and every other script here routes through it
+# -- owned.py's registry_roots() returns peer.roots() verbatim, and the watcher
+# rebuilds only the pair shape on top of it. This file forked that list once and
+# searched CLAUDE_CONFIG_DIR's segments OR `~/.claude`, never both and never the
+# `~/.claude-*` glob, which is the same drift owned.py records fixing on
+# 2026-09-07. Imported by path for owned.py's reason: sys.path[0] is the lib
+# directory only when the interpreter was pointed straight at this file.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import peer  # noqa: E402
+
 FIELDS = ("name", "address", "sessionId")
 
 
@@ -74,13 +84,20 @@ def main():
 
     pid = claude_ancestor(os.getppid())
 
-    # Honour every colon-separated segment of CLAUDE_CONFIG_DIR, in order, exactly
-    # as peer.py and the watcher do, so all of them agree on where a session may
-    # live. A second profile really does exist on this machine, so the hardcoded
-    # form returns nothing for every session in it, and reading only the first
-    # segment fails whenever the caller's own profile is the second one.
-    roots = [d for d in os.environ.get("CLAUDE_CONFIG_DIR", "").split(":") if d]
-    roots = roots or [os.path.expanduser("~/.claude")]
+    # Every profile a session may register in -- peer.py's list, not a copy, so
+    # this file agrees with owned.py, the watcher and the guard about where a
+    # session may live. Honouring CLAUDE_CONFIG_DIR's segments is necessary and
+    # was never sufficient: the case that matters is a session whose record lands
+    # in a profile CLAUDE_CONFIG_DIR does NOT name, which is the ordinary shape
+    # here -- a worker does not register in its supervisor's profile (owned.py's
+    # registry_roots records that measurement), and a chpwd hook that switches
+    # CLAUDE_CONFIG_DIR per directory can make it true of a supervisor too.
+    #
+    # Widening cannot select a stranger: the lookup below is keyed by a pid
+    # already confirmed to be this session's own `claude` ancestor. Ordering is
+    # peer.roots()'s -- active profile first -- and first match wins, so the
+    # active profile still decides if a recycled pid is stale somewhere else.
+    roots = peer.roots()
     for root in roots:
         try:
             with open(os.path.join(root, "sessions", "%d.json" % pid)) as fh:
@@ -101,7 +118,8 @@ def main():
             sys.exit(f"me: session {pid} has no sessionId")
         print(out[field] if field else "\t".join(out[f] for f in FIELDS))
         return 0
-    sys.exit(f"me: no session record for claude pid {pid} under {':'.join(roots)}")
+    where = ":".join(roots) or "no profile on this machine has a sessions/ directory"
+    sys.exit(f"me: no session record for claude pid {pid} under {where}")
 
 
 if __name__ == "__main__":

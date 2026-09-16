@@ -221,24 +221,47 @@ def main():
         return 5
 
     try:
-        here = subprocess.run(
+        probe = subprocess.run(
             [sys.executable, me, "sessionId"],
             capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
-    except Exception:
-        here = ""
-    # here == "" means me.py could not resolve this session, and the check
-    # falls through rather than blocking. That is deliberate but it is a real
-    # gap, so know when it opens: me.py reads CLAUDE_CONFIG_DIR, so pointing
-    # that at a fixture profile (as the smoke test does) makes it exit
-    # "no session record for claude pid N under <fixture>" and this check
-    # inert. Under a real profile it resolves, and the mismatch is caught.
-    # Blocking on an unresolvable self would make every fixture and every
-    # unusual profile layout unusable, which is a worse failure than the one
-    # the setup block already prevents by refusing to overwrite .owner. A
-    # MISSING sidecar is a different case and is refused above: there the file
-    # that would carry the proof does not exist, so nothing can resolve it later.
-    if here and here.lower() != owner.lower():
+        )
+        # Not check=True, so a non-zero me.py comes back as an ordinary
+        # CompletedProcess with empty stdout and never reaches the except below.
+        # Only a timeout, or a failure to spawn the child at all, does. Both land
+        # on the same empty `here`, and the returncode is why the success case has
+        # to be tested rather than assumed: stdout can be empty on exit 0 too.
+        here = probe.stdout.strip() if probe.returncode == 0 else ""
+        why = probe.stderr.strip()
+    except Exception as exc:
+        here, why = "", str(exc)
+
+    if not here:
+        # me.py could not resolve this session, so the mismatch test below has
+        # nothing to compare against. It falls through rather than blocking, and
+        # that half is deliberate: refusing here would make every fixture profile
+        # and every unusual layout unusable, a worse failure than the one the
+        # setup block already prevents by refusing to overwrite .owner. A MISSING
+        # sidecar is a different case and is refused above -- there the file that
+        # would carry the proof does not exist, so nothing can resolve it later.
+        #
+        # Doing it in SILENCE was the defect. This is the one state in which exit
+        # 3 cannot fire, and it was byte-identical to a clean ownership match:
+        # the caller got its address back with no sign that the stop guarding it
+        # had been disarmed. The old comment here claimed "under a real profile it
+        # resolves, and the mismatch is caught", which is not a property of real
+        # profiles -- it held only while the caller's record sat in a profile
+        # CLAUDE_CONFIG_DIR happened to name. me.py sweeps every profile as of
+        # 2026-09-16, which makes that far more nearly true, but a timeout or an
+        # unregistered session still reaches here, so it is said rather than
+        # assumed. The smoke suite's fixture profile reaches this line by design,
+        # where it is expected output and not a fault.
+        print(
+            f"owned: this session is unresolvable, so the owner check on {sidecar} "
+            "is INERT -- rows still resolve, but exit 3 for an owner mismatch "
+            "cannot fire" + (f" ({why})" if why else ""),
+            file=sys.stderr,
+        )
+    elif here.lower() != owner.lower():
         print(
             f"owned: {ledger} is owned by session {owner}, not by this one "
             "-- those workers belong to another run",

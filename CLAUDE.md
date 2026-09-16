@@ -55,6 +55,18 @@ plugins/agent-toolkit/                   → The plugin (the only thing that shi
   wrong target. Measured 2026-08-12. Anything that adds a third host adds a row above,
   never a second `if`.
 - **Bundled scripts** — a skill references its own files through `${CLAUDE_PLUGIN_ROOT}/skills/<skill>/<file>`, never through a relative path or the base directory printed at load. Host-agnostic scripts go in that skill's `lib/`, host-specific ones in its `hosts/`.
+- **Every shipped script that carries a shebang is mode `100755`.** Five of the seven were
+  `100644` until 2026-09-16, which meant the tree encoded a 644/755 split that stood for
+  nothing — `watch-workers.py` and the guard hook were executable, the five that answer
+  every lookup were not, and every one of the seven opens with `#!/usr/bin/env python3`.
+  No caller depends on the bit, since the skill invokes all of them as `python3 "$O"`, so
+  this is an affordance rather than a fix: a consumer outside this plugin that wants to
+  hand the path to an array-spawn API gets `Permission denied`, rc 126, from a file whose
+  first line names its own interpreter. The bit survives installation — verified against
+  the cached 0.12.0 copy, where the two already-executable scripts arrive `-rwxr-xr-x` —
+  and `core.fileMode` is `true` here, so git tracks it. Nothing else holds it: smoke
+  check 7h is the only assertion over a file mode in the repo, and without it a patch
+  applied without mode bits or a zip-based install drops the bit with every check green.
 - **Plugin-level hooks live in `plugins/agent-toolkit/hooks/`**, and they are a different
   thing from a skill's bundled scripts in the two ways that matter. `hooks/hooks.json` is
   **discovered automatically** when the plugin is enabled and needs no field in

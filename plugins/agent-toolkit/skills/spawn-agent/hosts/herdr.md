@@ -110,6 +110,7 @@ produce unusably narrow columns, which caps a pane fan-out at two or three; tabs
 no such cap. And the user reads a fan-out by its labels either way.
 
 ```bash
+WS="$HERDR_WORKSPACE_ID"; [ -n "$WS" ] || { echo "no workspace" >&2; exit 1; }
 # One tab per worker. --cwd and --label are both load-bearing; see below.
 OUT=$(herdr tab create --workspace "$WS" --cwd "$REPO" --label "$NAME" --no-focus)
 L1=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
@@ -165,12 +166,20 @@ gets written, and every later `herdr agent … "$NAME"` in §5–§8 resolves to
 pane**. `agent get` exits 1 with `agent_not_found` when the name is genuinely free.
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID"
 ```
 
 With a permission class, after the same separator:
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --permission-mode manual
 ```
 
@@ -183,10 +192,18 @@ the same `$NAME` the `-n` flag carries, so the herdr agent, the ledger row and t
 remote card all read one string:
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --remote-control "$NAME"
 ```
 
 ```bash
+L1="<column 2 of the row you just wrote>"
+NAME="<the worker name>"; SID="<the session id you minted>"
+[ -n "$L1" ] || { echo "no pane; not launching" >&2; exit 1; }
+[ -n "$NAME" ] && [ -n "$SID" ] || { echo "empty NAME or SID; not launching" >&2; exit 1; }
 herdr agent start "$NAME" --kind claude --pane "$L1" -- -n "$NAME" --session-id "$SID" --permission-mode manual --remote-control "$NAME"
 ```
 
@@ -223,8 +240,16 @@ your syntax, exit 1 is *herdr understood you and refused*. Never retry an exit 1
 verifies its `cd` — the flag is easy to omit and nothing else catches it:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 python3 "$O" "$LEDGER" "$NAME" cwd        # must be $REPO
 ```
+
+**Re-bind here, as everywhere.** `$O` and `$LEDGER` died with the block that bound
+them, and an unbound pair prints nothing rather than failing — a check whose entire
+output is a path then comes back empty, which reads as a worker with no cwd instead of
+as a check that never ran.
 
 Compare as paths, not strings: on macOS `$TMPDIR` carries a trailing slash and `/var`
 is a symlink to `/private/var`, so a healthy run prints two visibly different strings.
@@ -364,6 +389,8 @@ so, and it is the one that works before the worker has registered anything:
 
 ```bash
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 SHPID=$(herdr pane process-info --pane "$l1" | python3 -c '
 import json,sys
 print(json.load(sys.stdin)["result"]["process_info"]["shell_pid"])')
@@ -460,6 +487,29 @@ run minted* rather than on anything herdr reports.
 herdr agent read "$NAME" --source recent-unwrapped --lines 200
 herdr pane read  "$L1"   --source recent-unwrapped --lines 200
 ```
+
+**Is the input box empty?** `SKILL.md` has the rule and why the obvious `grep` cannot
+answer it; this is the read that feeds it. Use the **pane** form and `--source visible`,
+per the rule above that `$L1` cannot drift while `"$NAME"` is a lookup in a registry the
+whole machine writes to:
+
+```bash
+L1="<column 2 of the row you just wrote>"
+[ -n "$L1" ] || { echo "no pane id; not reading" >&2; exit 1; }
+herdr pane read "$L1" --source visible | python3 -c 'import sys, unicodedata
+raw = sys.stdin.read().splitlines()
+if not raw: print("NO CAPTURE"); sys.exit(2)
+i = next((k for k in range(len(raw) - 1, -1, -1) if "❯" in raw[k]), -1)
+if i < 0: print("NO PROMPT LINE (searched %d rows)" % len(raw)); sys.exit(3)
+body = raw[i].split("❯", 1)[1]
+vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
+print("EMPTY (row %d of %d)" % (i + 1, len(raw)) if not vis
+      else "OCCUPIED (row %d of %d) %s" % (i + 1, len(raw), repr("".join(vis))))'
+```
+
+`EMPTY` means `enter` would submit nothing. `OCCUPIED` prints what it found. Note
+`visible` carries herdr's own `agent_not_idle` caveat documented below — a busy worker's
+viewport is a moving target, so read it when you are about to type, not minutes before.
 
 Sources: `visible` is the rendered viewport, `recent` is recent output including soft
 wraps, `recent-unwrapped` joins soft wraps (prefer it for logs and transcripts), and
@@ -602,6 +652,10 @@ column 7 — for a cmux locator handed to it by a cross-host run. Ask the regist
 is host-independent, before you believe it:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"; [ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+[ -f "$O" ] || { echo "registry path unbound -- not closing, not pruning" >&2; exit 1; }
 reg=$(python3 "$O" "$LEDGER" "$name" status)
 herdr pane get "$l1" >/dev/null 2>&1 || [ -z "$reg" ] || {
   echo "$name: tagged herdr, pane_not_found for $l1, and the registry still answers '$reg' -- a broken row or a restarted server, not a finished worker. Not closing, not pruning." >&2

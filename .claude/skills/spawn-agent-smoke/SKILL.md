@@ -151,15 +151,26 @@ Subagents are the one part of the old model left standing: they inherit their ho
 text, so re-running this inside a `Task` refreshes nothing. That was verified
 2026-08-09 and has not been re-measured since.
 
-**Only `SKILL.md` is snapshotted.** Everything else the skill ships — `lib/*.py`,
-`hosts/*.md`, `hosts/*.py` — is opened at use time, by `Read` or by `python3`, so it is
-always the current bytes on disk. Their mtimes are deliberately excluded below;
-including them would fail sessions that are perfectly current, and the gate would then
-be wrong in the *safe* direction, which is still wrong.
+**Only `SKILL.md` goes through the roster at all.** Everything else the skill ships —
+`lib/*.py`, `hosts/*.md`, `hosts/*.py` — is opened at use time, by `Read` or by
+`python3`, so it is always the current bytes on disk with no refresh in between. Their
+mtimes are deliberately excluded from the clock below; including them would fail sessions
+that are perfectly current, and the gate would then be wrong in the *safe* direction,
+which is still wrong.
 
-That split is worth holding onto when you are iterating: an edit to a **host file**
-takes effect in the session you are already in, while an edit to **`SKILL.md`** needs a
-new `claude`.
+**Both halves reach the session you are already in; they differ only in when.** A host
+file or a script is current the instant you read it. An existing `SKILL.md` is current
+after the next roster refresh, which happens on its own while the session runs and
+announces nothing — so an edit you just made is normally served, and grepping the text
+you were handed for a marker you wrote is how you know rather than guess. The one case
+that genuinely waits is a **brand-new** skill, which answers `Unknown skill` until the
+roster next picks it up.
+
+The sentence that used to sit here said an edit to `SKILL.md` "needs a new `claude`".
+That is the falsified premise this section opens by retiring, and it survived thirty
+lines below its own correction — which is the more useful lesson than either version of
+the rule: when a measurement reverses a rule, the rule is usually written down in more
+than one place.
 
 ```bash
 python3 - "<the plugin root check 0a printed>" $$ <<'PY'
@@ -643,8 +654,11 @@ wrong. Exit 0 here is that bug, restored.
 
 **`nohost` must exit 0, and its passing is the assertion.** It is `ok` with column 7
 removed — the shape a supervisor serving pre-upgrade skill text writes into its own
-ledger, since skill text is snapshotted at session start while `lib/*.py` is read fresh
-on every call. Every reader in this plugin indexes the ledger with a length guard and
+ledger, since `lib/*.py` is opened at use time and is always current while this text is
+served from a roster that refreshes asynchronously, so pre-upgrade instructions and
+post-upgrade scripts can be live at once. (The older wording here said the text was
+pinned at session start; check 0b retired that premise and this was the third copy of
+it.) Every reader in this plugin indexes the ledger with a length guard and
 none checks the column count, so ownership is unaffected by the width; the only thing
 that enforces seven is the markdown at the setup block. That is what makes the upgrade
 survivable in the direction that matters: a mid-upgrade supervisor keeps resolving its
@@ -704,6 +718,86 @@ cannot resolve this session at all, so the owner-mismatch branch falls through b
 design and the value in the file is never compared. `ok` therefore tests that a
 *present* sidecar does not block — which is exactly the property `nosidecar` is
 paired against.
+
+### `me.py` must sweep the same profiles — *core*
+
+Every assertion above has a precondition none of them states: `owned.py`'s exit 3 for an
+**owner mismatch** runs only where `me.py` can resolve this session, and until
+2026-09-16 `me.py` was the one script here that looked in a different set of places —
+`CLAUDE_CONFIG_DIR`'s segments, or `~/.claude` when that was unset, and never the
+`~/.claude-*` glob that `peer.py`, `owned.py`, the watcher and the guard hook all sweep.
+A supervisor whose own record sits in a profile `CLAUDE_CONFIG_DIR` does not name
+resolved nothing, and that hard stop went quietly inert.
+
+It reuses 3b's fixture profile and needs one thing none of the rows above do: `me.py`
+resolves its own `claude` ancestor, so no record keyed to the fixture's pid 1 can ever
+match it. The record has to carry the **real** pid.
+
+```bash
+CLPID="<the session pid check 0b printed>"
+D="${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID/own-fixture"
+M="<plugin root>/skills/spawn-agent/lib/me.py"
+O="<plugin root>/skills/spawn-agent/lib/owned.py"
+printf '{"pid":%s,"name":"smoke-me-cross","cwd":"/","sessionId":"55555555-5555-5555-5555-555555555555","messagingSocketPath":"/tmp/cc-socks/5.sock"}\n' "$CLPID" \
+  > "$D/home/.claude-other/sessions/$CLPID.json"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$M" sessionId
+printf '  %-12s -> exit=%s\n' me-cross "$?"
+# With this session now resolvable under the fixture, the owner-MISMATCH branch is
+# reachable for the first time: led-ok's sidecar names 2222…, which is not us.
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ok.tsv" smoke-own-probe >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' ownermismatch "$?"
+# And a sidecar that DOES name us returns the same row to 0, which is what proves
+# the line above came from the comparison and not from some other refusal.
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$M" sessionId > "$D/spawn-agent/led-ok.owner"
+CLAUDE_CONFIG_DIR="$D" HOME="$D/home" python3 "$O" "$D/spawn-agent/led-ok.tsv" smoke-own-probe >/dev/null 2>&1
+printf '  %-12s -> exit=%s\n' ownermatch "$?"
+printf '22222222-2222-2222-2222-222222222222' > "$D/spawn-agent/led-ok.owner"   # put it back
+rm -f "$D/home/.claude-other/sessions/$CLPID.json"                             # and put THIS back
+```
+
+PASS on exactly:
+
+```
+55555555-5555-5555-5555-555555555555
+  me-cross     -> exit=0
+  ownermismatch -> exit=3
+  ownermatch   -> exit=0
+```
+
+**Run this sub-check after 3b's matrix, never before, and note that it cleans up after
+itself.** It is the one block here that makes this session resolvable under the fixture
+profile, and that is precisely what flips `led-ok.tsv` from `ok -> exit=0` to
+`ownermismatch -> exit=3`. Both readings are correct for their own precondition.
+
+**The two `put it back` lines are what make a re-run honest, and leaving them out was
+measured on 2026-09-16.** Ordering advice covers one pass; it does not cover running the
+matrix again, which is an ordinary thing to do while debugging. With this session's record
+left behind under the fixture profile, a second pass of 3b's matrix answers `ok -> exit=3`
+instead of 0, `nohost -> exit=3`, `ambiguous -> exit=3` instead of 4, `norow -> exit=3`
+instead of 2, and `crossprofile -> exit=3` **with its asserted address gone** — five of
+nine lines false-FAIL, all pointing at code that is fine. A fixture a check mutates is a
+fixture that check has to restore.
+
+**`ownermismatch` is a branch no fixture reached before 2026-09-16.** `foreign`'s exit 3
+comes from the *name-collision* arm — a live session holding the name that this run did
+not spawn — while this one comes from the sidecar comparison, and the two share an exit
+code without sharing a line of reasoning. Until this pair existed, the arm that answers
+"whose ledger is this" was asserted nowhere, and the smoke suite recorded its inertness
+under the fixture profile as expected behaviour, which pinned the gap open instead of
+closing it.
+
+**The asymmetry is the assertion, so do not "fix" a failure by pointing
+`CLAUDE_CONFIG_DIR` at the profile holding the record.** `$D` deliberately has a
+`sessions/` directory of its own and no record for this pid; the one that answers is
+under `$D/home/.claude-other`, which the variable never names. That is the shape
+`owned.py` and the watcher were both widened for on 2026-09-07, measured on a live
+worker — and it is reached without a worker at all here.
+
+**It is falsifiable against the version it replaces, which is what makes it worth
+running.** The pre-2026-09-16 `me.py` prints `me: no session record for claude pid
+<CLPID> under <D>` and exits 1 on this exact fixture — measured 2026-09-16, both
+versions, same fixture, one run. Check 3b's own nine lines are untouched by it: this
+writes a new record under a pid that is not 1 and reads a field none of them read.
 
 ### The enforcement layer — it ships, so its absence is a FAIL
 
@@ -1100,6 +1194,37 @@ Both green runs on 2026-08-12, one on cmux and one on herdr, chose 180 s indepen
 and both saw the single line at about 30 s, leaving two full minutes of quiet as
 evidence rather than as an unmeasured gap.
 
+**And assert the shipped arm block names the parameter that exists.** Static, no worker,
+no `Monitor` — it reads the text a supervisor is about to follow:
+
+```bash
+K=plugins/agent-toolkit/skills/spawn-agent/SKILL.md
+grep -c 'timeout_ms' "$K"
+grep -c 'persistent: true' "$K"
+```
+
+PASS is a non-zero first number and a **zero** second one. Both halves are the assertion.
+`Monitor`'s schema is `required: ["description","timeout_ms"]` with
+`additionalProperties: false` and no `persistent` anywhere — re-read off the loaded tool
+on 2026-09-16 — so a skill that told you to pass `persistent: true` was naming a key that
+makes the call *rejected*, and naming no key for the one thing that governs how long the
+watch lives. It shipped that way for long enough that the 30-minute expiry it produces
+was being read as a watcher that died.
+
+Note what this check deliberately does **not** do: it does not re-measure the cap. The
+schema states it — `minimum: 1000`, `maximum: 3600000`, with anything above 1800000
+clamped to 1800000 — so a check that armed a `Monitor` for longer and timed how long it
+lived would take half an hour to confirm a documented number. Keep the two failures
+apart when reading a bad arm: 1800001–3600000 is a silent clamp, above 3600000 is a
+rejected call.
+
+**The run's own watcher takes a timeout too, and the suite used to name one only here.**
+This check's 180 s belongs to the *deaf* watcher; checks 7 and 9 arm the real one and
+stated no timeout at all, which is how a run of this suite could never observe the
+expiry that the field hit. Arm that one at `1800000` — the same value the skill now
+tells a supervisor to use — so the suite exercises the shipped instruction rather than a
+shorter one written only for the deaf case.
+
 Keep the task id. Checks 11 and 12 both need it -- 11 reads its lines, 12 stops it.
 
 ## 6. Rails for everything below this line
@@ -1316,6 +1441,26 @@ occur, because `--cwd` is an argv element. Two different things must be true ins
   `herdr agent start <name> --kind claude --pane <id> -- -n <NAME>`. Without it herdr
   exits **2** with `unknown option: -n` and starts nothing. Record the exit code you
   got; a 2 here means you dropped the separator.
+
+**cmux, and this half is about the target rather than the payload:** a launch that
+reads perfectly can still be aimed at you. `--surface ""` and `--workspace ""` both fall
+back to the *caller's* own, and every variable in that line died with the placement
+call, so the failure mode is a launch line submitted into the supervisor's own input
+box. Assert the target before sending, not after:
+
+```bash
+S="<plugin root>/skills/spawn-agent/hosts/cmux-surface.py"
+SURF="<the surface ref §4 resolved, from ledger column 2>"
+[ -n "$SURF" ] || { echo "FAIL empty surface -- this launch would go to the caller"; exit 1; }
+[ "$(python3 "$S" "$SURF" id)" != "$CMUX_SURFACE_ID" ] || { echo "FAIL that is MY surface"; exit 1; }
+echo "  target ok: $SURF is not this session's slot"
+```
+
+PASS is the `target ok` line. Both refusals are reachable and neither is theoretical:
+the first is what an unbound `$SURF` produces, the second is what happens when the
+placement step hands back the caller's own slot. Nothing else in this suite asserts
+that a launch is aimed somewhere other than here — 7c's payload check passes on a
+launch line typed into this very session.
 
 ### 7d. Readiness, and the failures that look identical — *core, with a host twist*
 
@@ -1567,6 +1712,37 @@ cosmetics and warns that "the trap is the fixing"; the trap here is the mirror i
 an equality assertion that turns the one check proving this plugin's most-repeated bug
 is fixed into a guaranteed FAIL on every machine with a `$TMPDIR`.
 
+**Then assert column 6 is a digit — this is the half a rescued worker used to lose.**
+
+```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux -- or CALLER_SLOT="${HERDR_PANE_ID//:/-}"
+[ -n "$CALLER_SLOT" ] || { echo "FAIL empty slot"; exit 1; }
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+awk -F'\t' -v c=6 -v k=1 -v want="<NAME>" '$k==want {print "  col6=[" $c "]"}' "$LEDGER"
+```
+
+PASS is `col6=[<some digits>]`. A `col6=[-]` is the defect: the worker this check just
+rescued cleared its gate, registered, and is answering — and its row still says nobody
+pinned it.
+
+**Why the gate path is the only one that reaches it.** The pin lives at the end of the
+readiness block behind `[ -n "$PID" ]`, and a worker parked on the folder-trust gate has
+registered nothing, so `owned.py` exits 1, the pid is empty and the pin is skipped. Every
+worker that clears readiness normally is pinned and never sees this. 7e is the one check
+in the suite that deliberately produces a gated worker, which makes it the only place the
+assertion can be made at all.
+
+**What the `-` costs is a three-way disagreement, and it is why this is worth a line.**
+`-` is truthy, so the row takes the minted-id path; after a `/clear` rotates the session
+id, `owned.py` answers exit 3 on the run's own worker — the stop that forbids sending,
+keying and closing it — the `SendMessage` guard hook misses on the same column and starts
+asking on every message, while `occupant.py` joins on argv, which `/clear` does not
+touch, and keeps answering 0. Check 11f's `/clear` fixture cannot catch any of it: it
+writes `os.getpid()` into column 6, so it only ever exercises the pinned path.
+
+Falsifiable against the tree it replaces: before 2026-09-16 nothing re-pinned after the
+gate cleared, so this block printed `col6=[-]` on every run that took the gate branch.
+
 ### 7f. Remote control is opt-in — both sides, all four sites — *static*
 
 The one check in this file that needs no worker, no host and no network: it reads the
@@ -1611,6 +1787,244 @@ Falsified in both directions before it was written down. Against the pre-change 
 it reports `total=2 bridged=0 plain=2` and exits 1; against a tree whose plain lines
 were given the flag it reports `bridged=4 plain=0` and exits 1. A check that cannot
 fail is not a check, and this one fails on each defect separately.
+
+### 7h. Every shebang script is executable — *static*
+
+The only assertion over a file mode anywhere in this suite, and it exists because
+nothing else would notice: a patch applied without mode bits, a zip-based install, or a
+refactor that recreates a file drops the bit while every other check stays green.
+
+```bash
+R=plugins/agent-toolkit
+bad=0
+for f in $(find "$R" -name '*.py' -not -path '*__pycache__*' | sort); do
+  head -1 "$f" | grep -q '^#!' || continue
+  m=$(git ls-files -s "$f" | awk -v c=1 '{print $c}')   # -v c, never a bare dollar-one
+  [ "$m" = 100755 ] || { echo "  FAIL $f is $m, expected 100755"; bad=1; }
+done
+echo "  checked $(find "$R" -name '*.py' -not -path '*__pycache__*' | wc -l | tr -d ' ') scripts"
+exit $bad
+```
+
+PASS is the count line with no `FAIL` above it, and seven is the count today. **It reads
+git's index, not the filesystem**, because the index is what an install copies and what a
+patch either carries or drops; `ls -l` would pass on a working tree whose bit git never
+recorded. `core.fileMode` is `true` in this repo, so the two agree on a healthy clone —
+which is exactly why the weaker of the two is the wrong one to assert.
+
+One consequence worth knowing before you call it a bug: a `chmod` that has not been
+staged still reads `FAIL` here, because the index has not learned it yet. That is the
+check answering correctly — an unrecorded bit is exactly what does not survive to a
+consumer — and `git add` is the fix, not an edit to this block.
+
+**It is keyed on the shebang, not on a list of filenames**, so a script added later is
+covered the day it lands rather than the day someone remembers to extend this block.
+
+Falsifiable against the tree it replaces: five of the seven were `100644` on `main` at
+0fbf2b9 — `owned.py`, `peer.py`, `me.py`, `occupant.py` and `cmux-surface.py`, i.e. every
+script that answers a lookup, while the watcher and the guard hook were already
+executable. Running this block there prints five `FAIL` lines and exits 1.
+
+### 7g. Every fence binds the values it can re-derive — *static*
+
+The second check here that needs no worker and no host, and it exists because the
+failure it catches is **silent on both halves**. A `Bash` call gets a fresh shell, so a
+fence that spends a helper path, the ledger or a host target without binding it first is
+running against empty strings.
+
+Spent on a *script*, an empty value prints nothing on stdout and exits 1 — and every
+caller in this plugin reads an empty capture as an **answer**. Teardown reads it as "the
+tab is already gone" and reports a leaked slot as a clean finish. The cwd verification
+reads it as a worker with no cwd. The readiness loop gets `owned.py` exit 2, which sits
+*below* its own `-ge 3` stop threshold, so it spins all sixty iterations and blames the
+worker.
+
+Spent on a **host flag** it is worse, because there the value is not treated as empty at
+all: `--workspace ""` and `--surface ""` both take their documented default of the
+*caller's own*. The command succeeds, exits 0, and lands on the supervisor — which is
+how a launch line gets submitted into the session that was trying to spawn a worker.
+
+```bash
+python3 - <<'EOF'
+import re, sys
+root = "plugins/agent-toolkit/skills/spawn-agent"
+files = [f"{root}/SKILL.md", f"{root}/hosts/cmux.md", f"{root}/hosts/herdr.md"]
+VARS = ("O", "OC", "S", "LEDGER", "WS", "REF", "SURF")
+bad = []
+for path in files:
+    lines = open(path, encoding="utf-8").read().split("\n")
+    inside, start, buf = False, 0, []
+    for i, line in enumerate(lines, 1):
+        if line.startswith("```"):
+            if not inside:
+                inside, start, buf = True, i, []
+            else:
+                inside = False
+                body = "\n".join(buf)
+                uses = {v for v in VARS if re.search(r"\$\{?" + v + r'[}"\s/]', body)}
+                binds = {v for v in uses if re.search(r"^\s*" + v + r"=", body, re.M)}
+                if uses - binds:
+                    bad.append(f"{path}:{start} spends {sorted(uses - binds)} without binding")
+            continue
+        if inside:
+            buf.append(line)
+for b in bad:
+    print(" ", b)
+print("unbound fences:", len(bad))
+sys.exit(0 if len(bad) == 3 else 1)
+EOF
+```
+
+**PASS is exactly three**, and each one is named rather than tolerated. Two are
+illustrations whose whole purpose is the argument shape, and both say so in the line
+beneath them: the `owned.py` usage examples under "**The peer registry is a directory of
+JSON files**" — the fence itself carries no disclaimer, the exit-code table directly
+under it is what explains an empty one — and `cmux.md`'s unquoted-`$f` block, which shows
+the error an unquoted option string produces and is not a recipe. The third is the mint
+block, whose `$LEDGER` is spent as `>> "$LEDGER"` — that one fails **loudly**, measured
+as `bash: : No such file or directory`, exit 1 — and this check's class is the silent
+empty capture, not a redirect that refuses.
+
+**`VARS` is a closed list on purpose, and the heading says "can re-derive" for that
+reason.** Every name in it is something a fence can rebuild from the process environment
+or from the plugin root: the four helper paths, the ledger, and the two host targets. The
+**caller-supplied** class — `$l1`, `$L1`, `$NAME`, `$SID`, `$REPO` — is deliberately out
+of scope, because those are values an operator writes in from the row it just created, so
+the convention for them is an explicit `<placeholder>` line rather than a binding, and no
+scan can tell a missing placeholder from a deliberate one. Measured 2026-09-16: adding
+`l1`/`L1` takes this check from 3 to 20, and adding `NAME`/`SID` takes it to 38 — almost
+every fence in the tree, which is what a check that flags the whole convention looks
+like. If that class is ever worth policing it wants its own check and its own rule, not a
+wider tuple here.
+
+**Falsifiable against the tree it replaces.** Run against `main` at 0fbf2b9 it reports
+**twenty-four** — measured 2026-09-16 in a throwaway worktree — and all but three are
+blocks a supervisor is told to run verbatim: cmux teardown §7 (which spent four without
+binding one), all four §4 launch lines, the orphaned `send-key … enter` that submits a
+slash command, both hosts' cwd verification, herdr's pane-vs-registry check, the
+readiness loop, the "am I owed a reply" probe and the teardown loop that drives the host
+close section.
+
+Raise the expected number only with a reason written beside it, and never by editing the
+number alone: the failure this catches never announces itself, so the count is the only
+thing standing between a silent empty capture and a supervisor acting on it.
+
+### 7i. The input-box emptiness probe — *static*
+
+No worker, no host, no network. It extracts the probe **out of the shipped skill text**
+and runs that, against fixtures cut to the shape of a real capture — chrome below the box
+included, because that is the shape every real screen has and the shape the first version
+of this check did not have.
+
+```bash
+python3 - <<'EOF'
+import re, subprocess, sys
+
+R = "plugins/agent-toolkit/skills/spawn-agent"
+
+def fences(path):
+    out, buf, inside = [], [], False
+    for line in open(path, encoding="utf-8").read().split("\n"):
+        if line.startswith("```"):
+            if inside: out.append("\n".join(buf))
+            inside, buf = not inside, []
+            continue
+        if inside: buf.append(line)
+    return out
+
+def probe(path):
+    hits = [b for b in fences(path) if "unicodedata" in b]
+    if len(hits) != 1:
+        sys.exit("  FAIL %s: expected exactly 1 probe fence, found %d" % (path, len(hits)))
+    m = re.match(r"^.*?\|\s*python3 -c '(.*)'$", hits[0].strip(), re.S)
+    if not m:
+        sys.exit("  FAIL %s: probe fence is not the documented | python3 -c '...' shape" % path)
+    return m.group(1)
+
+src = probe(R + "/SKILL.md")
+for host in ("cmux", "herdr"):
+    if probe(R + "/hosts/" + host + ".md") != src:
+        sys.exit("  FAIL hosts/%s.md probe has drifted from SKILL.md's" % host)
+print("  shipped probe extracted, 3 copies identical")
+
+BOX_EMPTY    = "\u276f\u00a0"
+BOX_BUSY     = "\u276f\u00a0/some-slash-command arg"
+CHROME       = ["\u2500" * 40,
+                "  [ST] \u279c agent-toolkit git:(main) Opus 5 (1M context) 39%",
+                "  \u23f5\u23f5 auto mode on (shift+tab to cycle) \u00b7 \u2190 for agents"]
+
+CASES = [
+    ("real-empty",   ["work output", "\u2500" * 40, BOX_EMPTY] + CHROME),
+    ("real-busy",    ["work output", "\u2500" * 40, BOX_BUSY]  + CHROME),
+    ("empty-nbsp",   [BOX_EMPTY]),
+    ("empty-plain",  ["\u276f      "]),
+    ("busy-blankend",[BOX_BUSY, "", ""]),   # two, so splitlines() really yields a trailing blank
+    ("dialog",       ["Do you trust this folder?", "\u276f 1. Yes, I trust", "  2. No, exit"]),
+    ("shell-only",   ["  \u279c  agent-toolkit git:(main)"]),
+    ("nothing",      []),
+]
+for name, rows in CASES:
+    r = subprocess.run([sys.executable, "-c", src], input="\n".join(rows),
+                       capture_output=True, text=True)
+    # A probe that CRASHES prints nothing, and a blank line beside a fixture name is
+    # not a readable failure -- say rc and the last stderr line instead.
+    said = r.stdout.strip() or "CRASHED rc=%d %s" % (
+        r.returncode, (r.stderr.strip().splitlines() or [""])[-1])
+    print("  %-14s -> %s" % (name, said))
+EOF
+```
+
+PASS on exactly:
+
+```
+  shipped probe extracted, 3 copies identical
+  real-empty     -> EMPTY (row 3 of 6)
+  real-busy      -> OCCUPIED (row 3 of 6) '/some-slash-commandarg'
+  empty-nbsp     -> EMPTY (row 1 of 1)
+  empty-plain    -> EMPTY (row 1 of 1)
+  busy-blankend  -> OCCUPIED (row 1 of 2) '/some-slash-commandarg'
+  dialog         -> OCCUPIED (row 2 of 3) '1.Yes,Itrust'
+  shell-only     -> NO PROMPT LINE (searched 1 rows)
+  nothing        -> NO CAPTURE
+```
+
+**`real-empty` and `real-busy` are the two the first version of this check could not
+express, and they are why it was written again.** Both put the box where a real capture
+puts it — three rows of chrome below — and the probe this branch first shipped read the
+*last* line, so `real-empty` answered `OCCUPIED '⏵⏵automodeon…'` on a healthy empty box
+and `busy-blankend` answered `EMPTY` on an occupied one. The fixtures it shipped with all
+put the prompt line last, which made the last-line rule right by construction. **A fixture
+set that can only be satisfied by the implementation you happen to have is not coverage**,
+and the shape to copy is the real capture, not the convenient one.
+
+**It runs the SHIPPED text, not a transcription, and that is the larger half of the
+repair.** The first version pasted an inline copy of the probe, so mutating
+`plugins/agent-toolkit/skills/spawn-agent/SKILL.md` could not move this check — it printed
+all its expected lines on `main`, where the probe does not exist at all. Extraction is
+therefore checked rather than assumed: a fence that has been renamed, reshaped, or
+duplicated fails here with `FAIL`, because an extractor that silently finds nothing is the
+same unfalsifiable check wearing a different coat.
+
+**The three copies must agree.** `SKILL.md`, `hosts/cmux.md` and `hosts/herdr.md` each
+carry the probe so each fence runs standalone, which is the convention here — and three
+copies of anything drift. The extractor compares them and fails on the first difference,
+so a fix applied to one host is caught the next time this runs.
+
+**`dialog` and `shell-only` are documentation, not aspiration.** The probe cannot tell an
+input box from a dialog's selection row — scanning upward reads the selection row rather
+than a stray option, which is closer to honest but is still not a box — so `dialog`
+records what it actually answers. `shell-only` pins the case a capture with no chevron
+must produce: `NO PROMPT LINE`, distinct from `EMPTY`, because a surface holding a shell
+is not a worker with an empty box.
+
+**Do not "simplify" any of this to a grep.** Which characters `[[:space:]]` covers, and
+whether `-P` exists, depend on which `grep` you get — and inside a `Bash` call you do not
+get the system one. Measured 2026-09-16: `grep` in this environment resolves to an
+injected `ugrep` 7.8.4 where `-P` works and `[[:space:]]` matches U+00A0 even under
+`LC_ALL=C`, while `/usr/bin/grep` on the same machine is BSD 2.6.0 with no `-P` at all. A
+shell *script* gets the second one. That gap is why the test is `python3` + `unicodedata`,
+this repo's only scripting dependency, and why a guard that looked repaired interactively
+would have shipped broken.
 
 ## 8. The task, the address, and the reply — *core*
 
@@ -2726,8 +3140,21 @@ CLPID="<the session pid check 0b printed>"
 rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
       "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"
 rm -rf "${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
-ls "${TMPDIR:-/tmp}/spawn-agent/" 2>/dev/null; echo "  (your slot's .tsv must be gone)"
+for f in "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
+         "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"; do
+  [ -e "$f" ] && echo "  FAIL LEFTOVER $f"
+  :
+done
+echo "  (no LEFTOVER line above = both files gone)"
 ```
+
+   **Both names, not just the `.tsv`.** The line here used to `ls` the whole directory
+   under an echo naming only the ledger, so a stranded `.owner` was printed and read
+   past — and a stranded `.owner` is the state that arms the guard hook for the whole
+   machine while granting nobody anything, which is check 3b's "no sidecar" symptom
+   reached from the mirror image. Scoped to `$CALLER_SLOT` it also stops reporting
+   other runs' live ledgers as this run's leftovers. The trailing `:` keeps the loop's
+   exit status at 0 so that the clean case does not surface as a failed `Bash` call.
 
    The second line removes **this run's** scratch directory and nothing else — the
    throwaway repo, the ledger fixtures, the deaf watcher's ledger, and check 3's

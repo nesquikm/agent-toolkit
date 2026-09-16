@@ -340,6 +340,10 @@ join is the controlling terminal — the host names the tty, `ps` names the proc
 
 ```bash
 OC="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/occupant.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 python3 "$OC" "<the slot's tty>" "$LEDGER" "$NAME" || exit 1   # 0 is the only pass
 ```
 
@@ -399,9 +403,13 @@ is yours and cannot prove it — which is the next paragraph.
 **And `owned.py` now says so rather than handing you an address.** A ledger with no
 `.owner` beside it exits 5 and names the sidecar; it used to resolve happily, which
 sent a blocked supervisor to a tool reporting nothing wrong. That state is not a
-stranger's session — it is what a supervisor **mid-upgrade** produces: skill text is
-snapshotted at session start while `lib/*.py` is read fresh on every call, so text
-from before the sidecar existed writes correctly shaped rows and no sidecar at all.
+stranger's session — it is what a supervisor **mid-upgrade** produces: `lib/*.py` is
+opened at use time and is always current, while this text is served from a skill roster
+that refreshes asynchronously and announces nothing, so a session can be running
+pre-sidecar instructions against post-sidecar scripts and write correctly shaped rows
+with no sidecar at all. The window is what matters here, not its length; the older
+wording said the text was pinned at session start, which this repo measured false on
+2026-09-04.
 The workers really are yours, and ownership is still unprovable. Exit 5 prints the
 repair with the real paths filled in:
 
@@ -567,7 +575,22 @@ out in full instead.
 
 ### The ledger
 
-Seven tab-separated columns, plus a one-line `.owner` sidecar beside it:
+Seven tab-separated columns, plus a one-line `.owner` sidecar beside it.
+
+**"Beside it" is the shape, not the name. The name is the ledger path with `.tsv`
+REPLACED by `.owner` — never with `.owner` appended.** Three writers agree on that and
+none of them is prose: the setup block's `OWNER_FILE="${LEDGER%.tsv}.owner"`, the line
+that stamps it in the mint step, and `owned.py`'s `os.path.splitext(ledger)[0] +
+".owner"`. Everywhere else in this file the sidecar is described by position, which is
+why a re-derivation at teardown can quietly produce `<slot>.tsv.owner` — a name nothing
+ever wrote, so deleting it deletes nothing, and the real sidecar survives a teardown
+that reported success. That is not cosmetic, and the reason is in the guard hook rather
+than here: it arms on *any* `*.owner` in the ledger directory but computes its grants
+from each `*.tsv`, so the stranded file arms the guard machine-wide and grants nobody
+anything. Every `SendMessage` on the machine then asks, in both directions,
+indefinitely. Measured 2026-09-16 against the shipped hook: ledger present and sidecar
+present, silent; ledger deleted and sidecar stranded, `ask`.
+
 
 ```
 name <tab> loc1 <tab> loc2 <tab> state <tab> session_id <tab> pid <tab> host
@@ -782,6 +805,10 @@ doing is the difference between a watcher and a post-mortem.
 
 ```bash
 O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 n=0
 until python3 "$O" "$LEDGER" "$NAME" >/dev/null; do
   s=$?
@@ -985,9 +1012,12 @@ one and two extra shell levels); it refuses rather than printing an empty string
 because `sessions/<pid>.json` is keyed by pid and pids are recycled into exactly the
 range wrapper shells are born in — the old inline form handed pid 19143 printed
 `bin-09 uds:/tmp/cc-socks/19143.sock`, a complete, plausible, wrong answer naming a
-live session belonging to somebody else's run; and it honours every colon-separated
-segment of `CLAUDE_CONFIG_DIR`, since a second profile really does exist on this
-machine.
+live session belonging to somebody else's run; and it sweeps **every** profile on this
+machine — `CLAUDE_CONFIG_DIR`'s segments, `~/.claude`, and every `~/.claude-*` — through
+the same list `owned.py`, the watcher and the guard hook all read. Honouring
+`CLAUDE_CONFIG_DIR` was never the sufficient half: the case that bites is a record in a
+profile that variable does **not** name, which is the ordinary shape here, and searching
+only the named one is the fork that shipped in three scripts and was closed in each.
 
 **The `[ -n "$ME" ]` line is what turns a refusal into a stop** rather than a task sent
 with an empty address in it — which would send the worker back to addressing you by
@@ -1092,6 +1122,11 @@ reply and it has not come.** Before re-sending, ask whether the worker is idle a
 look at what it actually did:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
 python3 "$O" "$LEDGER" "$NAME" status     # idle, with no reply in hand, is the signature
 ```
 
@@ -1149,8 +1184,41 @@ command.
 
 Arm **one** of these right after the first spawn — always, including for a run of
 exactly one worker. It covers every worker in the run, including ones spawned
-later, because it re-reads the ledger on every poll. Pass `persistent: true` for a
-run that may outlast a single Monitor timeout.
+later, because it re-reads the ledger on every poll.
+
+**Arm it with `timeout_ms: 1800000`, and expect expiry on any run longer than half an
+hour.** That is the ceiling in practice, and the two ways past it fail differently: up to
+the schema's `maximum` of 3600000 a larger number is silently **capped** back to
+1800000 — the same watch, written misleadingly — and above 3600000 the call is **rejected**
+outright, which is a watcher you never armed rather than one that expires early. `timeout_ms` is also the
+parameter this tool takes — it is required and there is no `persistent`, so an arm that
+names the wrong key is a rejected call rather than a watcher with a different lifetime.
+Expiry is not a fault: you are notified, and you re-arm and keep going.
+
+**A re-armed watcher starts with no memory of any worker, and that costs you exactly the
+signals worth having.** A worker still blocked is reported again, because first sight of
+`ask` or `attn` prints. A worker that is merely `busy` or `idle` is re-learned in
+silence — so a turn that *ended* during the gap yields no line at all, neither a late
+`DONE` nor the `GATE` that would have carried its question, and a worker that *died* in
+the gap never gets a `GONE`, because absence is computed only over workers this process
+has already seen alive.
+
+That is the anti-fabrication property below working as designed, and it is why the
+watcher is not the recovery path — **the ledger is.** On every re-arm, read the rows you
+have not yet reported:
+
+```bash
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+awk -F'\t' -v c=4 '$c!="reported"' "$LEDGER"
+```
+
+Reconcile each of those against that worker's own reply, or against its screen where no
+reply came, rather than waiting for a line that will never arrive. **Do this before
+teardown step 3**, which deletes the ledger — the recovery path and the thing being
+recovered from are the same file.
 
 **That block is the `Monitor` tool's `command` — never a `Bash` call.** It is
 written in shell, so backgrounding it with `Bash(run_in_background: true)` looks
@@ -1597,6 +1665,71 @@ suggested-follow-up ghost text in the prompt exactly like real input, and a queu
 peer message sits there too. Neither is pending user input, and pressing `enter`
 on either submits it. Judge from the dialog, not from the prompt line.
 
+**Where there is no dialog, prove the box is empty before you type NEW text into a
+worker** — a task, a chain step, a slash command. Never before *answering* a dialog:
+a `SendMessage` to a blocked worker returns `success: true` and then sits in that same
+box as queued text, so an emptiness precondition applied there would forbid the `enter`
+that unblocks it, and this skill would lose the ability to unstick workers at all.
+
+**The obvious test is broken, and it fails in the direction that stalls a chain.**
+cmux draws a **non-breaking space (U+00A0)** after the `❯`, so a guard written
+`grep -qE "❯ *$"` never matches a box that is in fact empty — reproduced 2026-09-16
+against a capture of the real prompt line: NO-MATCH on the empty box, MATCH on the same
+line with an ordinary space. It reports occupied, you decline to send, and nothing
+anywhere reports a fault.
+
+**Do not reach for a different `grep` pattern.** Which characters `[[:space:]]` covers,
+and whether `-P` exists at all, depend on *which* `grep` is installed: measured the same
+day on this machine, `grep` is ugrep 7.8.4, where `[[:space:]]` matches U+00A0 even under
+`LC_ALL=C` and `-P` is available — and BSD and GNU `grep` answer differently. A guard
+that looks repaired on the machine you tested is the same defect with a longer fuse.
+
+**Classify by Unicode category instead**, which is implementation-independent and needs
+only `python3`. Pipe your host file's read command into this:
+
+```bash
+| python3 -c 'import sys, unicodedata
+raw = sys.stdin.read().splitlines()
+if not raw: print("NO CAPTURE"); sys.exit(2)
+i = next((k for k in range(len(raw) - 1, -1, -1) if "❯" in raw[k]), -1)
+if i < 0: print("NO PROMPT LINE (searched %d rows)" % len(raw)); sys.exit(3)
+body = raw[i].split("❯", 1)[1]
+vis = [c for c in body if unicodedata.category(c) not in ("Zs", "Cc", "Cf")]
+print("EMPTY (row %d of %d)" % (i + 1, len(raw)) if not vis
+      else "OCCUPIED (row %d of %d) %s" % (i + 1, len(raw), repr("".join(vis))))'
+```
+
+Three things about that shape are deliberate. `Zs` covers U+0020 and U+00A0 alike — and
+U+202F and U+2007, the next two surprises — so it is proof against the *class* rather
+than against the one character that has bitten so far. It **scans upward from the end for
+the chevron** rather than reading the last line. And it distinguishes four answers, not
+two: `NO CAPTURE` for a read that returned nothing, and `NO PROMPT LINE` for a capture
+with no chevron anywhere in it — a plain shell, or a viewport that saturated before the
+box — neither of which is a box that is empty.
+
+**Reading the last line was measured wrong on 2026-09-16, and it is worth knowing why,
+because the wrong version looked more careful.** Claude Code always draws chrome *below*
+the input box — a rule, the status line, `⏵⏵ auto mode on`, the agent row. Measured on a
+live 55-row `cmux read-screen`: the box was row 52, genuinely empty (`❯` + U+00A0 and
+nothing else), and rows 53-55 were chrome. Reading the last line answered
+`OCCUPIED '⏵⏵automodeon…'` on a healthy empty box — so the rule above would have forbidden
+every chain step and every keyed slash command, which is the stall this section exists to
+prevent, reached from the other side. It failed the opposite way too: an occupied box in a
+capture ending in a blank line answered `EMPTY`, and the `enter` after that submits
+whatever was already there.
+
+**What this probe does *not* do is tell an input box from a dialog's selection row**, and
+an earlier version of this paragraph claimed the last-line rule avoided that. It did not —
+on a dialog capture it simply read the last *option* instead. Scanning upward reads the
+selection row, which is closer to honest but still not an input box. Nothing here can make
+that distinction, which is why the rule at the top of this section is scoped to *where
+there is no dialog*, and why the row number is printed: a prompt line four rows above a
+55-row capture's end is the box, and one in the middle of a dialog is not.
+
+**Emptiness is not readiness.** A worker blocked on an open dialog can have an empty
+box; this answers "would `enter` submit something", never "is this worker free". The
+dialog rule above is still the one that decides that.
+
 ## Chain stages
 
 Same session, next task — context carries over, so use this when the next stage
@@ -1763,6 +1896,65 @@ no transcript file at all — zero turns. Three failures in one call, and the ca
 returned success. This is exactly what the registry-based readiness loop prevents, and
 why it is not optional on any host.
 
+**A worker rescued off a gate has never been pinned — pin it now.** The pid lands in
+column 6 inside the readiness block, guarded by `[ -n "$PID" ]`, and a worker parked on a
+gate has registered nothing, so `owned.py` exits 1, `$PID` is empty and the pin is
+skipped. Nothing anywhere re-pins it: the row carries `-` for the rest of the run. Re-run
+the same rewrite once the gate is cleared and the worker has registered — it is the block
+from the readiness step, unchanged, with its bindings re-pasted:
+
+```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+PID=$(python3 "$O" "$LEDGER" "$NAME" pid)
+[ -n "$PID" ] && python3 - "$LEDGER" "$NAME" "$PID" <<'PIN'
+import sys
+led, name, pid = sys.argv[1:4]
+rows = [l.rstrip("\n").split("\t") for l in open(led)]
+for r in rows:
+    if r and r[0] == name and len(r) >= 6:
+        r[5] = pid
+open(led, "w").write("".join("\t".join(r) + "\n" for r in rows if r != [""]))
+PIN
+:
+```
+
+**It is advisory, and it must stay advisory.** The `[ -n "$PID" ]` guard is the whole of
+the error handling: a worker that still has not registered simply is not pinned yet, and
+turning that into a stop would make the rescue path unrecoverable — worse than the defect
+it closes. Run it again later if you like; the rewrite matches the name as a whole field
+and rewrites every row, so repeating it is free.
+
+**That trailing `:` is the same fix teardown step 4 carries, and this block needed it
+more.** `[ -n "$PID" ] && python3 …` takes the status of the guard when the guard is
+false, so the block exits 1 in *precisely* the case the paragraph above calls normal and
+expected — a not-yet-registered worker — and the `Bash` call reports a failure for the
+advisory path. The readiness pin has carried that shape since before this branch and is
+harmless there, because an empty pid at readiness is the timeout branch and the caller is
+already reading a screen. Copying it into a block whose documented-normal path is the
+failing one is what made it worth a line.
+
+**What an unpinned row costs is not cosmetic, and it is silent until it is not.** Column
+6 is how a row survives `/clear`, which rotates the worker's session id in about 400 ms
+while its pid, name and socket stay put. With a digit there, the pid re-attaches the row.
+With `-` there is nothing to re-attach by — and `-` is *truthy*, so the row takes the
+minted-id path, the minted id no longer matches, and three shipped readers then disagree
+about one live worker at one instant:
+
+- `owned.py` finds a live session holding the name that it cannot prove is ours, and
+  answers **exit 3** — the hard stop meaning do not send to it, do not key it, do not
+  close it. Your own rescued worker, refused for the rest of the run.
+- the `SendMessage` guard hook does the same re-attach on the same column, misses for the
+  same reason, and returns `ask` on every message to that worker from then on.
+- `occupant.py` falls through to the argv join, which `/clear` does not touch, so it goes
+  on answering **0** for the very same worker.
+
+A guard that refuses and a guard that passes, disagreeing about one worker, is worse than
+either verdict alone.
+
 ## Read a worker's output
 
 Normally you don't have to: the worker's reply carries its findings. When you
@@ -1812,6 +2004,12 @@ When the last stage is reported, the ledger rows are spent slots. Resolve each
 one, then **offer** — cleanup is a proposal, never a side effect of finishing:
 
 ```bash
+O="${CLAUDE_PLUGIN_ROOT}/skills/spawn-agent/lib/owned.py"
+CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
+CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
+[ -n "$CALLER_SLOT" ] || exit 1
+LEDGER="${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv"
+
 # Re-derive the host here. $SPAWN_HOST died with the setup block's shell, exactly like
 # $CALLER_SLOT -- and the comparison's other side must come from the process
 # environment, never from the file, or the check compares the ledger against itself.
@@ -1850,7 +2048,17 @@ and they differ for a measured reason.
 **A foreign row is always this run's own deliberate cross-host spawn.** A ledger this
 run may act on at all is one it owns — the sidecar checks in the setup block and
 `owned.py`'s exit 3 and 5 guarantee it — so the row was written by this supervisor at a
-moment when it had the other host file in context. There is no stranger's-row case to
+moment when it had the other host file in context.
+
+**Exit 5 is unconditional; exit 3 has a precondition, and it says so out loud.** The
+owner *mismatch* is found by comparing the sidecar against this session's own id, so it
+can only fire where this session can be resolved. Where it cannot — a `claude` that has
+not registered, a lookup that timed out — `owned.py` resolves the rows anyway rather
+than stranding the run, and prints one `INERT` line on stderr naming the sidecar it
+could not check against. Read that line as *the ownership half of this paragraph is not
+in force right now*; it used to fall through in silence, which is byte-identical to a
+clean match. A **missing** sidecar is the other case and is never inert: exit 5 needs
+nothing about this session to refuse the whole file. There is no stranger's-row case to
 design for, which is exactly why "close it" is on the table at all.
 
 **Report foreign rows under their own heading, never mixed into the "close these?"
@@ -1933,10 +2141,9 @@ agent from an earlier session.
 
 ### Finish the run — four steps, in this order
 
-Closing the slots is not the end. The watcher is a *process*, and a `Monitor`
-armed with `persistent: true` runs until `TaskStop` or the end of the session that
-armed it — and **if you are yourself a spawned agent, your session ending does not
-reap it.** Observed: an agent finished, its slot was closed, and its watcher was
+Closing the slots is not the end. The watcher is a *process*, and a `Monitor` runs
+until `TaskStop` or until its `timeout_ms` expires, whichever comes first — and **if you
+are yourself a spawned agent, your session ending does not reap it.** Observed: an agent finished, its slot was closed, and its watcher was
 still polling.
 
 **Stop it first, before you close anything.** Once every worker has been reported the
@@ -1983,14 +2190,46 @@ rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
    run, all at once, and after that it has nothing left to say ever again. Expect that
    burst if step 1 did not take. It names workers you have already reported, it is as
    long as the run was wide, and it does not repeat.
-4. **Confirm nothing of yours is left**, scoped to your own slot:
+4. **Confirm nothing of yours is left** — the two files *and* the watcher, scoped to
+   your own slot:
 
 ```bash
 CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
 CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
 [ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- refusing an unscoped pattern"; exit 1; }
+for f in "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
+         "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"; do
+  [ -e "$f" ] && echo "LEFTOVER $f"
+  :
+done
 pgrep -fl "watch-workers.py.*${CALLER_SLOT}"
+echo "(no LEFTOVER line above = both files gone)"
 ```
+
+**Step 3 cannot tell you it worked, which is why this exists.** `rm -f` exits 0 and
+prints nothing whether the path was there or not, so a slot re-derived differently, or a
+sidecar named by appending rather than substituting, deletes nothing and reports
+success. This step used to check only the watcher while being titled "nothing of yours
+is left" — the non-shipped smoke suite had the file assertion and the shipped skill did
+not.
+
+**The `:` and the closing `echo` are load-bearing, and both are about exit status.** A
+loop whose body ends in `[ -e "$f" ] && echo …` takes the status of its *last test*, so
+the status tracks which file happened to be checked last rather than whether anything
+was found at all. Measured 2026-09-16: with neither file present the loop exits 1 — the
+clean case reported to the `Bash` tool as a failure — and with a stranded `.owner`
+checked ahead of an absent `.tsv` it exits 1 as well, so the two states it exists to
+separate are indistinguishable by status. The bare `:` terminates the body at 0, and the
+trailing line is what makes *absence* readable as the pass rather than as nothing having
+run.
+
+**The sidecar is the one that gets missed, and missing it is not untidiness.** The guard
+hook arms on any `*.owner` in the ledger directory and computes its grants from the
+`*.tsv` beside each one. A stranded sidecar with no ledger therefore arms it and grants
+nothing, so every `SendMessage` on this machine asks — in both directions, for every
+session, until someone finds the file. That is the same symptom as a ledger with no
+sidecar at all, reached from the mirror-image state, and four shipped files promise it
+cannot happen on the strength of this step.
 
 **Scope that `pgrep` — do not run it bare.** `pgrep -fl watch-workers.py` lists every
 watcher on the machine, including live ones belonging to other sessions and other

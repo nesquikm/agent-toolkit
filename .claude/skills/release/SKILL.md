@@ -414,10 +414,17 @@ CLAUDE_CONFIG_DIR="$HOME/.claude-st" claude plugin update agent-toolkit@agent-to
 profiles per directory is a common setup, and it makes a bare `claude plugin ...`
 silently target whichever profile the current directory selects.
 
-Finish by telling the user that **already-running sessions keep the skill text they
-loaded at start** — not because of the cache (a directory source never reads it), but
-because a session's skill inventory is built once. New sessions get the new text
-immediately; existing ones need a restart.
+Finish by telling the user how the new text reaches sessions, and say it the way this
+repo measured it rather than the way it used to be written. A session's skill **roster**
+refreshes asynchronously while it runs, and the text is served from that refresh — so an
+already-running session picks up the new bytes on its own, with nothing announcing when.
+A brand-new skill is the exception: it answers `Unknown skill` until the roster next
+refreshes, which is the one case worth opening a new `claude` for. None of this involves
+the cache; a directory source never reads it.
+
+The sentence that used to sit here said existing sessions need a restart. That is the
+premise `CLAUDE.md` records as reversed on 2026-09-04, and this was the third place it
+was written down.
 
 ## Rules
 

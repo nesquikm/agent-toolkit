@@ -103,7 +103,7 @@ The bump is not cosmetic: Claude Code serves a `github`-sourced plugin from a ca
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history.
 
-Latest: **v0.12.0 — "Earshot"** (a worker that asks in a statement rather than a question — "Tell me which", "Waiting on your go-ahead" — was reported as finished, because terminal punctuation was the only discriminator and a worker told to report rather than decide avoids question marks; the watcher now reads those too, clause-anchored and hand-checked over 5,083 turn-ending lines from 608 sessions. Underneath it, the three scripts that answer "where is my worker" each searched one profile while workers register in another, so a healthy worker was first called unreachable and then, once half of that was fixed, silently never reported at all)
+Latest: **v0.12.1 — "Gauge"** (thirteen fixes to instruments that reported success without measuring anything — an input-box probe that called every healthy worker busy and the check that certified it, a teardown that verified none of the two files it deleted while a stranded sidecar armed the SendMessage guard machine-wide, fences that spent variables no shell had bound, and an ownership stop that went silently inert whenever this session could not resolve itself; smoke-tested green on cmux at a8848d8, herdr unexercised)
 
 <!-- The line above is rewritten by /release and is matched by an anchored regex.
      Keep it on its own line and keep the closing paren last — text after that
