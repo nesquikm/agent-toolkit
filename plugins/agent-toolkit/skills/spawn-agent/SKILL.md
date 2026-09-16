@@ -567,7 +567,22 @@ out in full instead.
 
 ### The ledger
 
-Seven tab-separated columns, plus a one-line `.owner` sidecar beside it:
+Seven tab-separated columns, plus a one-line `.owner` sidecar beside it.
+
+**"Beside it" is the shape, not the name. The name is the ledger path with `.tsv`
+REPLACED by `.owner` — never with `.owner` appended.** Three writers agree on that and
+none of them is prose: the setup block's `OWNER_FILE="${LEDGER%.tsv}.owner"`, the line
+that stamps it in the mint step, and `owned.py`'s `os.path.splitext(ledger)[0] +
+".owner"`. Everywhere else in this file the sidecar is described by position, which is
+why a re-derivation at teardown can quietly produce `<slot>.tsv.owner` — a name nothing
+ever wrote, so deleting it deletes nothing, and the real sidecar survives a teardown
+that reported success. That is not cosmetic, and the reason is in the guard hook rather
+than here: it arms on *any* `*.owner` in the ledger directory but computes its grants
+from each `*.tsv`, so the stranded file arms the guard machine-wide and grants nobody
+anything. Every `SendMessage` on the machine then asks, in both directions,
+indefinitely. Measured 2026-09-16 against the shipped hook: ledger present and sidecar
+present, silent; ledger deleted and sidecar stranded, `ask`.
+
 
 ```
 name <tab> loc1 <tab> loc2 <tab> state <tab> session_id <tab> pid <tab> host
@@ -1996,14 +2011,46 @@ rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
    run, all at once, and after that it has nothing left to say ever again. Expect that
    burst if step 1 did not take. It names workers you have already reported, it is as
    long as the run was wide, and it does not repeat.
-4. **Confirm nothing of yours is left**, scoped to your own slot:
+4. **Confirm nothing of yours is left** — the two files *and* the watcher, scoped to
+   your own slot:
 
 ```bash
 CALLER_SLOT="$CMUX_SURFACE_ID"                  # cmux
 CALLER_SLOT="${HERDR_PANE_ID//:/-}"             # herdr -- use your host's line, not both
 [ -n "$CALLER_SLOT" ] || { echo "STOP empty slot -- refusing an unscoped pattern"; exit 1; }
+for f in "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
+         "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"; do
+  [ -e "$f" ] && echo "LEFTOVER $f"
+  :
+done
 pgrep -fl "watch-workers.py.*${CALLER_SLOT}"
+echo "(no LEFTOVER line above = both files gone)"
 ```
+
+**Step 3 cannot tell you it worked, which is why this exists.** `rm -f` exits 0 and
+prints nothing whether the path was there or not, so a slot re-derived differently, or a
+sidecar named by appending rather than substituting, deletes nothing and reports
+success. This step used to check only the watcher while being titled "nothing of yours
+is left" — the non-shipped smoke suite had the file assertion and the shipped skill did
+not.
+
+**The `:` and the closing `echo` are load-bearing, and both are about exit status.** A
+loop whose body ends in `[ -e "$f" ] && echo …` takes the status of its *last test*, so
+the status tracks which file happened to be checked last rather than whether anything
+was found at all. Measured 2026-09-16: with neither file present the loop exits 1 — the
+clean case reported to the `Bash` tool as a failure — and with a stranded `.owner`
+checked ahead of an absent `.tsv` it exits 1 as well, so the two states it exists to
+separate are indistinguishable by status. The bare `:` terminates the body at 0, and the
+trailing line is what makes *absence* readable as the pass rather than as nothing having
+run.
+
+**The sidecar is the one that gets missed, and missing it is not untidiness.** The guard
+hook arms on any `*.owner` in the ledger directory and computes its grants from the
+`*.tsv` beside each one. A stranded sidecar with no ledger therefore arms it and grants
+nothing, so every `SendMessage` on this machine asks — in both directions, for every
+session, until someone finds the file. That is the same symptom as a ledger with no
+sidecar at all, reached from the mirror-image state, and four shipped files promise it
+cannot happen on the strength of this step.
 
 **Scope that `pgrep` — do not run it bare.** `pgrep -fl watch-workers.py` lists every
 watcher on the machine, including live ones belonging to other sessions and other

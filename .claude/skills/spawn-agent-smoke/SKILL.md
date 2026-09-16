@@ -2797,8 +2797,21 @@ CLPID="<the session pid check 0b printed>"
 rm -f "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
       "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"
 rm -rf "${TMPDIR:-/tmp}/spawn-agent-smoke/$CLPID"
-ls "${TMPDIR:-/tmp}/spawn-agent/" 2>/dev/null; echo "  (your slot's .tsv must be gone)"
+for f in "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.tsv" \
+         "${TMPDIR:-/tmp}/spawn-agent/${CALLER_SLOT}.owner"; do
+  [ -e "$f" ] && echo "  FAIL LEFTOVER $f"
+  :
+done
+echo "  (no LEFTOVER line above = both files gone)"
 ```
+
+   **Both names, not just the `.tsv`.** The line here used to `ls` the whole directory
+   under an echo naming only the ledger, so a stranded `.owner` was printed and read
+   past — and a stranded `.owner` is the state that arms the guard hook for the whole
+   machine while granting nobody anything, which is check 3b's "no sidecar" symptom
+   reached from the mirror image. Scoped to `$CALLER_SLOT` it also stops reporting
+   other runs' live ledgers as this run's leftovers. The trailing `:` keeps the loop's
+   exit status at 0 so that the clean case does not surface as a failed `Bash` call.
 
    The second line removes **this run's** scratch directory and nothing else — the
    throwaway repo, the ledger fixtures, the deaf watcher's ledger, and check 3's
