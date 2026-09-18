@@ -8,9 +8,10 @@ argument-hint: '[major|minor|patch|X.Y.Z] [--codename "<name>"]'
 
 Cut a release of this marketplace: bump → commit → PR → (ask) merge → refresh local installs.
 
-This asks for approval **twice**, and the two are never merged into one: once at the
-diff, before anything is committed, and again at the open PR, before it is merged.
-A yes to the first is not a yes to the second.
+This asks for approval **three times**, and no two of them are ever merged into one:
+at the diff, before anything is committed; at the scope of the branch, before it is
+pushed and a PR is opened; and at the open PR, before it is merged. A yes to one is
+never a yes to the next.
 
 ## Why the bump is load-bearing
 
@@ -169,10 +170,14 @@ git diff
 
 Print it in full, then ask once:
 
-> Release v`X.Y.Z` "Codename" — apply, commit, and open a PR? (y/n)
+> Release v`X.Y.Z` "Codename" — apply and commit? (y/n)
 
 Anything other than `y`/`yes` aborts. Leave the working tree exactly as it is on
 abort — the user may want to hand-edit the CHANGELOG prose and re-run.
+
+This yes reaches step 5's commit and stops there. It does not authorise a push and it
+does not authorise a pull request: step 6 asks for those on its own, and step 7's
+merge is a question again after that.
 
 ## 5. Commit
 
@@ -227,6 +232,30 @@ rather than bypassing with `--no-verify`.
 
 ## 6. Push and open the PR
 
+**The PR is not the diff step 4 showed.** Step 4 showed only the release rewrite —
+the handful of Release Files — and its yes reached the commit and stopped there. This
+PR carries the whole `$LAST..HEAD` window, every feature commit on the branch. Those
+are different by an order of magnitude, so measure the real scope before asking:
+
+```bash
+git --no-pager diff --stat main...HEAD          # <F>, the real scope as a stat
+git rev-list --count main..HEAD                 # <N>, the commits it would carry
+```
+
+The three-dot `main...HEAD` is deliberate: it diffs against the merge base, which is
+what the PR actually contains, where `main..HEAD` would mislead the moment `main`
+moves.
+
+Then ask — this is a **second** approval, this step's own, and the only one that
+reaches the push and the pull request:
+
+> Push `<branch>` and open a PR against `main`? It carries `<N>` commits / `<F>` files
+> changed, not just the version bump approved in step 4. (y/n)
+
+Anything other than `y`/`yes` stops here, cleanly: the release commit stays on the
+local branch, nothing is pushed, and no PR exists. Re-running step 6 later is the
+whole remedy. Only on an explicit yes:
+
 ```bash
 git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
 gh pr create --base main \
@@ -238,23 +267,18 @@ gh pr create --base main \
 default branch, which is right here and silently wrong on any repo whose default is
 not the release target.
 
-**The PR is not the diff you just showed.** Step 4 showed only the release rewrite —
-the handful of Release Files. This PR carries the whole `$LAST..HEAD` window, every
-feature commit on the branch. Those are different by an order of magnitude, and the
-approval below is the one that actually ships them, so show the real scope first:
+Read the PR back now that it exists:
 
 ```bash
-git --no-pager diff --stat main...HEAD          # the real scope, as a stat
 gh pr view --json commits,files --jq '"commits=\(.commits|length) files=\(.files|length)"'
 ```
 
 **Not `gh pr diff --stat`** — `gh pr diff` has no `--stat`; it takes `--patch`,
 `--name-only`, `--color` and `--exclude`, and passing `--stat` prints its help text
-instead of failing, so the step looks like it ran and shows you nothing. The
-three-dot `main...HEAD` is deliberate: it diffs against the merge base, which is what
-the PR actually contains, where `main..HEAD` would mislead the moment `main` moves.
+instead of failing, so the step looks like it ran and shows you nothing.
 
-Then ask, separately — this is a **second** approval, never folded into step 4's:
+Then ask, separately again — a **third** approval, and the only one that reaches
+step 7's merge:
 
 > PR is open: `<url>`.
 > It merges `<N>` commits / `<F>` files changed — not just the version bump you approved.
@@ -263,7 +287,7 @@ Then ask, separately — this is a **second** approval, never folded into step 4
 Treat **no answer** exactly as `n`: stop and report the state below. Never merge on
 silence, a timeout, or a background event — only on an explicit yes from the user.
 
-### If the answer is no
+### If the merge answer is no
 
 Stop, and say plainly what state the repo is in — this is the one point with no clean
 abort, and the next run will misbehave if it is treated as a fresh start:
@@ -428,8 +452,9 @@ was written down.
 
 ## Rules
 
-- One approval for the content (step 4), a second for the merge (step 6). Never one
-  for both.
+- One approval per act, never one for two: the content in step 4 (apply and commit),
+  the push and the pull request in step 6, the merge in step 7. Step 4's yes reaches
+  the commit and stops there.
 - Read the file list from `CLAUDE.md`; never hard-code it in this skill.
 - Never `git add -A`, never `--no-verify`, never force-push.
 - If any step fails, stop and report where — a half-applied release is worse than a
